@@ -1,7 +1,12 @@
-# Plan: OpenRouter as a provider + free model choice
+# Plan: replace Cloudflare with OpenRouter as the model provider
 
 Written by the ops agent, 2026-09-19, after reading the codebase and commit history. Nothing in
 this doc has been implemented yet — this is the plan for review before any code changes.
+
+**Scope decided by Sina, 2026-09-19: full replacement, not additive.** Cloudflare goes away as
+the model provider; OpenRouter becomes the only one. The provider is not user-choosable — "the
+provider war has already won" — but the *model* stays fully user-choosable, since that market
+isn't settled. Earlier draft of this doc asked A-vs-B; this revision reflects the answer.
 
 ## What this repo is today
 
@@ -33,28 +38,60 @@ defaults, no real model picker, no per-model pricing, and no cost tracking — a
 experience than what Cloudflare users get today. It's still useful as a reference for the request
 plumbing, and for local/offline testing against a mock endpoint.
 
-## Scope decision I need from you before I start building
+## Three separate things currently wear the Cloudflare name — only one is in scope
 
-Two different sizes of project are hiding inside "migrate the provider":
+Reading further, "Cloudflare" in this codebase is actually three unrelated roles wearing one
+name. Worth being precise about which one this plan touches, because conflating them would blow
+the scope far past what was asked for:
 
-**A — Add OpenRouter as a provider option, Cloudflare stays.** Users pick a provider at
-onboarding (or later via a command); everyone who already has Cloudflare set up keeps working
-exactly as today. Additive, non-breaking, no rename required to ship it. This is what the rest of
-this plan builds.
+1. **Model provider + billing** (`src/models/registry.ts` routing, Workers AI, the CF model
+   catalog, AI Gateway Universal Endpoint, Unified Billing/BYOK, `src/cloud/{ai-gateway-api,
+   billing}.ts`) — **this is what's being replaced.**
+2. **Account/OAuth onboarding** ("Log in with Cloudflare", `src/cloud/{cloudflare-oauth,auth,
+   availability,report}.ts`, ~1,350 lines) — tied to #1, goes away with it.
+3. **Remote execution hosting substrate** (`src/remote/deploy-commute.ts`, the `/multi-agent`
+   "Commute" feature) — deploys a per-user Cloudflare Worker + sandbox container so the agent can
+   run remotely instead of on the user's machine. This is a *hosting* concern, not a *model
+   provider* concern — it's arguably the existing embryo of the "lift it in the cloud" headless
+   future, not something this plan touches. Also `feedback-worker/` (a small Worker collecting
+   in-app feedback) — unrelated to model provider, left alone.
 
-**B — Replace Cloudflare as the primary/only provider.** Touches the OAuth login flow, the
-Unified Billing messaging throughout the README and onboarding copy, `feedback-worker` and any
-other Cloudflare Pages/Workers infra, and is a breaking change for existing installs. Given the
-project is also being renamed to `autopilot`, this might be the actual destination — but it's a
-materially bigger job (weeks, not days) and touches branding/docs/marketing surfaces (the demos,
-the docs site) beyond code, not just `src/`.
+**This plan replaces #1 and #2. #3 and `feedback-worker` are explicitly out of scope** unless you
+say otherwise — flag it if the headless-first direction means Commute's design should change too;
+that reads as a separate, later conversation.
 
-**My recommendation:** build A first regardless of the eventual answer — B needs A's transport and
-model-catalog work as a foundation anyway, and A alone already delivers what you described (any
-OpenRouter model, chosen freely). Decide B once A is real and you've used it. Flag in your review
-if you actually want B started now instead.
+## One decision this doesn't resolve on its own: who holds the OpenRouter key
 
-## Plan (scope A)
+"The provider war is won" settles *which* provider. It doesn't settle *whose account pays* —
+and that's the same bring-your-own-vs-hosted shape of question as the email-interface
+brainstorm from your earlier message, not a detail:
+
+- **Bring-your-own key** (each user pastes their own OpenRouter key): closest to how this app
+  works today (users bring their own Cloudflare account), smallest change, no cost or abuse
+  exposure to you.
+- **You hold the key** (a shared/managed OpenRouter key, users pay you or a free tier): matches
+  "don't distract the user with choosing a provider" all the way — no key to paste either — and
+  fits a hosted/headless future better, but makes you the payer and the one who deals with abuse,
+  rate limits, and per-user cost attribution.
+
+  Checked the code rather than guess: this already exists, fully built, currently switched off.
+  `src/cloud/` is a complete **"KimiFlare Cloud" managed service** — device-code sign-in against
+  your own `api.kimiflare.com` backend, a free-token grant (5M tokens/user, 100-user cap, 500M
+  global cap — reads like a launch-campaign design), and Stripe billing (checkout, portal,
+  subscription status). It's gated off by one flag, `CLOUD_MODE_ENABLED = false` in
+  `src/cloud/availability.ts`, with a comment explaining it was deliberately hidden and the app
+  made BYOK-only "for now." Today, when it's on, that backend presumably calls Cloudflare Workers
+  AI under the hood on your account. **If the answer is "hosted key," this is very likely the
+  right place to build it** — repoint the backend to call OpenRouter with your key instead of
+  Cloudflare, flip the flag, and the device-auth/free-tier/billing plumbing is already there. That
+  work happens in whatever repo runs `api.kimiflare.com` (not visible from this checkout) — flag
+  if that's a separate codebase I'd need access to.
+
+I built the plan below assuming bring-your-own (it's the smaller, reversible choice, and doesn't
+foreclose adding a hosted mode on top later), but this is genuinely your call, not an engineering
+detail — say the word if it's actually hosted-key from day one.
+
+## Plan
 
 ### 1. First-class OpenRouter route (not the custom-endpoint escape hatch)
 
@@ -96,15 +133,16 @@ does for Cloudflare's AI Gateway logs. Plan to reuse that UX pattern (`/cost`, t
 estimate-then-confirm) rather than inventing a new one, so this feels like the same product rather
 than a bolted-on second system.
 
-### 4. Onboarding
+### 4. Onboarding — replace, not fork
 
-Today's wizard is Cloudflare-OAuth-first with no early exit. Needs a fork near the start:
-"Connect Cloudflare" vs "Use OpenRouter." OpenRouter's own keys (`sk-or-...`) are plain bearer
-tokens with no account-id/OAuth dance required, so a paste-your-key step is a complete, honest MVP
-here — meaningfully simpler than the Cloudflare flow it sits next to, so this half of the work is
-smaller than it might sound. (OpenRouter does also support a PKCE-style OAuth key-provisioning
-flow if a "no key copy-paste at all" experience is wanted later, matching the polish level of
-today's Cloudflare login — worth a fast-follow, not blocking the first ship.)
+Today's wizard (`src/ui/onboarding.tsx`, ~1,040 lines) is entirely Cloudflare OAuth/token setup.
+With Cloudflare gone as a concept, this becomes a single, much shorter flow: paste an OpenRouter
+key (`sk-or-...`, a plain bearer token — no account-id/OAuth dance, no gateway provisioning step),
+done. If the "who holds the key" decision above comes back as hosted-key, this step disappears
+entirely — literally nothing to configure, which is the cleanest version of "don't distract the
+user with the provider." (OpenRouter does support a PKCE-style OAuth key-provisioning flow for a
+no-copy-paste experience if bring-your-own is the answer and that polish is wanted — fast-follow,
+not blocking the first ship.)
 
 ### 5. Testing — the part you specifically flagged
 
@@ -127,22 +165,32 @@ looks like, without any test failing. Concretely:
 
 ### Sequencing
 
-1. This plan doc (this PR) — your review first, before any code.
-2. Registry + routing (§1, §2) — the transport and model list, no UI yet; testable headless via
-   the SDK / RPC mode that already exists.
-3. Onboarding fork (§4).
-4. Cost tracking (§3).
-5. Tests throughout, not bolted on at the end (§5).
+Kept incremental despite the bigger overall scope — each step its own branch and PR, so review
+stays small per step rather than one large diff landing at once:
 
-Each of 2–5 as its own branch and PR, in that order, so review stays small per step rather than one
-large diff.
+1. This plan doc (this PR) — your review.
+2. OpenRouter registry + routing (§1, §2), **added alongside** the existing Cloudflare paths —
+   the new route exists and is fully testable (headless via the SDK/RPC mode that already exists)
+   before anything Cloudflare-shaped is removed. Lower risk: if something's wrong, main still
+   works exactly as today throughout this step.
+3. Onboarding rewrite (§4) — the OpenRouter-only flow ships, gated so it's easy to flip which
+   path is default while both still exist in the code.
+4. Cost tracking (§3) moves to OpenRouter's generation-cost API.
+5. **Removal pass**: delete `src/cloud/{cloudflare-oauth,ai-gateway-api,billing,auth,
+   availability,report}.ts` and their tests, the Workers-AI/cf-catalog/gateway branches in
+   `buildKimiRequestTarget`, Unified Billing/BYOK-alias logic, `cf-aig-*` headers, and rewrite the
+   README (hero copy, badges, logo, Quick Start) off the Cloudflare pitch. This is the step that
+   actually breaks existing Cloudflare-configured installs, so it's last and deliberate, not a
+   side effect of an earlier step.
+6. Tests throughout (§5), not bolted on at the end — each of 2–5 ships with its own tests.
 
 ## Open questions for you
 
-1. Scope A vs B (above) — confirm A first, or you want B started now?
+1. Who holds the OpenRouter key — bring-your-own or hosted (see above)? Changes §4 materially.
 2. Keep the `kimiflare` name for the npm package for now, or is the rename to `autopilot`
-   happening in parallel with this work? (Affects whether I touch `package.json`'s `name`/`bin`/
-   repo URLs as part of this, or leave that for a separate rename PR mirroring
-   `CAMOUFLAGE_MIGRATION.md`'s playbook.)
-3. Should the existing Cloudflare-only users see anything change in this phase, or should this be
-   fully invisible to them until they explicitly opt into OpenRouter?
+   happening in parallel with this work? (Affects whether step 5 also touches `package.json`'s
+   `name`/`bin`/repo URLs, or that's a separate rename PR mirroring `CAMOUFLAGE_MIGRATION.md`'s
+   playbook.)
+3. Confirm `/multi-agent` Commute (per-user Cloudflare Worker remote execution) and
+   `feedback-worker` are out of scope here, as read above — or is the headless-first direction
+   meant to reshape those too, as a separate piece of work?
