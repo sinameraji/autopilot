@@ -60,36 +60,26 @@ the scope far past what was asked for:
 say otherwise — flag it if the headless-first direction means Commute's design should change too;
 that reads as a separate, later conversation.
 
-## One decision this doesn't resolve on its own: who holds the OpenRouter key
+## Who holds the OpenRouter key — decided: bring-your-own
 
-"The provider war is won" settles *which* provider. It doesn't settle *whose account pays* —
-and that's the same bring-your-own-vs-hosted shape of question as the email-interface
-brainstorm from your earlier message, not a detail:
+Sina, 2026-09-19: "I don't wanna use the managed service... people will bring their own OpenRouter
+key. I don't wanna pay for other people's stuff." Settled — no hosted mode in this plan. Each user
+supplies their own OpenRouter key; onboarding (§4) is a single key-paste step, nothing more.
 
-- **Bring-your-own key** (each user pastes their own OpenRouter key): closest to how this app
-  works today (users bring their own Cloudflare account), smallest change, no cost or abuse
-  exposure to you.
-- **You hold the key** (a shared/managed OpenRouter key, users pay you or a free tier): matches
-  "don't distract the user with choosing a provider" all the way — no key to paste either — and
-  fits a hosted/headless future better, but makes you the payer and the one who deals with abuse,
-  rate limits, and per-user cost attribution.
+For the record, since it took reading the code to find: `src/cloud/` already contains a complete,
+currently-disabled hosted service ("KimiFlare Cloud" — device-code sign-in, a free-token grant,
+Stripe billing, all against a backend at `api.kimiflare.com`, gated off by one flag,
+`CLOUD_MODE_ENABLED = false`). Not used here, not being built on — noted only so it isn't
+rediscovered and re-proposed later without this context. That backend also lives outside this
+checkout, in a separate repo.
 
-  Checked the code rather than guess: this already exists, fully built, currently switched off.
-  `src/cloud/` is a complete **"KimiFlare Cloud" managed service** — device-code sign-in against
-  your own `api.kimiflare.com` backend, a free-token grant (5M tokens/user, 100-user cap, 500M
-  global cap — reads like a launch-campaign design), and Stripe billing (checkout, portal,
-  subscription status). It's gated off by one flag, `CLOUD_MODE_ENABLED = false` in
-  `src/cloud/availability.ts`, with a comment explaining it was deliberately hidden and the app
-  made BYOK-only "for now." Today, when it's on, that backend presumably calls Cloudflare Workers
-  AI under the hood on your account. **If the answer is "hosted key," this is very likely the
-  right place to build it** — repoint the backend to call OpenRouter with your key instead of
-  Cloudflare, flip the flag, and the device-auth/free-tier/billing plumbing is already there. That
-  work happens in whatever repo runs `api.kimiflare.com` (not visible from this checkout) — flag
-  if that's a separate codebase I'd need access to.
-
-I built the plan below assuming bring-your-own (it's the smaller, reversible choice, and doesn't
-foreclose adding a hosted mode on top later), but this is genuinely your call, not an engineering
-detail — say the word if it's actually hosted-key from day one.
+**Headless configuration.** Since users bring their own key and the direction is toward
+non-interactive/headless use (a VM running this unattended, driven by email or an API rather than
+someone sitting at the TUI), the key needs a path in *besides* the interactive onboarding wizard —
+an env var (`OPENROUTER_API_KEY`, matching how `KIMIFLARE_BASE_URL`/`KIMIFLARE_API_KEY` already
+work as env-var overrides for headless/host-app use) and a config-file field, both checked before
+falling back to the interactive prompt. This is what makes "no human ever touches this onboarding
+screen" possible for a cloud-hosted instance.
 
 ## Plan
 
@@ -138,11 +128,10 @@ than a bolted-on second system.
 Today's wizard (`src/ui/onboarding.tsx`, ~1,040 lines) is entirely Cloudflare OAuth/token setup.
 With Cloudflare gone as a concept, this becomes a single, much shorter flow: paste an OpenRouter
 key (`sk-or-...`, a plain bearer token — no account-id/OAuth dance, no gateway provisioning step),
-done. If the "who holds the key" decision above comes back as hosted-key, this step disappears
-entirely — literally nothing to configure, which is the cleanest version of "don't distract the
-user with the provider." (OpenRouter does support a PKCE-style OAuth key-provisioning flow for a
-no-copy-paste experience if bring-your-own is the answer and that polish is wanted — fast-follow,
-not blocking the first ship.)
+done — same TUI screen, checked against `OPENROUTER_API_KEY`/config first so the screen is simply
+skipped when a headless instance already has a key configured (see above). OpenRouter does support
+a PKCE-style OAuth key-provisioning flow for a no-copy-paste experience — fast-follow polish, not
+blocking the first ship.
 
 ### 5. Testing — the part you specifically flagged
 
@@ -186,11 +175,25 @@ stays small per step rather than one large diff landing at once:
 
 ## Open questions for you
 
-1. Who holds the OpenRouter key — bring-your-own or hosted (see above)? Changes §4 materially.
-2. Keep the `kimiflare` name for the npm package for now, or is the rename to `autopilot`
+1. Keep the `kimiflare` name for the npm package for now, or is the rename to `autopilot`
    happening in parallel with this work? (Affects whether step 5 also touches `package.json`'s
    `name`/`bin`/repo URLs, or that's a separate rename PR mirroring `CAMOUFLAGE_MIGRATION.md`'s
    playbook.)
-3. Confirm `/multi-agent` Commute (per-user Cloudflare Worker remote execution) and
-   `feedback-worker` are out of scope here, as read above — or is the headless-first direction
-   meant to reshape those too, as a separate piece of work?
+2. `/multi-agent` Commute (per-user Cloudflare Worker remote execution) — Sina is sending over
+   the `kimiflare-commute` repo separately to evaluate for the headless-hosted direction below;
+   staying out of scope for *this* plan either way, revisit once that repo's in hand.
+
+## Where this is headed (context, not scope for this plan)
+
+Sina described the eventual target state: after these provider PRs land, a persistent cloud
+instance of this harness (a GCP VM to start), fed prompts by email — send mail to a dedicated
+address, it becomes a prompt into the running instance, the reply comes back by mail. Whether that
+instance runs the TUI or a headless mode is left to whoever builds it. Noted here because it's
+exactly the shape of the mail-poller/send-mail pattern already running the ops channel this plan
+itself was written through — that's a working, proven reference for the "email in, agent output,
+email out" half of it when that work starts. A further-out idea layered on top: the harness
+eventually being able to build and deploy artifacts itself (e.g. a generated webpage shipped to
+the user's own Cloudflare Workers/Pages) — flagged by Sina as "later," including the open problem
+of handing over Cloudflare access safely through an email-only channel (the same class of problem
+this plan's deploy-key approach solves for GitHub push access). Not part of this PR; recorded so
+the provider work doesn't quietly foreclose it.
