@@ -155,13 +155,20 @@ export interface KimiConfig {
    * effect. Kept in the type so existing configs do not break on load.
    */
   uiEngine?: "ink" | "camouflage";
-  /** Per-provider API keys forwarded to AI Gateway as cf-aig-authorization for BYOK. */
+  /**
+   * Per-provider API keys. For anthropic/openai/google/moonshotai/openai-compatible
+   * these are forwarded to AI Gateway as cf-aig-authorization for BYOK. `openrouter`
+   * is different: it's sent directly to openrouter.ai as a normal Authorization
+   * bearer — OpenRouter is never routed through Cloudflare at all (see `routeFor()`
+   * in models/registry.ts).
+   */
   providerKeys?: {
     anthropic?: string;
     openai?: string;
     google?: string;
     moonshotai?: string;
     "openai-compatible"?: string;
+    openrouter?: string;
   };
   /** When true, models marked billingMode="unified" use Cloudflare's Unified Billing (no BYOK header). */
   unifiedBilling?: boolean;
@@ -291,20 +298,36 @@ function readNumberEnv(name: string): number | undefined {
 }
 
 function readProviderKeysEnv():
-  | { anthropic?: string; openai?: string; google?: string; moonshotai?: string; "openai-compatible"?: string }
+  | {
+      anthropic?: string;
+      openai?: string;
+      google?: string;
+      moonshotai?: string;
+      "openai-compatible"?: string;
+      openrouter?: string;
+    }
   | undefined {
   const anthropic = process.env.ANTHROPIC_API_KEY || process.env.KIMIFLARE_ANTHROPIC_KEY;
   const openai = process.env.OPENAI_API_KEY || process.env.KIMIFLARE_OPENAI_KEY;
   const google = process.env.GOOGLE_API_KEY || process.env.KIMIFLARE_GOOGLE_KEY;
   const moonshotai = process.env.MOONSHOT_API_KEY || process.env.KIMIFLARE_MOONSHOT_KEY;
   const generic = process.env.KIMIFLARE_OPENAI_COMPAT_KEY;
-  if (!anthropic && !openai && !google && !moonshotai && !generic) return undefined;
-  const out: { anthropic?: string; openai?: string; google?: string; moonshotai?: string; "openai-compatible"?: string } = {};
+  const openrouter = process.env.OPENROUTER_API_KEY || process.env.KIMIFLARE_OPENROUTER_KEY;
+  if (!anthropic && !openai && !google && !moonshotai && !generic && !openrouter) return undefined;
+  const out: {
+    anthropic?: string;
+    openai?: string;
+    google?: string;
+    moonshotai?: string;
+    "openai-compatible"?: string;
+    openrouter?: string;
+  } = {};
   if (anthropic) out.anthropic = anthropic;
   if (openai) out.openai = openai;
   if (google) out.google = google;
   if (moonshotai) out.moonshotai = moonshotai;
   if (generic) out["openai-compatible"] = generic;
+  if (openrouter) out.openrouter = openrouter;
   return out;
 }
 

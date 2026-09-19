@@ -13,6 +13,7 @@ const PROVIDER_NAME: Record<ModelProvider, string> = {
   openai: "OpenAI",
   google: "Google AI Studio",
   "openai-compatible": "your provider",
+  openrouter: "OpenRouter",
 };
 
 interface Props {

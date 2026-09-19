@@ -18,6 +18,7 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert";
 import { runKimi, type KimiEvent } from "./client.js";
+import { registerOpenRouterModels } from "../models/registry.js";
 
 function sse(...lines: string[]): string {
   return lines.map((l) => `data: ${l}`).join("\n\n") + "\n\n";
@@ -306,5 +307,130 @@ describe("runKimi: Workers AI plumbing routes through gateway when configured", 
     // Plumbing tags ride along via cf-aig-metadata so the dashboard can filter.
     const meta = lastRequest!.headers.get("cf-aig-metadata");
     assert.ok(meta && meta.includes("extraction"));
+  });
+});
+
+describe("runKimi: OpenRouter routing (never Cloudflare)", () => {
+  let originalFetch: typeof globalThis.fetch;
+  let lastRequest: Request | null = null;
+
+  before(() => {
+    originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      lastRequest = new Request(input, init);
+      return new Response("data: [DONE]\n\n", {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    };
+    // OpenRouter model ids share the "vendor/model" shape Cloudflare's gateway
+    // path also uses (e.g. "anthropic/..."), so — just like in the real app,
+    // where a model only becomes selectable once it comes from the fetched
+    // OpenRouter catalog — these ids must be registered as openrouter-provider
+    // entries first. Without this, getModelOrInfer()'s generic id-prefix guess
+    // would misroute them to Cloudflare's AI Gateway instead.
+    registerOpenRouterModels([
+      {
+        id: "anthropic/claude-sonnet-4-6",
+        provider: "openrouter",
+        contextWindow: 200_000,
+        maxOutputTokens: 8_192,
+        pricing: { inputPerMtok: 3, outputPerMtok: 15 },
+        supports: { tools: true, reasoning: true, streaming: true },
+        billingMode: "byok",
+      },
+      {
+        id: "deepseek/deepseek-r1:free",
+        provider: "openrouter",
+        contextWindow: 64_000,
+        maxOutputTokens: 8_192,
+        pricing: { inputPerMtok: 0, outputPerMtok: 0 },
+        supports: { tools: false, reasoning: true, streaming: true },
+        billingMode: "byok",
+      },
+    ]);
+  });
+  after(() => {
+    globalThis.fetch = originalFetch;
+    registerOpenRouterModels([]); // don't leak into other test files
+  });
+  beforeEach(() => {
+    lastRequest = null;
+  });
+
+  const baseOpts = {
+    accountId: "acct",
+    apiToken: "cf-token",
+    model: "anthropic/claude-sonnet-4-6",
+    messages: [{ role: "user" as const, content: "hi" }],
+  };
+
+  it("goes straight to openrouter.ai with a plain bearer, no account id, no gateway required", async () => {
+    for await (const _ of runKimi({
+      ...baseOpts,
+      providerKeys: { openrouter: "sk-or-test" },
+    })) {
+      /* drain */
+    }
+    assert.ok(lastRequest);
+    assert.strictEqual(lastRequest!.url, "https://openrouter.ai/api/v1/chat/completions");
+    assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer sk-or-test");
+    assert.strictEqual(lastRequest!.headers.get("cf-aig-authorization"), null);
+    assert.strictEqual(lastRequest!.headers.get("cf-aig-byok-alias"), null);
+    assert.strictEqual(lastRequest!.headers.get("cf-aig-gateway-id"), null);
+    const body = JSON.parse(await lastRequest!.text()) as Record<string, unknown>;
+    // Model id passes through unchanged — no workers-ai/ prefix, no account routing.
+    assert.strictEqual(body.model, "anthropic/claude-sonnet-4-6");
+    assert.deepStrictEqual(body.stream_options, { include_usage: true });
+  });
+
+  it("sends OpenRouter's attribution headers", async () => {
+    for await (const _ of runKimi({ ...baseOpts, providerKeys: { openrouter: "sk-or-test" } })) {
+      /* drain */
+    }
+    assert.strictEqual(lastRequest!.headers.get("HTTP-Referer"), "https://kimiflare.com");
+    assert.strictEqual(lastRequest!.headers.get("X-Title"), "kimiflare");
+  });
+
+  it("works with no gateway configured at all — OpenRouter never needs one", async () => {
+    for await (const _ of runKimi({
+      ...baseOpts,
+      providerKeys: { openrouter: "sk-or-test" },
+      gateway: undefined,
+    })) {
+      /* drain */
+    }
+    assert.strictEqual(lastRequest!.url, "https://openrouter.ai/api/v1/chat/completions");
+  });
+
+  it("throws a clear, actionable error when no OpenRouter key is configured", async () => {
+    await assert.rejects(
+      async () => {
+        for await (const _ of runKimi({ ...baseOpts, providerKeys: {} })) {
+          /* drain */
+        }
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /OpenRouter API key/);
+        assert.match(err.message, /\/keys set openrouter/);
+        return true;
+      },
+    );
+    // No request should have been attempted.
+    assert.strictEqual(lastRequest, null);
+  });
+
+  it("accepts OpenRouter's colon-suffixed free/nitro model id variants", async () => {
+    for await (const _ of runKimi({
+      ...baseOpts,
+      model: "deepseek/deepseek-r1:free",
+      providerKeys: { openrouter: "sk-or-test" },
+    })) {
+      /* drain */
+    }
+    assert.ok(lastRequest);
+    const body = JSON.parse(await lastRequest!.text()) as Record<string, unknown>;
+    assert.strictEqual(body.model, "deepseek/deepseek-r1:free");
   });
 });

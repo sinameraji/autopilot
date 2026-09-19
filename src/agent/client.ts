@@ -374,9 +374,11 @@ export function validateModelId(model: string): void {
   if (!model) throw new KimiApiError(`Invalid model ID: ${model}`, 400);
   // Workers AI catalog form: @ns/name or @ns/name/version
   if (/^@[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)*$/.test(model)) return;
-  // Provider-prefixed form: <provider>/<model-id> — no leading @, exactly one path segment after provider.
-  // Provider must be alnum/-/_; model id may contain ./-/_ but no slashes or whitespace.
-  if (/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+$/.test(model)) return;
+  // Provider-prefixed form: <provider>/<model-id>[:variant] — no leading @, exactly one path
+  // segment after provider. Provider must be alnum/-/_; model id may contain ./-/_ but no
+  // slashes or whitespace. The optional `:variant` suffix covers OpenRouter's free/nitro/
+  // floor variants (e.g. "deepseek/deepseek-r1:free").
+  if (/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+(:[a-zA-Z0-9._-]+)?$/.test(model)) return;
   throw new KimiApiError(`Invalid model ID: ${model}`, 400);
 }
 
@@ -465,6 +467,35 @@ function buildKimiRequestTarget(
         opts.accountId,
       )}/ai/v1/chat/completions`,
       headers,
+    };
+  }
+
+  // OpenRouter models: never Cloudflare at all — direct to openrouter.ai with the
+  // user's own OpenRouter key as a plain bearer. No account id, no cf-aig-* headers,
+  // no gateway required, no Unified Billing (OpenRouter has no such concept — it's
+  // BYOK only, per Sina's decision to keep this bring-your-own-key).
+  if (routeFor(entry) === "openrouter") {
+    const key = opts.providerKeys?.openrouter;
+    if (!key) {
+      throw new KimiApiError(
+        [
+          `kimiflare: ${opts.model} requires an OpenRouter API key.`,
+          ``,
+          `To fix: run  /keys set openrouter <your-key>  (get one at https://openrouter.ai/keys).`,
+        ].join("\n"),
+        undefined,
+        401,
+      );
+    }
+    return {
+      url: "https://openrouter.ai/api/v1/chat/completions",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        // OpenRouter's attribution headers — optional, but this is how a project
+        // shows up in its public rankings; cheap to send.
+        "HTTP-Referer": "https://kimiflare.com",
+        "X-Title": "kimiflare",
+      },
     };
   }
 

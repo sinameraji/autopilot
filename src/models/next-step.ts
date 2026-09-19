@@ -14,7 +14,7 @@ export type NextStep =
  *   needs-gateway  — non-Workers-AI model but no aiGatewayId configured.
  *   billing-choice — provider supports Unified Billing AND we don't have a key or unified-on yet.
  *                    User picks: pay-via-CF-credits OR paste-own-key.
- *   needs-key      — BYOK-only provider (e.g. DeepSeek) with no stored key/alias.
+ *   needs-key      — BYOK-only provider (e.g. DeepSeek, or OpenRouter) with no stored key.
  */
 export function decideNextStep(cfg: KimiConfig | null, model: ModelEntry): NextStep {
   if (model.provider === "workers-ai") return { kind: "ready" };
@@ -23,6 +23,13 @@ export function decideNextStep(cfg: KimiConfig | null, model: ModelEntry): NextS
   // provider key, and a gateway is optional (Cloudflare uses/creates
   // "default" when none is set).
   if (routeFor(model) === "cf-catalog") return { kind: "ready" };
+  // OpenRouter never goes through Cloudflare at all — no AI Gateway involved,
+  // so it must not fall into the needs-gateway branch below. It's plain BYOK:
+  // ready once a key is stored, needs-key otherwise. No Unified Billing or
+  // Secrets Store alias concept applies (those are Cloudflare-only).
+  if (routeFor(model) === "openrouter") {
+    return cfg?.providerKeys?.openrouter ? { kind: "ready" } : { kind: "needs-key" };
+  }
   if (!cfg) return { kind: "ready" };
   if (!cfg.aiGatewayId) return { kind: "needs-gateway" };
 

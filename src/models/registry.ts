@@ -36,7 +36,8 @@ export type ModelProvider =
   | "openai"
   | "google"
   | "moonshotai"
-  | "openai-compatible";
+  | "openai-compatible"
+  | "openrouter";
 
 export type BillingMode = "unified" | "byok";
 
@@ -93,22 +94,25 @@ const UNIFIED_BILLING_PROVIDERS: ReadonlySet<string> = new Set([
   "xai",
 ]);
 
-export type ModelRoute = "workers-ai" | "cf-catalog" | "gateway";
+export type ModelRoute = "workers-ai" | "cf-catalog" | "gateway" | "openrouter";
 
 /**
  * Which transport a model uses. Moonshot models are only reachable through
  * Cloudflare's model catalog (unified REST API + Unified Billing) — there is
- * no provider-native Moonshot slug on AI Gateway.
+ * no provider-native Moonshot slug on AI Gateway. OpenRouter models go direct
+ * to openrouter.ai — never through Cloudflare at all.
  */
 export function routeFor(entry: ModelEntry): ModelRoute {
   if (entry.provider === "workers-ai") return "workers-ai";
   if (entry.provider === "moonshotai") return "cf-catalog";
+  if (entry.provider === "openrouter") return "openrouter";
   return "gateway";
 }
 
 /** True when the user can pay for this model through Cloudflare credits rather than BYOK. */
 export function isUnifiedEligible(entry: ModelEntry): boolean {
   if (entry.provider === "workers-ai") return false; // own billing track
+  if (entry.provider === "openrouter") return false; // OpenRouter has no Cloudflare unified-billing concept
   if (routeFor(entry) === "cf-catalog") return true; // credits are the only option
   // For openai-compatible upstreams we key off the model-id prefix
   // (e.g. "groq/llama-3.3-70b-versatile" → "groq").
@@ -180,15 +184,24 @@ const SEED: ModelEntry[] = [
 
 const seedIndex = new Map<string, ModelEntry>(SEED.map((m) => [m.id, m]));
 let userOverrides: Map<string, ModelEntry> = new Map();
+/** Live OpenRouter catalog, populated by `registerOpenRouterModels()` (see openrouter-catalog.ts).
+ *  Empty until that's called — callers that need it must load it explicitly (e.g. at startup or
+ *  when the model picker opens); registry.ts itself does no network I/O. */
+let openRouterIndex: Map<string, ModelEntry> = new Map();
 
 /** Register or replace entries from a user-supplied config (e.g. ~/.kimiflare/models.json). */
 export function registerUserModels(entries: ModelEntry[]): void {
   userOverrides = new Map(entries.map((m) => [m.id, m]));
 }
 
+/** Register or replace the live OpenRouter catalog (see `loadOpenRouterCatalog()`). */
+export function registerOpenRouterModels(entries: ModelEntry[]): void {
+  openRouterIndex = new Map(entries.map((m) => [m.id, m]));
+}
+
 /** Look up a model by id. Returns undefined for unknown models. */
 export function getModel(id: string): ModelEntry | undefined {
-  return userOverrides.get(id) ?? seedIndex.get(id);
+  return userOverrides.get(id) ?? openRouterIndex.get(id) ?? seedIndex.get(id);
 }
 
 /** Look up a model, falling back to a generic entry inferred from the id prefix. */
@@ -220,6 +233,7 @@ export function inferProvider(id: string): ModelProvider {
 
 export function listModels(): ModelEntry[] {
   const out = new Map(seedIndex);
+  for (const [k, v] of openRouterIndex) out.set(k, v);
   for (const [k, v] of userOverrides) out.set(k, v);
   return [...out.values()];
 }

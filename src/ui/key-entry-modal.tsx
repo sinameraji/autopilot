@@ -51,6 +51,11 @@ const PROVIDER_INFO: Record<ModelProvider, { name: string; url: string; hint: st
     url: "your provider's dashboard",
     hint: "Paste the API key your provider issued.",
   },
+  openrouter: {
+    name: "OpenRouter",
+    url: "https://openrouter.ai/keys",
+    hint: "Create a key in Settings → Keys. Starts with `sk-or-`.",
+  },
 };
 
 function maskPreview(value: string): string {

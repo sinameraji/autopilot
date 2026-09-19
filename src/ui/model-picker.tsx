@@ -12,6 +12,7 @@ interface Props {
 }
 
 const PROVIDER_ORDER: ModelProvider[] = [
+  "openrouter",
   "workers-ai",
   "moonshotai",
   "anthropic",
@@ -27,6 +28,7 @@ const PROVIDER_LABEL: Record<ModelProvider, string> = {
   openai: "OpenAI",
   google: "Google",
   "openai-compatible": "Other (OpenAI-compatible)",
+  openrouter: "OpenRouter",
 };
 
 const PAGE_SIZE = 30;
