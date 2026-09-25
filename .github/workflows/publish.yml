@@ -1,8 +1,9 @@
-name: Publish to npm
+name: Publish to npm (manual fallback)
 
+# Normal releases publish from release-please.yml when a release PR is merged.
+# This is a manual fallback (Actions → Run workflow) for re-publishing the
+# version in package.json if that job failed; it skips if already on npm.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:
