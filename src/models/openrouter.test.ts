@@ -1,6 +1,12 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert";
-import { checkOpenRouterKey, looksLikeOpenRouterKey, openRouterUrl, openRouterHeaders } from "./openrouter.js";
+import {
+  checkOpenRouterKey,
+  looksLikeOpenRouterKey,
+  openRouterAlphaUrl,
+  openRouterUrl,
+  openRouterHeaders,
+} from "./openrouter.js";
 
 const savedBase = process.env.OPENROUTER_BASE_URL;
 afterEach(() => {
@@ -14,6 +20,15 @@ describe("openRouterUrl", () => {
     assert.strictEqual(openRouterUrl("models"), "https://openrouter.ai/api/v1/models");
     process.env.OPENROUTER_BASE_URL = "http://localhost:8788/api/v1/";
     assert.strictEqual(openRouterUrl("/key"), "http://localhost:8788/api/v1/key");
+  });
+});
+
+describe("openRouterAlphaUrl", () => {
+  it("targets the Alpha API root separately from the v1 API", () => {
+    delete process.env.OPENROUTER_BASE_URL;
+    assert.strictEqual(openRouterAlphaUrl("decisions"), "https://openrouter.ai/api/alpha/decisions");
+    process.env.OPENROUTER_BASE_URL = "http://localhost:8788/api/v1/";
+    assert.strictEqual(openRouterAlphaUrl("/decisions"), "http://localhost:8788/api/alpha/decisions");
   });
 });
 

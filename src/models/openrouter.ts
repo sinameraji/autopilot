@@ -21,6 +21,12 @@ export function openRouterUrl(path: string): string {
   return `${openRouterBaseUrl()}/${path.replace(/^\/+/, "")}`;
 }
 
+/** OpenRouter's Decisions API is currently under `/api/alpha`, not `/api/v1`. */
+export function openRouterAlphaUrl(path: string): string {
+  const apiRoot = openRouterBaseUrl().replace(/\/v1\/?$/, "");
+  return `${apiRoot}/alpha/${path.replace(/^\/+/, "")}`;
+}
+
 /**
  * Headers for an authenticated OpenRouter request. `HTTP-Referer` and
  * `X-Title` are OpenRouter's app-attribution headers — optional, but they're
