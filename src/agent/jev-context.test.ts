@@ -64,12 +64,14 @@ describe("buildJevContext", () => {
     assert.deepStrictEqual(context, []);
   });
 
-  it("makes the selected context visible in a receipt", () => {
+  it("keeps the default context receipt concise and supports an explicit full receipt", () => {
+    const context = [{ source: "package.json", content: '{"license":"MIT"}' }];
     assert.strictEqual(
-      formatJevContextReceipt([{ source: "package.json", content: '{"license":"MIT"}' }]),
-      'Context sent:\n  package.json: {"license":"MIT"}\nExternal sources: none (Jev did not browse the web).\nChat/project context is reference data, not verified fact.',
+      formatJevContextReceipt(context),
+      "Context: 1 item · package.json · local only, no web verification",
     );
-    assert.match(formatJevContextReceipt([]), /Context sent: none/);
+    assert.ok(formatJevContextReceipt(context, true).includes('package.json: {"license":"MIT"}'));
+    assert.match(formatJevContextReceipt([]), /Context: question only/);
   });
 
   it("redacts common secrets from selected chat excerpts", async () => {

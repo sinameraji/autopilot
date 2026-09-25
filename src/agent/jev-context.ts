@@ -155,10 +155,16 @@ export async function buildJevContext(
   return entries;
 }
 
-/** A receipt of the exact context values included in Jev's request state. */
-export function formatJevContextReceipt(entries: JevContextEntry[]): string {
+/** A concise receipt by default; opt in to displaying the exact sent excerpts. */
+export function formatJevContextReceipt(entries: JevContextEntry[], includeContent = false): string {
   if (entries.length === 0) {
-    return "Context sent: none. Jev received only the question; no chat, project files, tools, system prompt, or web sources.";
+    return includeContent
+      ? "Context sent: none. Jev received only the question; no chat, project files, tools, system prompt, or web sources."
+      : "Context: question only · no chat, project files, or web sources";
+  }
+  if (!includeContent) {
+    const sources = [...new Set(entries.map(({ source }) => source))];
+    return `Context: ${entries.length} item${entries.length === 1 ? "" : "s"} · ${sources.join(", ")} · local only, no web verification`;
   }
   return [
     "Context sent:",
