@@ -47,6 +47,8 @@ const CATEGORIES: Category[] = [
     key: "mode",
     label: "Mode",
     commands: [
+      { command: "/settings modes on", description: "turn plan/edit/auto modes on (off by default: always auto)" },
+      { command: "/settings modes off", description: "turn modes off (always auto)" },
       { command: "/mode edit", description: "switch to edit mode" },
       { command: "/mode plan", description: "switch to plan mode" },
       { command: "/mode auto", description: "switch to auto mode" },
@@ -137,6 +139,7 @@ const CATEGORIES: Category[] = [
     label: "Config",
     commands: [
       { command: "/init", description: "scan this repo and write a KIMI.md" },
+      { command: "/settings", description: "show feature settings" },
       { command: "/key", description: "show your OpenRouter key status and credit" },
       { command: "/key set <key>", description: "replace your OpenRouter key", selectable: false },
       { command: "/logout", description: "clear credentials" },

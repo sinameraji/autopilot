@@ -255,7 +255,14 @@ function App({
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [draftInput, setDraftInput] = useState("");
 
-  const [mode, setMode] = useState<Mode>("edit");
+  // Plan/edit/auto modes are behind a feature flag (cfg.modesEnabled, off by
+  // default): with it off every session runs in auto and the mode UI is hidden.
+  const modesEnabled = cfg?.modesEnabled === true;
+  const [mode, setMode] = useState<Mode>(initialCfg?.modesEnabled ? "edit" : "auto");
+  useEffect(() => {
+    // Toggling the flag from /settings: off → back to auto; on → start in edit.
+    setMode((m) => (modesEnabled ? (m === "auto" ? "edit" : m) : m === "multi-agent-experimental" ? m : "auto"));
+  }, [modesEnabled]);
   // Auto-open the /multi-agent settings modal the moment the user switches
   // into multi-agent mode without an endpoint configured. Same fallback
   // chain the supervisor uses (cfg.workerEndpoint, then cfg.remoteWorkerUrl).
@@ -463,8 +470,11 @@ function App({
         description: c.description ?? "",
         source: c.source,
       }));
-    return [...BUILTIN_COMMANDS, ...customs];
-  }, [customCommandsVersion]);
+    // Mode commands only appear in the picker when the modes flag is on.
+    const MODE_COMMANDS = new Set(["mode", "plan", "auto", "edit"]);
+    const builtins = modesEnabled ? BUILTIN_COMMANDS : BUILTIN_COMMANDS.filter((c) => !MODE_COMMANDS.has(c.name));
+    return [...builtins, ...customs];
+  }, [customCommandsVersion, modesEnabled]);
 
   // Preserves the pre-refactor asymmetry: the picker close-on-modal check
   // includes showInboxModal but EXCLUDES showRemoteDashboard and
@@ -907,7 +917,7 @@ function App({
       return;
     }
     if (key.shift && key.tab) {
-      setMode((m) => nextMode(m));
+      if (modesEnabled) setMode((m) => nextMode(m));
       return;
     }
     if (key.ctrl && inputChar === "o") {
@@ -2647,6 +2657,7 @@ function App({
               thinking={busy}
               turnStartedAt={turnStartedAt}
               mode={mode}
+              modesEnabled={modesEnabled}
               contextLimit={modelContextLimit}
               model={cfg.model}
               responseMeta={responseMeta}

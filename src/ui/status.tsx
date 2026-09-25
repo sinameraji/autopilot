@@ -18,6 +18,8 @@ interface Props {
   thinking: boolean;
   turnStartedAt: number | null;
   mode: Mode;
+  /** Plan/edit/auto modes feature flag; when off the mode badge and tip are hidden. */
+  modesEnabled?: boolean;
   contextLimit: number;
   /** Active model id (shown in status bar). */
   model?: string;
@@ -35,7 +37,7 @@ interface Props {
   intentTier?: IntentTier;
 }
 
-export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, contextLimit, model, responseMeta, codeMode, skillsActive, memoryRecalled, phase, currentTool, lastActivityAt, kimiMdStale, gitBranch, intentTier }: Props) {
+export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, modesEnabled = true, contextLimit, model, responseMeta, codeMode, skillsActive, memoryRecalled, phase, currentTool, lastActivityAt, kimiMdStale, gitBranch, intentTier }: Props) {
   const theme = useTheme();
   const [now, setNow] = useState(Date.now());
   const modeColor =
@@ -107,10 +109,14 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
   return (
     <Box flexDirection="column">
       <Box>
-        <Text color={modeColor} bold>
-          [{mode}]
-        </Text>
-        <Text> </Text>
+        {modesEnabled ? (
+          <>
+            <Text color={modeColor} bold>
+              [{mode}]
+            </Text>
+            <Text> </Text>
+          </>
+        ) : null}
         {thinking ? (
           <Text color={theme.spinner}>
             <Spinner type="dots2" />{" "}
@@ -145,7 +151,7 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
           ) : null}
         </Box>
       )}
-      {!thinking && (
+      {!thinking && modesEnabled && (
         <Box>
           <Text color={theme.muted?.color ?? theme.info.color} dimColor={theme.muted?.dim}>
             tip: shift+tab cycles mode

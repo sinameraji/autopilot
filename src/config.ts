@@ -75,6 +75,14 @@ export interface KimiConfig {
   accountId?: string;
   apiToken?: string;
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Feature flag for the plan / edit / auto permission modes. Off by default:
+   * every session runs in auto (tools run without per-call prompts) and the
+   * mode UI (Shift+Tab, /mode, /plan, /edit, /auto, the mode badge) is hidden.
+   * Turn on with `/settings modes on` to get the mode system back, starting
+   * in edit.
+   */
+  modesEnabled?: boolean;
   coauthor?: boolean;
   coauthorName?: string;
   coauthorEmail?: string;
@@ -312,6 +320,7 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     model: m(envModel ?? persisted.model) ?? DEFAULT_MODEL,
     openrouterProvider: persisted.openrouterProvider,
     reasoningEffort: envEffort ?? persisted.reasoningEffort,
+    modesEnabled: persisted.modesEnabled,
     coauthor: envCoauthor?.enabled ?? persisted.coauthor ?? true,
     coauthorName: envCoauthor?.name ?? persisted.coauthorName,
     coauthorEmail: envCoauthor?.email ?? persisted.coauthorEmail,

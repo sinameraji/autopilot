@@ -513,6 +513,49 @@ const handleModel: Handler = (ctx, rest, arg) => {
   return true;
 };
 
+/**
+ * /settings — feature toggles. `/settings` lists them; `/settings <name> on|off`
+ * flips one and persists it to the config file.
+ */
+const SETTINGS: Record<string, { key: "modesEnabled"; describe: string }> = {
+  modes: {
+    key: "modesEnabled",
+    describe: "plan / edit / auto permission modes (off: every turn runs in auto)",
+  },
+};
+
+const handleSettings: Handler = (ctx, rest) => {
+  const { cfg, setCfg, setEvents, mkKey } = ctx;
+  const info = (text: string) => setEvents((e) => [...e, { kind: "info", key: mkKey(), text }]);
+  if (!cfg) return true;
+  const name = rest[0]?.toLowerCase();
+  const value = rest[1]?.toLowerCase();
+  if (!name) {
+    const lines = ["settings (change with /settings <name> on|off):"];
+    for (const [n, s] of Object.entries(SETTINGS)) {
+      lines.push(`  ${n.padEnd(8)} ${cfg[s.key] ? "on " : "off"}  ${s.describe}`);
+    }
+    info(lines.join("\n"));
+    return true;
+  }
+  const setting = SETTINGS[name];
+  if (!setting || (value !== "on" && value !== "off")) {
+    info(`usage: /settings ${Object.keys(SETTINGS).join("|")} on|off`);
+    return true;
+  }
+  const on = value === "on";
+  setCfg((prev) => (prev ? { ...prev, [setting.key]: on } : prev));
+  void patchPersistedConfig({ [setting.key]: on }).catch(() => undefined);
+  if (setting.key === "modesEnabled") {
+    info(
+      on
+        ? "modes on — now in edit (prompts before mutating tools). Shift+Tab cycles edit → plan → auto; /mode switches directly."
+        : "modes off — every turn runs in auto.",
+    );
+  }
+  return true;
+};
+
 /** /key — show, replace or clear the OpenRouter API key. */
 const handleKey: Handler = async (ctx, rest) => {
   const { cfg, setCfg, setEvents, mkKey } = ctx;
@@ -577,7 +620,23 @@ const handleKey: Handler = async (ctx, rest) => {
   return true;
 };
 
+/** Plan/edit/auto modes are feature-flagged (cfg.modesEnabled, off by default).
+ *  Returns false — after telling the user how to turn them on — when off. */
+function modesGate(ctx: SlashContext): boolean {
+  if (ctx.cfg?.modesEnabled) return true;
+  ctx.setEvents((e) => [
+    ...e,
+    {
+      kind: "info",
+      key: ctx.mkKey(),
+      text: "Modes are off — every turn runs in auto. Turn plan/edit/auto modes on with  /settings modes on",
+    },
+  ]);
+  return false;
+}
+
 const handleMode: Handler = (ctx, _rest, arg) => {
+  if (!modesGate(ctx)) return true;
   const { setEvents, mkKey, mode } = ctx;
   if (!arg) {
     ctx.setShowModePicker(true);
@@ -739,18 +798,21 @@ const handleUi: Handler = (ctx, _rest, arg) => {
 };
 
 const handlePlan: Handler = (ctx) => {
+  if (!modesGate(ctx)) return true;
   ctx.setMode("plan");
   ctx.setEvents((e) => [...e, { kind: "info", key: ctx.mkKey(), text: "mode: plan" }]);
   return true;
 };
 
 const handleAuto: Handler = (ctx) => {
+  if (!modesGate(ctx)) return true;
   ctx.setMode("auto");
   ctx.setEvents((e) => [...e, { kind: "info", key: ctx.mkKey(), text: "mode: auto" }]);
   return true;
 };
 
 const handleEdit: Handler = (ctx) => {
+  if (!modesGate(ctx)) return true;
   ctx.setMode("edit");
   ctx.setEvents((e) => [...e, { kind: "info", key: ctx.mkKey(), text: "mode: edit" }]);
   return true;
@@ -1702,6 +1764,7 @@ const handlers: Record<string, Handler> = {
   "/shell": handleShell,
   "/model": handleModel,
   "/key": handleKey,
+  "/settings": handleSettings,
   "/mode": handleMode,
   "/multi-agent": handleMultiAgent,
   "/theme": handleTheme,
