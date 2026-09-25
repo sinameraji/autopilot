@@ -11,10 +11,10 @@ import { runAgentTurn } from "./loop.js";
 import type { AgentTurnOpts } from "./loop.js";
 import { logger } from "../util/logger.js";
 import * as client from "./client.js";
-import type { AiGatewayOptions } from "./client.js";
+import { hasLlmAuth, llmAuthFromConfig, type LlmAuth } from "./llm-auth.js";
 import type { WorkerResultMessage, ChatMessage } from "./messages.js";
 import { detectRepoInfo, type RepoInfo } from "../util/repo-info.js";
-import { loadConfig, resolveWorkerBudgetUsd, type KimiConfig, DEFAULT_MODEL, DEFAULT_CLOUD_MODEL } from "../config.js";
+import { loadConfig, resolveWorkerBudgetUsd, type KimiConfig, DEFAULT_MODEL, DEFAULT_PLUMBING_MODEL } from "../config.js";
 import type { MemoryManager } from "../memory/manager.js";
 import type { LspManager } from "../lsp/manager.js";
 import type { McpManager } from "../mcp/manager.js";
@@ -268,11 +268,15 @@ export class TurnSupervisor {
     }
     const repo: RepoInfo = repoInfo;
 
-    if (!cfg?.accountId || !cfg?.apiToken) {
+    if (!cfg?.openrouterApiKey) {
       throw new Error(
-        "Cloudflare credentials not found in your config — re-run /init or set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN.",
+        "No OpenRouter API key configured — workers bill model calls to your own key. Run /key set <key> or set OPENROUTER_API_KEY.",
       );
     }
+    // Workers run kimiflare in the Commute sandbox; their model calls bill to
+    // the user's own OpenRouter key. The Cloudflare creds are still forwarded
+    // when present for Commute servers that predate the OpenRouter switch.
+    const userOpenRouterKey = cfg.openrouterApiKey;
     const userAccountId = cfg.accountId;
     const userApiToken = cfg.apiToken;
 
@@ -390,7 +394,7 @@ export class TurnSupervisor {
                 logger.warn("supervisor:mcp_export_failed", { error: (err as Error).message });
               }
             }
-            const defaultWorkerModel = cfg?.cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL;
+            const defaultWorkerModel = cfg?.model ?? DEFAULT_MODEL;
             const payload = {
               mode: w.mode,
               task: w.task,
@@ -406,12 +410,10 @@ export class TurnSupervisor {
               owner: repo.owner,
               repo: repo.repo,
               baseBranch: w.baseBranch ?? repo.baseBranch,
-              // Reuse the USER's Cloudflare creds (already configured) so
-              // worker LLM calls bill against their account, not the
-              // Commute operator's. Server falls back to operator creds if
-              // these are absent (older client + new server).
-              userAccountId,
-              userApiToken,
+              // Bill worker LLM calls to the USER's OpenRouter key, not the
+              // Commute operator's.
+              userOpenRouterKey,
+              ...(userAccountId && userApiToken ? { userAccountId, userApiToken } : {}),
               // Batch-level hints so the Commute worker can share a cloned
               // repo across workers in the same batch and skip full clones.
               batchId,
@@ -754,10 +756,8 @@ export class TurnSupervisor {
     results: WorkerResultMessage[],
     opts: {
       prompt?: string;
-      accountId: string;
-      apiToken: string;
+      auth: LlmAuth;
       model: string;
-      gateway?: AiGatewayOptions;
       signal?: AbortSignal;
       onDelta?: (delta: string) => void;
     },
@@ -813,14 +813,12 @@ export class TurnSupervisor {
 
     let text = "";
     const events = this._runKimi({
-      accountId: opts.accountId,
-      apiToken: opts.apiToken,
+      ...opts.auth,
       model: opts.model,
       messages,
       temperature: 0.2,
       maxCompletionTokens: 4096,
       reasoningEffort: "low",
-      gateway: opts.gateway,
       signal: opts.signal,
     });
     for await (const ev of events) {
@@ -859,10 +857,8 @@ export class TurnSupervisor {
     results: WorkerResultMessage[],
     opts?: {
       prompt?: string;
-      accountId?: string;
-      apiToken?: string;
+      auth?: LlmAuth;
       model?: string;
-      gateway?: AiGatewayOptions;
       signal?: AbortSignal;
       onDelta?: (delta: string) => void;
       strategy?: "llm" | "heuristic" | "hybrid";
@@ -875,7 +871,7 @@ export class TurnSupervisor {
   }> {
     const strategy = opts?.strategy ?? "llm";
     const disableLlm = opts?.disableLlmSynthesis ?? false;
-    const hasCreds = !!opts?.accountId && !!opts?.apiToken;
+    const hasCreds = !!opts?.auth && hasLlmAuth(opts.auth);
 
     const useHeuristic = !hasCreds || strategy === "heuristic" || disableLlm;
     if (useHeuristic) {
@@ -885,10 +881,8 @@ export class TurnSupervisor {
     try {
       const llmResult = await this.synthesizeFindingsLlm(results, {
         prompt: opts?.prompt,
-        accountId: opts.accountId!,
-        apiToken: opts.apiToken!,
-        model: opts?.model ?? "@cf/moonshotai/kimi-k2.5",
-        gateway: opts?.gateway,
+        auth: opts.auth!,
+        model: opts?.model ?? DEFAULT_PLUMBING_MODEL,
         signal: opts?.signal,
         onDelta: opts?.onDelta,
       });
@@ -946,21 +940,10 @@ export class TurnSupervisor {
       const results = await this.spawnWorkers(workers, onUpdate, signal);
       onPhaseChange?.("synthesizing");
 
-      const gateway = cfg?.aiGatewayId
-        ? {
-            id: cfg.aiGatewayId,
-            cacheTtl: cfg.aiGatewayCacheTtl,
-            skipCache: cfg.aiGatewaySkipCache,
-            metadata: { feature: "synthesis", ...(cfg.aiGatewayMetadata ?? {}) },
-          }
-        : undefined;
-
       const synth = await this.synthesizeFindings(results, {
         prompt,
-        accountId: cfg?.accountId,
-        apiToken: cfg?.apiToken,
+        auth: llmAuthFromConfig(cfg),
         model: cfg?.synthesisModel,
-        gateway,
         signal,
         strategy: cfg?.synthesisStrategy,
         disableLlmSynthesis: cfg?.disableLlmSynthesis,
@@ -1109,22 +1092,12 @@ async function decomposeWithLlm(
   fileTree: string,
   cfg: KimiConfig,
 ): Promise<SpawnWorkerOpts[] | null> {
-  const model = cfg.decompositionModel ?? "@cf/moonshotai/kimi-k2.5";
-  const accountId = cfg.accountId;
-  const apiToken = cfg.apiToken;
-  if (!accountId || !apiToken) {
-    logger.warn("decompose:missing_creds", { reason: "no accountId or apiToken" });
+  const model = cfg.decompositionModel ?? DEFAULT_PLUMBING_MODEL;
+  const auth = llmAuthFromConfig(cfg);
+  if (!hasLlmAuth(auth)) {
+    logger.warn("decompose:missing_creds", { reason: "no OpenRouter key or custom endpoint" });
     return null;
   }
-
-  const gateway = cfg.aiGatewayId
-    ? {
-        id: cfg.aiGatewayId,
-        cacheTtl: cfg.aiGatewayCacheTtl,
-        skipCache: cfg.aiGatewaySkipCache,
-        metadata: { feature: "decomposition", ...(cfg.aiGatewayMetadata ?? {}) },
-      }
-    : undefined;
 
   const userContent = [
     `User request: ${prompt}`,
@@ -1142,14 +1115,12 @@ async function decomposeWithLlm(
   try {
     let text = "";
     const events = client.runKimi({
-      accountId,
-      apiToken,
+      ...auth,
       model,
       messages,
       temperature: 0.1,
       maxCompletionTokens: 2048,
       reasoningEffort: "low",
-      gateway,
     });
     for await (const ev of events) {
       if (ev.type === "text") text += ev.delta;

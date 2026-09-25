@@ -2,7 +2,7 @@ import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ToolSpec } from "../tools/registry.js";
 import type { Task } from "../tools/registry.js";
 import type { KimiConfig } from "../config.js";
-import type { AiGatewayOptions } from "../agent/client.js";
+import type { OpenRouterProviderPrefs } from "../agent/client.js";
 import type { PermissionRequest, PermissionDecision } from "../tools/executor.js";
 
 export type { ChatMessage, ToolSpec, Task, KimiConfig, PermissionRequest, PermissionDecision };
@@ -22,8 +22,8 @@ export interface CreateSessionOptions {
   lspEnabled?: boolean;
   /** Enable cost attribution. Defaults to config value. */
   costAttribution?: boolean;
-  /** Cloudflare AI Gateway options. */
-  gateway?: AiGatewayOptions;
+  /** OpenRouter provider-routing preferences for this session (merged over config.openrouterProvider). */
+  provider?: OpenRouterProviderPrefs;
   /** Custom permission handler. Defaults to auto-deny in plan mode, ask callback in edit mode. */
   permissionHandler?: PermissionHandler;
   /** Called when the agent detects KIMI.md drift. */

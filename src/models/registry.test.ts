@@ -1,104 +1,119 @@
-import { describe, it } from "node:test";
+import { describe, it, afterEach } from "node:test";
 import assert from "node:assert";
 import {
   getModel,
   getModelOrInfer,
-  inferProvider,
-  isUnifiedEligible,
+  isFreeModel,
+  listModels,
+  migrateLegacyModelId,
+  RECOMMENDED_MODEL_IDS,
   registerOpenRouterModels,
-  routeFor,
+  registerUserModels,
+  vendorOf,
   type ModelEntry,
 } from "./registry.js";
-import { decideNextStep } from "./next-step.js";
+import { DEFAULT_MODEL, DEFAULT_PLUMBING_MODEL } from "../config.js";
 
-describe("registry: Moonshot K3", () => {
-  it("infers moonshotai provider from moonshotai/kimi-k3", () => {
-    assert.strictEqual(inferProvider("moonshotai/kimi-k3"), "moonshotai");
-  });
+function entry(id: string, over: Partial<ModelEntry> = {}): ModelEntry {
+  return {
+    id,
+    contextWindow: 100_000,
+    maxOutputTokens: 8_000,
+    pricing: { inputPerMtok: 1, outputPerMtok: 2 },
+    supports: { tools: true, reasoning: false, streaming: true },
+    ...over,
+  };
+}
 
-  it("seeds moonshotai/kimi-k3 as a Cloudflare-catalog model paid via Unified Billing", () => {
-    const model = getModel("moonshotai/kimi-k3");
-    assert.ok(model, "expected moonshotai/kimi-k3 to be seeded");
-    assert.strictEqual(model!.provider, "moonshotai");
-    assert.strictEqual(model!.billingMode, "unified");
-    assert.strictEqual(routeFor(model!), "cf-catalog");
-    assert.strictEqual(isUnifiedEligible(model!), true);
-    // K3 rejects any temperature other than 1.0 — the client must omit it.
-    assert.strictEqual(model!.supports.temperature, false);
-    assert.strictEqual(model!.contextWindow, 1_048_576);
-    assert.deepStrictEqual(model!.pricing, { inputPerMtok: 3.0, cachedInputPerMtok: 0.3, outputPerMtok: 15.0 });
-  });
-
-  it("K3 needs no provider key and no gateway: next step is ready", () => {
-    const model = getModel("moonshotai/kimi-k3")!;
-    assert.deepStrictEqual(decideNextStep(null, model), { kind: "ready" });
-    assert.deepStrictEqual(
-      decideNextStep({ accountId: "a", apiToken: "t", model: model.id }, model),
-      { kind: "ready" },
-    );
-  });
-
-  it("unknown moonshotai/* ids infer the cf-catalog route with unified billing", () => {
-    const inferred = getModelOrInfer("moonshotai/kimi-k3-future");
-    assert.strictEqual(inferred.provider, "moonshotai");
-    assert.strictEqual(inferred.billingMode, "unified");
-    assert.strictEqual(routeFor(inferred), "cf-catalog");
-  });
-
-  it("keeps Workers AI Kimi models on the workers-ai provider", () => {
-    assert.strictEqual(inferProvider("@cf/moonshotai/kimi-k2.7-code"), "workers-ai");
-    assert.strictEqual(inferProvider("@cf/moonshotai/kimi-k2.6"), "workers-ai");
-    assert.strictEqual(inferProvider("@cf/moonshotai/kimi-k2.5"), "workers-ai");
-  });
+afterEach(() => {
+  registerOpenRouterModels([]);
+  registerUserModels([]);
 });
 
-describe("registry: OpenRouter provider", () => {
-  const orModel: ModelEntry = {
-    id: "anthropic/claude-sonnet-4-6",
-    provider: "openrouter",
-    contextWindow: 200_000,
-    maxOutputTokens: 8_192,
-    pricing: { inputPerMtok: 3.0, outputPerMtok: 15.0 },
-    supports: { tools: true, reasoning: true, streaming: true },
-    billingMode: "byok",
-  };
-
-  it("routes to the dedicated openrouter transport, never gateway/cf-catalog", () => {
-    assert.strictEqual(routeFor(orModel), "openrouter");
-  });
-
-  it("is never Unified-Billing-eligible, even though its id prefix matches a CF Unified Billing provider", () => {
-    // Regression guard: "anthropic/..." would match UNIFIED_BILLING_PROVIDERS by prefix if the
-    // openrouter check didn't come first — OpenRouter has no Cloudflare Unified Billing at all.
-    assert.strictEqual(isUnifiedEligible(orModel), false);
-  });
-
-  it("registerOpenRouterModels() makes fetched models visible via getModel(), without touching seed/user models", () => {
-    registerOpenRouterModels([orModel]);
-    try {
-      const hit = getModel("anthropic/claude-sonnet-4-6");
-      assert.ok(hit);
-      assert.strictEqual(hit!.provider, "openrouter");
-      // A seeded model is still there too.
-      assert.ok(getModel("@cf/moonshotai/kimi-k2.7-code"));
-    } finally {
-      registerOpenRouterModels([]); // don't leak state into other tests
+describe("seed models (offline fallback)", () => {
+  it("covers the default and plumbing models with real context windows", () => {
+    for (const id of [DEFAULT_MODEL, DEFAULT_PLUMBING_MODEL]) {
+      const m = getModel(id);
+      assert.ok(m, `${id} should be seeded`);
+      assert.strictEqual(m.contextWindow, 262_144);
+      assert.ok(m.supports.tools);
     }
   });
 
-  it("an OpenRouter model needs no gateway and no Cloudflare key: next step is ready as soon as a provider key exists", () => {
-    assert.deepStrictEqual(
-      decideNextStep({ accountId: "a", apiToken: "t", model: orModel.id, providerKeys: { openrouter: "sk-or-x" } }, orModel),
-      { kind: "ready" },
-    );
+  it("marks Kimi K3 as not accepting temperature", () => {
+    assert.strictEqual(getModel("moonshotai/kimi-k3")?.supports.temperature, false);
   });
 
-  it("an OpenRouter model with no stored key needs one — never needs-gateway (that's Cloudflare-only)", () => {
-    assert.deepStrictEqual(
-      decideNextStep({ accountId: "a", apiToken: "t", model: orModel.id }, orModel),
-      { kind: "needs-key" },
-    );
-    // Even with no config loaded at all.
-    assert.deepStrictEqual(decideNextStep(null, orModel), { kind: "needs-key" });
+  it("recommends the seeded Kimi models, default included", () => {
+    assert.ok(RECOMMENDED_MODEL_IDS.includes(DEFAULT_MODEL));
+  });
+});
+
+describe("live catalog registration", () => {
+  it("merges the catalog into lookups and listModels, user overrides winning", () => {
+    registerOpenRouterModels([entry("deepseek/deepseek-r1"), entry("moonshotai/kimi-k2.6", { contextWindow: 1 })]);
+    registerUserModels([entry("deepseek/deepseek-r1", { contextWindow: 42 })]);
+    assert.strictEqual(getModel("moonshotai/kimi-k2.6")?.contextWindow, 1, "catalog beats seed");
+    assert.strictEqual(getModel("deepseek/deepseek-r1")?.contextWindow, 42, "user override beats catalog");
+    const ids = listModels().map((m) => m.id);
+    assert.ok(ids.includes("deepseek/deepseek-r1"));
+    assert.ok(ids.includes("moonshotai/kimi-k3"), "seed entries not in the catalog remain");
+    assert.strictEqual(ids.filter((i) => i === "moonshotai/kimi-k2.6").length, 1);
+  });
+
+  it("keeps the seed's hand-verified temperature=false for Kimi K3", () => {
+    registerOpenRouterModels([entry("moonshotai/kimi-k3", { supports: { tools: true, reasoning: true, streaming: true, temperature: true } })]);
+    assert.strictEqual(getModel("moonshotai/kimi-k3")?.supports.temperature, false);
+  });
+});
+
+describe("getModelOrInfer", () => {
+  it("returns conservative defaults for ids not in any catalog", () => {
+    const m = getModelOrInfer("someone/unknown-model");
+    assert.strictEqual(m.contextWindow, 128_000);
+    assert.strictEqual(m.pricing.inputPerMtok, 0);
+    assert.strictEqual(m.supports.tools, true);
+  });
+});
+
+describe("vendorOf", () => {
+  it("takes the segment before the slash, dropping OpenRouter's ~ alias prefix", () => {
+    assert.strictEqual(vendorOf("moonshotai/kimi-k2.6"), "moonshotai");
+    assert.strictEqual(vendorOf("~moonshotai/kimi-latest"), "moonshotai");
+    assert.strictEqual(vendorOf("openrouter/auto"), "openrouter");
+  });
+});
+
+describe("isFreeModel", () => {
+  it("is true for zero-priced catalog models and :free ids", () => {
+    registerOpenRouterModels([entry("z-ai/glm-4.5-air", { pricing: { inputPerMtok: 0, outputPerMtok: 0 } })]);
+    assert.strictEqual(isFreeModel(getModel("z-ai/glm-4.5-air")!), true);
+    assert.strictEqual(isFreeModel(getModelOrInfer("x/y:free")), true);
+  });
+
+  it("is false for unknown ids, whose zero pricing means 'unknown', not free", () => {
+    assert.strictEqual(isFreeModel(getModelOrInfer("someone/unknown-model")), false);
+    assert.strictEqual(isFreeModel(getModel(DEFAULT_MODEL)!), false);
+  });
+});
+
+describe("migrateLegacyModelId", () => {
+  it("maps the Cloudflare-era Kimi and GLM ids to OpenRouter's", () => {
+    assert.strictEqual(migrateLegacyModelId("@cf/moonshotai/kimi-k2.6"), "moonshotai/kimi-k2.6");
+    assert.strictEqual(migrateLegacyModelId("@cf/moonshotai/kimi-k2.7-code"), "moonshotai/kimi-k2.7-code");
+    assert.strictEqual(migrateLegacyModelId("@cf/zai-org/glm-5.2"), "z-ai/glm-5.2");
+    assert.strictEqual(migrateLegacyModelId("@cf/baai/bge-base-en-v1.5"), "baai/bge-base-en-v1.5");
+  });
+
+  it("strips other @cf/ and workers-ai/ prefixes and renames google-ai-studio", () => {
+    assert.strictEqual(migrateLegacyModelId("@cf/meta/llama-4-scout"), "meta/llama-4-scout");
+    assert.strictEqual(migrateLegacyModelId("workers-ai/@cf/moonshotai/kimi-k2.5"), "moonshotai/kimi-k2.5");
+    assert.strictEqual(migrateLegacyModelId("google-ai-studio/gemini-3-pro"), "google/gemini-3-pro");
+  });
+
+  it("passes OpenRouter ids and undefined through unchanged", () => {
+    assert.strictEqual(migrateLegacyModelId("moonshotai/kimi-k3"), "moonshotai/kimi-k3");
+    assert.strictEqual(migrateLegacyModelId("anthropic/claude-sonnet-4.6"), "anthropic/claude-sonnet-4.6");
+    assert.strictEqual(migrateLegacyModelId(undefined), undefined);
   });
 });

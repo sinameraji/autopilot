@@ -27,7 +27,7 @@ export function ApiErrorMessage({ httpStatus, code, message }: Props) {
         </Text>
       )}
       <Text color={theme.muted?.color ?? theme.info.color} dimColor={theme.muted?.dim ?? true}>
-        Type /report to send diagnostic info
+        Provider status: https://status.openrouter.ai · switch models with /model
       </Text>
     </Box>
   );

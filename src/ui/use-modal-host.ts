@@ -47,12 +47,6 @@ export interface ModalHostController {
   setShowModelPicker: (v: boolean) => void;
   showModePicker: boolean;
   setShowModePicker: (v: boolean) => void;
-  keyEntryFor: ModelEntry | null;
-  setKeyEntryFor: (v: ModelEntry | null) => void;
-  billingChooserFor: ModelEntry | null;
-  setBillingChooserFor: (v: ModelEntry | null) => void;
-  unifiedProbeFor: ModelEntry | null;
-  setUnifiedProbeFor: (v: ModelEntry | null) => void;
   showRemoteDashboard: boolean;
   setShowRemoteDashboard: (v: boolean) => void;
   showInboxModal: boolean;
@@ -67,8 +61,6 @@ export interface ModalHostController {
   setShowHelpMenu: (v: boolean) => void;
   showMemoryPicker: boolean;
   setShowMemoryPicker: (v: boolean) => void;
-  showGatewayPicker: boolean;
-  setShowGatewayPicker: (v: boolean) => void;
   showSkillsPicker: boolean;
   setShowSkillsPicker: (v: boolean) => void;
   showShellPicker: boolean;
@@ -112,16 +104,12 @@ export function useModalHost(): ModalHostController {
   const [showUiPicker, setShowUiPicker] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [showModePicker, setShowModePicker] = useState(false);
-  const [keyEntryFor, setKeyEntryFor] = useState<ModelEntry | null>(null);
-  const [billingChooserFor, setBillingChooserFor] = useState<ModelEntry | null>(null);
-  const [unifiedProbeFor, setUnifiedProbeFor] = useState<ModelEntry | null>(null);
   const [showRemoteDashboard, setShowRemoteDashboard] = useState(false);
   const [showInboxModal, setShowInboxModal] = useState(false);
   const [showMultiAgentModal, setShowMultiAgentModal] = useState(false);
   const [showHooksDashboard, setShowHooksDashboard] = useState(false);
   const [showHelpMenu, setShowHelpMenu] = useState(false);
   const [showMemoryPicker, setShowMemoryPicker] = useState(false);
-  const [showGatewayPicker, setShowGatewayPicker] = useState(false);
   const [showSkillsPicker, setShowSkillsPicker] = useState(false);
   const [showShellPicker, setShowShellPicker] = useState(false);
   const [showPlanCompletePicker, setShowPlanCompletePicker] = useState(false);
@@ -138,16 +126,12 @@ export function useModalHost(): ModalHostController {
       showUiPicker ||
       showModelPicker ||
       showModePicker ||
-      keyEntryFor !== null ||
-      billingChooserFor !== null ||
-      unifiedProbeFor !== null ||
       showRemoteDashboard ||
       showInboxModal ||
       showMultiAgentModal ||
       showHooksDashboard ||
       showHelpMenu ||
       showMemoryPicker ||
-      showGatewayPicker ||
       showSkillsPicker ||
       showShellPicker ||
       showChangelogImagePicker;
@@ -166,9 +150,6 @@ export function useModalHost(): ModalHostController {
     showThemePicker,
     showModelPicker,
     showModePicker,
-    keyEntryFor,
-    billingChooserFor,
-    unifiedProbeFor,
     showRemoteDashboard,
     showInboxModal,
     showMultiAgentModal,
@@ -176,7 +157,6 @@ export function useModalHost(): ModalHostController {
     showUiPicker,
     showHelpMenu,
     showMemoryPicker,
-    showGatewayPicker,
     showSkillsPicker,
     showShellPicker,
     showPlanCompletePicker,
@@ -197,16 +177,12 @@ export function useModalHost(): ModalHostController {
     showUiPicker, setShowUiPicker,
     showModelPicker, setShowModelPicker,
     showModePicker, setShowModePicker,
-    keyEntryFor, setKeyEntryFor,
-    billingChooserFor, setBillingChooserFor,
-    unifiedProbeFor, setUnifiedProbeFor,
     showRemoteDashboard, setShowRemoteDashboard,
     showInboxModal, setShowInboxModal,
     showMultiAgentModal, setShowMultiAgentModal,
     showHooksDashboard, setShowHooksDashboard,
     showHelpMenu, setShowHelpMenu,
     showMemoryPicker, setShowMemoryPicker,
-    showGatewayPicker, setShowGatewayPicker,
     showSkillsPicker, setShowSkillsPicker,
     showShellPicker, setShowShellPicker,
     showPlanCompletePicker, setShowPlanCompletePicker,
@@ -233,7 +209,6 @@ export interface ModalFlagsInput {
   showMultiAgentModal: boolean;
   showHelpMenu: boolean;
   showMemoryPicker: boolean;
-  showGatewayPicker: boolean;
   showSkillsPicker: boolean;
   showShellPicker: boolean;
   showPlanCompletePicker: boolean;
@@ -261,7 +236,6 @@ export function computeModalFlags(s: ModalFlagsInput): ModalFlags {
     s.showMultiAgentModal ||
     s.showHelpMenu ||
     s.showMemoryPicker ||
-    s.showGatewayPicker ||
     s.showSkillsPicker ||
     s.showShellPicker ||
     s.showChangelogImagePicker;
@@ -290,7 +264,6 @@ export const EMPTY_MODAL_STATE: ModalFlagsInput = {
   showMultiAgentModal: false,
   showHelpMenu: false,
   showMemoryPicker: false,
-  showGatewayPicker: false,
   showSkillsPicker: false,
   showShellPicker: false,
   showPlanCompletePicker: false,

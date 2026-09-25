@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "./theme-context.js";
-import { listModels, type ModelEntry, type ModelPricing, type ModelProvider } from "../models/registry.js";
+import {
+  isFreeModel,
+  listModels,
+  RECOMMENDED_MODEL_IDS,
+  vendorOf,
+  type ModelEntry,
+  type ModelPricing,
+} from "../models/registry.js";
 import { fuzzyFilter } from "../util/fuzzy.js";
 
 interface Props {
@@ -10,26 +17,6 @@ interface Props {
   /** Optional whitelist of models. When provided, only these models are shown. */
   models?: ModelEntry[];
 }
-
-const PROVIDER_ORDER: ModelProvider[] = [
-  "openrouter",
-  "workers-ai",
-  "moonshotai",
-  "anthropic",
-  "openai",
-  "google",
-  "openai-compatible",
-];
-
-const PROVIDER_LABEL: Record<ModelProvider, string> = {
-  "workers-ai": "Cloudflare Workers AI",
-  moonshotai: "Moonshot AI",
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-  "openai-compatible": "Other (OpenAI-compatible)",
-  openrouter: "OpenRouter",
-};
 
 const PAGE_SIZE = 30;
 const MIN_ID_WIDTH = 18;
@@ -41,13 +28,17 @@ function formatContext(n: number): string {
 }
 
 function dollar(n: number): string {
-  return `$${n}`;
+  // Catalog prices are per-token decimals scaled to per-Mtok; trim float noise.
+  return `$${Number(n.toPrecision(4))}`;
 }
 
-function formatPrice(p: ModelPricing): string {
+/** "$0.95 / $4 / $0.16" (input / output / cached input, USD per Mtok), or "free". */
+export function formatModelPrice(p: ModelPricing): string {
+  if (p.inputPerMtok === 0 && p.outputPerMtok === 0) return "free";
   const head = `${dollar(p.inputPerMtok)} / ${dollar(p.outputPerMtok)}`;
   return p.cachedInputPerMtok !== undefined ? `${head} / ${dollar(p.cachedInputPerMtok)}` : head;
 }
+const formatPrice = formatModelPrice;
 
 /** Longest path-segment-aligned common prefix shared by every id. Empty if none. */
 function commonSlashPrefix(ids: string[]): string {
@@ -99,32 +90,47 @@ interface BuildOpts {
   ctxColWidth: number;
 }
 
+/**
+ * Sections, in order: kimiflare's recommended models, OpenRouter's free
+ * models, then every other model grouped by vendor (alphabetical). Within the
+ * free and vendor sections the vendor prefix is stripped when it's shared.
+ */
 function buildRowsGrouped(opts: BuildOpts): Row[] {
   const { models, current } = opts;
-  const byProvider = new Map<ModelProvider, ModelEntry[]>();
+  const recommended = RECOMMENDED_MODEL_IDS.map((id) => models.find((m) => m.id === id)).filter(
+    (m): m is ModelEntry => !!m,
+  );
+  const shown = new Set(recommended.map((m) => m.id));
+  const free = models.filter((m) => !shown.has(m.id) && isFreeModel(m));
+  for (const m of free) shown.add(m.id);
+  const byVendor = new Map<string, ModelEntry[]>();
   for (const m of models) {
-    const arr = byProvider.get(m.provider) ?? [];
+    if (shown.has(m.id)) continue;
+    const v = vendorOf(m.id);
+    const arr = byVendor.get(v) ?? [];
     arr.push(m);
-    byProvider.set(m.provider, arr);
+    byVendor.set(v, arr);
   }
+
   const rows: Row[] = [];
-  for (const p of PROVIDER_ORDER) {
-    const list = byProvider.get(p);
-    if (!list || list.length === 0) continue;
-    rows.push({ kind: "header", label: PROVIDER_LABEL[p], key: `__hdr_${p}__` });
-    const prefix = commonSlashPrefix(list.map((m) => m.id));
+  const section = (label: string, key: string, list: ModelEntry[], stripPrefix: boolean) => {
+    if (list.length === 0) return;
+    rows.push({ kind: "header", label, key: `__hdr_${key}__` });
+    const prefix = stripPrefix ? commonSlashPrefix(list.map((m) => m.id)) : "";
     for (const m of list) {
-      const stripped = prefix && m.id.startsWith(prefix) ? m.id.slice(prefix.length) : m.id;
       rows.push({
         kind: "model",
         model: m,
-        displayId: stripped,
+        displayId: prefix && m.id.startsWith(prefix) ? m.id.slice(prefix.length) : m.id,
         context: formatContext(m.contextWindow),
         price: formatPrice(m.pricing),
         isCurrent: m.id === current,
       });
     }
-  }
+  };
+  section("Recommended", "recommended", recommended, false);
+  section("Free (daily request cap)", "free", free, false);
+  for (const v of [...byVendor.keys()].sort()) section(v, v, byVendor.get(v)!, true);
   return rows;
 }
 
@@ -145,17 +151,36 @@ function buildRowsFlat(opts: BuildOpts): Row[] {
   return rows;
 }
 
+/**
+ * Search the catalog: every whitespace-separated term must appear literally in
+ * the id or name ("kimi" → only Kimi models, "claude sonnet" → Sonnets).
+ * Only when nothing matches literally does it fall back to fuzzy
+ * (subsequence) matching, which on a 400+ model catalog would otherwise
+ * match almost everything.
+ */
+export function filterModels(models: ModelEntry[], query: string): ModelEntry[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return models;
+  const terms = q.split(/\s+/);
+  const hay = (m: ModelEntry) => `${m.id} ${m.name ?? ""}`.toLowerCase();
+  const literal = models.filter((m) => {
+    const h = hay(m);
+    return terms.every((t) => h.includes(t));
+  });
+  if (literal.length > 0) return literal;
+  return fuzzyFilter(models, q, (m) => `${m.id} ${m.name ?? ""}`);
+}
+
 export function ModelPicker({ current, onPick, models }: Props) {
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const allModels = useMemo(() => models ?? listModels(), [models]);
-  const filtered = useMemo(() => {
-    if (!query.trim()) return allModels;
-    return fuzzyFilter(allModels, query, (m) => `${m.id} ${m.provider}`);
-  }, [allModels, query]);
+  // A coding agent can't work without tool calling, so models OpenRouter
+  // lists without `tools` support are hidden (still selectable via /model <id>).
+  const allModels = useMemo(() => (models ?? listModels()).filter((m) => m.supports.tools), [models]);
+  const filtered = useMemo(() => filterModels(allModels, query), [allModels, query]);
 
   // Build rows first with placeholder widths, then measure & re-pad.
   const baseOpts: BuildOpts = {

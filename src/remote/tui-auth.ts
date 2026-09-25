@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig } from "../config.js";
+import { loadConfig, saveConfig, DEFAULT_MODEL } from "../config.js";
 
 const GITHUB_DEVICE_AUTH_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -92,7 +92,7 @@ export async function* authGitHubForTui(): AsyncGenerator<AuthStep, void, void> 
       const cfg = (await loadConfig()) ?? {
         accountId: "",
         apiToken: "",
-        model: "@cf/moonshotai/kimi-k2.6",
+        model: DEFAULT_MODEL,
       };
 
       await saveConfig({

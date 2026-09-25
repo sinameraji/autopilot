@@ -2,7 +2,7 @@ import { execSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { loadConfig, saveConfig } from "../config.js";
+import { loadConfig, saveConfig, DEFAULT_MODEL } from "../config.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REMOTE_DIR = join(__dirname, "..", "..", "..", "remote");
@@ -130,7 +130,7 @@ export async function* deployForTui(): AsyncGenerator<DeployStep, { workerUrl: s
   }
 
   const nextCfg = {
-    ...(cfg ?? { accountId: "", apiToken: "", model: "@cf/moonshotai/kimi-k2.6" }),
+    ...(cfg ?? { accountId: "", apiToken: "", model: DEFAULT_MODEL }),
     remoteWorkerUrl: workerUrl,
     remoteAuthSecret: authSecret,
   };

@@ -18,10 +18,57 @@ export interface ImageContentPart {
 
 export type ContentPart = TextContentPart | ImageContentPart;
 
+/**
+ * One structured reasoning block as OpenRouter reports it
+ * (`reasoning.text` / `reasoning.summary` / `reasoning.encrypted` / …).
+ * Opaque to us: stored as received and echoed back unchanged.
+ */
+export interface ReasoningDetail {
+  type: string;
+  index?: number;
+  id?: string | null;
+  format?: string;
+  text?: string | null;
+  summary?: string;
+  data?: string;
+  signature?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Fold one streamed `reasoning_details` delta into the accumulated array.
+ * Items with the same `index` are fragments of one block: text and summary
+ * fragments concatenate, other fields (signature, encrypted data, id) take
+ * the latest non-empty value. Items without an index are appended.
+ */
+export function mergeReasoningDetails(acc: ReasoningDetail[], delta: ReasoningDetail[]): ReasoningDetail[] {
+  const out = acc.slice();
+  for (const item of delta) {
+    const idx = typeof item.index === "number" ? out.findIndex((d) => d.index === item.index) : -1;
+    if (idx < 0) {
+      out.push({ ...item });
+      continue;
+    }
+    const cur = { ...out[idx]! };
+    for (const [k, v] of Object.entries(item)) {
+      if (v === null || v === undefined || v === "") continue;
+      if ((k === "text" || k === "summary") && typeof v === "string" && typeof cur[k] === "string") {
+        cur[k] = (cur[k] as string) + v;
+      } else {
+        cur[k] = v;
+      }
+    }
+    out[idx] = cur;
+  }
+  return out;
+}
+
 export interface ChatMessage {
   role: Role;
   content: string | ContentPart[] | null;
   reasoning_content?: string | null;
+  /** Structured reasoning to echo back to OpenRouter (Claude, GPT-5, Gemini). */
+  reasoning_details?: ReasoningDetail[];
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
@@ -41,6 +88,9 @@ export interface Usage {
   completion_tokens: number;
   total_tokens: number;
   prompt_tokens_details?: { cached_tokens?: number } | null;
+  /** Authoritative USD cost of this generation, reported by OpenRouter's
+   *  usage accounting in the final stream chunk. Absent on custom endpoints. */
+  cost?: number;
 }
 
 /** Structured finding from a standalone worker. */

@@ -8,6 +8,7 @@
  * `setEvents` and otherwise don't block startup. Identical behavior to
  * the prior in-component implementation.
  */
+import { llmAuthFromConfig } from "../agent/llm-auth.js";
 import React from "react";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -23,7 +24,6 @@ import { indexSkills, initSkillsSchema } from "../skills/index.js";
 
 import { RETENTION } from "../storage-limits.js";
 import type { HybridResult } from "../memory/schema.js";
-import { gatewayFromConfig } from "./app-helpers.js";
 
 type SetEvents = React.Dispatch<React.SetStateAction<ChatEvent[]>>;
 
@@ -36,8 +36,6 @@ export interface RunStartupTasksDeps {
   setKimiMdStale: (v: boolean) => void;
   customCommandsRef: React.MutableRefObject<CustomCommand[]>;
   setCustomCommandsVersion: React.Dispatch<React.SetStateAction<number>>;
-  cloudToken?: string;
-  cloudDeviceId?: string;
 }
 
 export function runStartupTasks(deps: RunStartupTasksDeps): void {
@@ -45,8 +43,8 @@ export function runStartupTasks(deps: RunStartupTasksDeps): void {
     cfg, setEvents, mkKey,
     memoryManagerRef, sessionStartRecallRef, setKimiMdStale,
     customCommandsRef, setCustomCommandsVersion,
-    cloudToken, cloudDeviceId,
   } = deps;
+  const auth = llmAuthFromConfig(cfg);
 
   // Prune old sessions on startup (silent)
   void import("../sessions.js").then(({ pruneSessions }) => pruneSessions());
@@ -66,16 +64,13 @@ export function runStartupTasks(deps: RunStartupTasksDeps): void {
     const dbPath = cfg.memoryDbPath ?? join(process.cwd(), ".kimiflare", "memory.db");
     const manager = new MemoryManager({
       dbPath,
-      accountId: cfg.accountId,
-      apiToken: cfg.apiToken,
+      ...auth,
       model: cfg.model,
       plumbingModel: cfg.plumbingModel,
       extractionModel: cfg.memoryExtractionModel,
       embeddingModel: cfg.memoryEmbeddingModel,
-      gateway: gatewayFromConfig(cfg),
       maxAgeDays: cfg.memoryMaxAgeDays ?? RETENTION.memoryMaxAgeDays,
       maxEntries: cfg.memoryMaxEntries ?? RETENTION.memoryMaxEntries,
-      cloudMode: cfg.cloudMode,
     });
     manager.open();
     memoryManagerRef.current = manager;
@@ -126,13 +121,8 @@ export function runStartupTasks(deps: RunStartupTasksDeps): void {
   void indexSkills({
     cwd: process.cwd(),
     db: skillDb,
-    accountId: cfg.accountId,
-    apiToken: cfg.apiToken,
-    gateway: gatewayFromConfig(cfg),
+    ...auth,
     embeddingModel: cfg.memoryEmbeddingModel,
-    cloudMode: cfg.cloudMode,
-    cloudToken,
-    cloudDeviceId,
   }).then((result) => {
     if (result.indexed > 0) {
       setEvents((e) => [

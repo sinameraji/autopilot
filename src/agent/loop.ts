@@ -1,10 +1,10 @@
 import { runKimi } from "./client.js";
-import type { AiGatewayOptions, GatewayMeta } from "./client.js";
-import type { CustomEndpoint } from "./custom-endpoint.js";
+import type { ResponseMeta } from "./client.js";
+import type { LlmAuth } from "./llm-auth.js";
 import { toOpenAIToolDefs, type ToolSpec } from "../tools/registry.js";
 import type { ToolExecutor, PermissionAsker, ToolResult } from "../tools/executor.js";
-import { sanitizeString, stableStringify, stripOldImages } from "./messages.js";
-import type { ChatMessage, ToolCall, Usage } from "./messages.js";
+import { mergeReasoningDetails, sanitizeString, stableStringify, stripOldImages } from "./messages.js";
+import type { ChatMessage, ReasoningDetail, ToolCall, Usage } from "./messages.js";
 import type { Task, PlanOption } from "../tools/registry.js";
 import type { MemoryManager } from "../memory/manager.js";
 import type { HybridResult } from "../memory/schema.js";
@@ -34,8 +34,8 @@ export interface AgentCallbacks {
    *  Fires after onToolCallFinalized, one at a time, as tools are dequeued. */
   onToolWillExecute?: (toolCallId: string, name: string) => void;
   onUsage?: (usage: Usage) => void;
-  onUsageFinal?: (usage: Usage, gatewayMeta?: GatewayMeta) => void;
-  onGatewayMeta?: (meta: GatewayMeta) => void;
+  onUsageFinal?: (usage: Usage, responseMeta?: ResponseMeta) => void;
+  onResponseMeta?: (meta: ResponseMeta) => void;
   onAssistantFinal?: (msg: ChatMessage) => void;
   onToolResult?: (result: ToolResult) => void;
   onTasks?: (tasks: Task[]) => void;
@@ -65,9 +65,8 @@ export interface AgentCallbacks {
   onWorkersUpdated?: (workers: import("./supervisor.js").ActiveWorker[]) => void;
 }
 
-export interface AgentTurnOpts {
-  accountId: string;
-  apiToken: string;
+/** Credentials come in as `LlmAuth` fields — spread `llmAuthFromConfig(cfg)`. */
+export interface AgentTurnOpts extends LlmAuth {
   model: string;
   messages: ChatMessage[];
   tools: ToolSpec[];
@@ -82,7 +81,6 @@ export interface AgentTurnOpts {
   coauthor?: { name: string; email: string };
   sessionId?: string;
   githubToken?: string;
-  gateway?: AiGatewayOptions;
   /** Drop image_url parts from user messages older than this many turns. */
   keepLastImageTurns?: number;
   memoryManager?: MemoryManager | null;
@@ -109,18 +107,6 @@ export interface AgentTurnOpts {
   /** Called after each tool-iteration cycle to allow external compaction or state management.
    *  Return the (possibly mutated) messages array. */
   onIterationEnd?: (messages: ChatMessage[], signal: AbortSignal) => Promise<ChatMessage[]>;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
-  /** Per-provider API keys (BYOK) forwarded to AI Gateway. */
-  providerKeys?: Partial<Record<"workers-ai" | "anthropic" | "openai" | "google" | "moonshotai" | "openai-compatible", string>>;
-  /** Per-provider alias names referencing CF Secrets Store entries (fire-and-forget BYOK). */
-  providerKeyAliases?: Partial<Record<"workers-ai" | "anthropic" | "openai" | "google" | "moonshotai" | "openai-compatible", string>>;
-  /** Whether to use Cloudflare Unified Billing for models that support it. */
-  unifiedBilling?: boolean;
-  /** Custom OpenAI-compatible endpoint; when set (or KIMIFLARE_BASE_URL is in
-   *  the env), all Cloudflare routing/auth is bypassed. See src/agent/custom-endpoint.ts. */
-  customEndpoint?: CustomEndpoint;
   /** Shell override for the bash tool. If omitted, the tool auto-detects based on platform. */
   shell?: string;
   /** When false (default), the bash tool blocks `git push` to the default branch. */
@@ -133,13 +119,7 @@ export interface AgentTurnOpts {
   skillsDb?: Database.Database;
   /** Config for skill routing. */
   skillRoutingConfig?: {
-    accountId: string;
-    apiToken: string;
     embeddingModel?: string;
-    gateway?: AiGatewayOptions;
-    cloudMode?: boolean;
-    cloudToken?: string;
-    cloudDeviceId?: string;
     maxSkillTokens?: number;
   };
   /** Current mode for system prompt. */
@@ -147,7 +127,7 @@ export interface AgentTurnOpts {
   /** Whether to use cache-stable prompt assembly (dual system messages). */
   cacheStable?: boolean;
   /** Abort the API stream if no data arrives for this many milliseconds. Default 60000.
-   *  Cold Workers AI calls after tool use can exceed the default — bump this for
+   *  A cold upstream provider after tool use can exceed the default — bump this for
    *  long-running embeddings / image-heavy turns. */
   idleTimeoutMs?: number;
   /** Once the first byte arrives, tighten the idle timeout to this value.
@@ -356,13 +336,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           },
           {
             db: opts.skillsDb,
-            accountId: opts.skillRoutingConfig.accountId,
-            apiToken: opts.skillRoutingConfig.apiToken,
+            ...llmAuthOf(opts),
             embeddingModel: opts.skillRoutingConfig.embeddingModel,
-            gateway: opts.skillRoutingConfig.gateway,
-            cloudMode: opts.skillRoutingConfig.cloudMode,
-            cloudToken: opts.skillRoutingConfig.cloudToken,
-            cloudDeviceId: opts.skillRoutingConfig.cloudDeviceId,
           },
         )
       : Promise.resolve(undefined);
@@ -574,7 +549,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     const toolResults: ToolResult[] = [];
     let content = "";
     let reasoning = "";
-    let gatewayMeta: GatewayMeta | undefined;
+    let responseMeta: ResponseMeta | undefined;
+    let reasoningDetails: ReasoningDetail[] = [];
     opts.callbacks.onAssistantStart?.();
 
     const stripReasoning = process.env.KIMIFLARE_STRIP_REASONING === "1";
@@ -637,25 +613,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     }
 
     logger.debug("turn:api_request", { sessionId: opts.sessionId, messageCount: apiMessages.length });
-    // Cloudflare AI Gateway caps cf-aig-metadata at 5 keys. Only send
-    // stable, cache-key-safe values. Per-turn variables (tier, skl) are
-    // intentionally omitted — they change every turn and bust the Gateway
-    // HTTP cache, collapsing prefix-cache hit rates. They remain available
-    // in cost-debug.jsonl for local analysis.
-    const turnGateway = opts.gateway
-      ? {
-          ...opts.gateway,
-          metadata: {
-            ...(opts.gateway.metadata ?? {}),
-            feature: "chat",
-            ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
-            cm: codeMode ? "1" : "0",
-          },
-        }
-      : undefined;
     const events = runKimi({
-      accountId: opts.accountId,
-      apiToken: opts.apiToken,
+      ...llmAuthOf(opts),
       model: opts.model,
       messages: apiMessages,
       tools: toolDefs,
@@ -664,14 +623,6 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       maxCompletionTokens: opts.maxCompletionTokens,
       reasoningEffort: opts.reasoningEffort,
       sessionId: opts.sessionId,
-      gateway: turnGateway,
-      cloudMode: opts.cloudMode,
-      cloudToken: opts.cloudToken,
-      cloudDeviceId: opts.cloudDeviceId,
-      providerKeys: opts.providerKeys,
-      providerKeyAliases: opts.providerKeyAliases,
-      unifiedBilling: opts.unifiedBilling,
-      customEndpoint: opts.customEndpoint,
       idleTimeoutMs: opts.idleTimeoutMs ?? 60_000,
       postFirstByteIdleTimeoutMs: opts.postFirstByteIdleTimeoutMs,
     });
@@ -683,9 +634,12 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
         logger.debug("turn:api_first_chunk", { sessionId: opts.sessionId });
       }
       switch (ev.type) {
-        case "gateway_meta":
-          gatewayMeta = ev.meta;
-          opts.callbacks.onGatewayMeta?.(ev.meta);
+        case "response_meta":
+          responseMeta = ev.meta;
+          opts.callbacks.onResponseMeta?.(ev.meta);
+          break;
+        case "reasoning_details":
+          reasoningDetails = mergeReasoningDetails(reasoningDetails, ev.details);
           break;
         case "reasoning":
           reasoning += ev.delta;
@@ -724,7 +678,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
 
     if (lastUsage) {
-      opts.callbacks.onUsageFinal?.(lastUsage, gatewayMeta);
+      opts.callbacks.onUsageFinal?.(lastUsage, responseMeta);
       cumulativePromptTokens += lastUsage.prompt_tokens;
       // Flip the budget flag regardless of whether this turn produced tool
       // calls — a long pure-text turn past the cap should still trip the
@@ -744,6 +698,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       role: "assistant",
       content: content ? sanitizeString(content) : null,
       ...(reasoning ? { reasoning_content: sanitizeString(reasoning) } : {}),
+      ...(reasoningDetails.length ? { reasoning_details: reasoningDetails } : {}),
       ...(toolCalls.length
         ? {
             tool_calls: toolCalls.map((tc) => ({
@@ -897,10 +852,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               githubToken: opts.githubToken,
               shell: opts.shell,
               intentTier: opts.intentClassification?.tier,
-              accountId: opts.accountId,
-              apiToken: opts.apiToken,
+              llmAuth: llmAuthOf(opts),
               model: opts.model,
-              gateway: opts.gateway,
               allowDirectPush: opts.allowDirectPush,
             },
             opts.onFileChange,
@@ -1266,10 +1219,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             githubToken: opts.githubToken,
             shell: opts.shell,
             intentTier: opts.intentClassification?.tier,
-            accountId: opts.accountId,
-            apiToken: opts.apiToken,
+            llmAuth: llmAuthOf(opts),
             model: opts.model,
-            gateway: opts.gateway,
             allowDirectPush: opts.allowDirectPush,
           },
           opts.onFileChange,
@@ -1536,4 +1487,13 @@ function validateToolArguments(raw: string): string {
   } catch {
     return "{}";
   }
+}
+
+/** The credential subset of turn opts, for side-calls made on the turn's behalf. */
+function llmAuthOf(opts: LlmAuth): LlmAuth {
+  return {
+    ...(opts.openrouterApiKey ? { openrouterApiKey: opts.openrouterApiKey } : {}),
+    ...(opts.customEndpoint ? { customEndpoint: opts.customEndpoint } : {}),
+    ...(opts.provider ? { provider: opts.provider } : {}),
+  };
 }

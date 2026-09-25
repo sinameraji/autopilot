@@ -6,9 +6,7 @@ import { MD } from "./markdown.js";
 import { useTheme } from "./theme-context.js";
 import type { Theme } from "./theme.js";
 import { humanizeInfo, humanizeMemory, humanizeMeta, type IntentTier } from "./narrator.js";
-import { CloudQuotaMessage } from "./cloud-quota-message.js";
 import { ApiErrorMessage } from "./api-error-message.js";
-import { ServiceEndedMessage } from "./service-ended-message.js";
 
 export type ChatEvent =
   | { kind: "user"; key: string; text: string; images?: string[]; queued?: boolean }
@@ -39,22 +37,10 @@ export type ChatEvent =
       message: string;
     }
   | {
-      kind: "cloud_quota_exhausted";
-      key: string;
-      used: number;
-      limit: number;
-      expiresAt?: string;
-    }
-  | {
       kind: "qrcode";
       key: string;
       lines: string[];
       caption: string;
-    }
-  | {
-      kind: "service_ended";
-      key: string;
-      endedAt?: string;
     };
 
 interface Props {
@@ -62,14 +48,13 @@ interface Props {
   showReasoning: boolean;
   verbose?: boolean;
   intentTier?: IntentTier;
-  onUpgrade?: () => void;
 }
 
 function toolSignature(name: string, args: string): string {
   return `${name}:${args}`;
 }
 
-export const ChatView = React.memo(function ChatView({ events, showReasoning, verbose, intentTier, onUpgrade }: Props) {
+export const ChatView = React.memo(function ChatView({ events, showReasoning, verbose, intentTier }: Props) {
   const theme = useTheme();
 
   // Detect repetitive tool calls in this turn (≥3 identical signatures)
@@ -112,7 +97,7 @@ export const ChatView = React.memo(function ChatView({ events, showReasoning, ve
                 </Text>
               </Box>
             )}
-            <EventView evt={e} showReasoning={showReasoning} verbose={verbose} repeatedSigs={repeatedSigs} intentTier={intentTier} isLastAssistant={i === lastAssistantIndex} onUpgrade={onUpgrade} />
+            <EventView evt={e} showReasoning={showReasoning} verbose={verbose} repeatedSigs={repeatedSigs} intentTier={intentTier} isLastAssistant={i === lastAssistantIndex} />
           </Box>
         );
       })}
@@ -127,7 +112,6 @@ const EventView = React.memo(function EventView({
   repeatedSigs,
   intentTier,
   isLastAssistant,
-  onUpgrade,
 }: {
   evt: ChatEvent;
   showReasoning: boolean;
@@ -135,7 +119,6 @@ const EventView = React.memo(function EventView({
   repeatedSigs?: Set<string>;
   intentTier?: IntentTier;
   isLastAssistant?: boolean;
-  onUpgrade?: () => void;
 }) {
   const theme = useTheme();
   if (evt.kind === "user") {
@@ -236,16 +219,6 @@ const EventView = React.memo(function EventView({
       </Text>
     );
   }
-  if (evt.kind === "cloud_quota_exhausted") {
-    return (
-      <CloudQuotaMessage
-        used={evt.used}
-        limit={evt.limit}
-        expiresAt={evt.expiresAt}
-        onUpgrade={onUpgrade}
-      />
-    );
-  }
   if (evt.kind === "api_error") {
     return (
       <ApiErrorMessage
@@ -254,9 +227,6 @@ const EventView = React.memo(function EventView({
         message={evt.message}
       />
     );
-  }
-  if (evt.kind === "service_ended") {
-    return <ServiceEndedMessage endedAt={evt.endedAt} />;
   }
   if (evt.kind === "qrcode") {
     return (

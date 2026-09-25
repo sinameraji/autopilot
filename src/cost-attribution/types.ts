@@ -84,12 +84,13 @@ export interface TopSessionEntry {
 export interface ReconciliationResult {
   status: "verified" | "drift" | "error" | "local-only";
   localCost: number;
-  cloudflareCost?: number;
+  /** Sum of the turn costs OpenRouter confirmed in this range. */
+  providerCost?: number;
+  /** |estimate − confirmed| / confirmed, in percent, over confirmed turns. */
   driftPct?: number;
   message?: string;
-  /** Per-feature cost breakdown derived from the `metadata.feature` tag on
-   *  Gateway logs. Only populated when the reconcile call succeeded. */
-  featureBreakdown?: Array<{ feature: string; cost: number; requests: number }>;
+  /** All-time USD spend on the OpenRouter key (GET /key), when fetched. */
+  keyAllTimeSpend?: number;
 }
 
 export interface CostAttributionReport {

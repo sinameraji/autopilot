@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { stableStringify, stripOldImages } from "./messages.js";
+import { mergeReasoningDetails, stableStringify, stripOldImages } from "./messages.js";
 import type { ChatMessage } from "./messages.js";
 
 describe("stableStringify", () => {
@@ -115,5 +115,29 @@ describe("stripOldImages", () => {
     ];
     const result = stripOldImages(messages, 2);
     assert.deepStrictEqual((result[0]!.content as typeof messages[0]["content"])!, [txt("hello"), img("http://a")]);
+  });
+});
+
+describe("mergeReasoningDetails", () => {
+  it("concatenates text fragments that share an index and keeps the latest signature", () => {
+    let acc = mergeReasoningDetails([], [{ type: "reasoning.text", index: 0, text: "Let me " }]);
+    acc = mergeReasoningDetails(acc, [{ type: "reasoning.text", index: 0, text: "think." }]);
+    acc = mergeReasoningDetails(acc, [{ type: "reasoning.text", index: 0, text: "", signature: "sig-abc" }]);
+    assert.deepStrictEqual(acc, [{ type: "reasoning.text", index: 0, text: "Let me think.", signature: "sig-abc" }]);
+  });
+
+  it("keeps distinct indexes as separate blocks, in order", () => {
+    const acc = mergeReasoningDetails(
+      [{ type: "reasoning.summary", index: 0, summary: "Plan" }],
+      [{ type: "reasoning.encrypted", index: 1, data: "opaque" }],
+    );
+    assert.deepStrictEqual(acc.map((d) => d.type), ["reasoning.summary", "reasoning.encrypted"]);
+  });
+
+  it("appends items without an index and never mutates its input", () => {
+    const start = [{ type: "reasoning.text", index: 0, text: "a" }];
+    const out = mergeReasoningDetails(start, [{ type: "reasoning.encrypted", data: "x" }]);
+    assert.strictEqual(out.length, 2);
+    assert.strictEqual(start.length, 1);
   });
 });

@@ -13,23 +13,23 @@ import { unlink } from "node:fs/promises";
 import QRCode from "qrcode";
 
 import type { Cfg } from "../app.js";
-import { configPath, loadConfig, saveConfig, DEFAULT_MODEL, DEFAULT_CLOUD_MODEL } from "../config.js";
+import { configPath, loadConfig, saveConfig, patchPersistedConfig, DEFAULT_MODEL, DEFAULT_PLUMBING_MODEL } from "../config.js";
 import type { ChatEvent } from "./chat.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
-import type { GatewayMeta } from "../agent/client.js";
+import type { ResponseMeta } from "../agent/client.js";
+import { llmAuthFromConfig } from "../agent/llm-auth.js";
+import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
 import {
   carryOverSessionBaseline,
   formatCostReport,
-  formatFeatureBreakdown,
-  formatGatewaySection,
+  formatGenerationsSection,
   getCostReport,
-  getSessionGatewayLogs,
+  getSessionGenerations,
 } from "../usage-tracker.js";
 import { resolveTheme, themeNames, DEFAULT_THEME_NAME } from "./theme.js";
-import { listModels, getModelOrInfer, type ModelEntry } from "../models/registry.js";
-import { decideNextStep } from "../models/next-step.js";
+import { listModels, getModelOrInfer, migrateLegacyModelId, vendorOf, isFreeModel, type ModelEntry } from "../models/registry.js";
 import { validateModelId } from "../agent/client.js";
 import { getShellCommand } from "../tools/bash.js";
 import {
@@ -65,8 +65,6 @@ import {
 import { HOOK_EVENTS } from "../hooks/types.js";
 import type { AbortScope } from "../util/abort-scope.js";
 import type { CustomCommand } from "../commands/types.js";
-import { buildReport, sendReport } from "../cloud/report.js";
-import { isCloudModeAvailable, CLOUD_UNAVAILABLE_NOTICE } from "../cloud/availability.js";
 import { checkForUpdate } from "../util/update-check.js";
 import { getAppVersion } from "../util/version.js";
 import {
@@ -107,7 +105,7 @@ export interface SlashContext {
   // Misc UI state setters
   setUsage: React.Dispatch<React.SetStateAction<Usage | null>>;
   setSessionUsage: React.Dispatch<React.SetStateAction<DailyUsage | null>>;
-  setGatewayMeta: React.Dispatch<React.SetStateAction<GatewayMeta | null>>;
+  setResponseMeta: React.Dispatch<React.SetStateAction<ResponseMeta | null>>;
   setHasUpdate: React.Dispatch<React.SetStateAction<boolean>>;
   setLatestVersion: React.Dispatch<React.SetStateAction<string | null>>;
 
@@ -115,9 +113,6 @@ export interface SlashContext {
   setShowThemePicker: (v: boolean) => void;
   setShowModelPicker: (v: boolean) => void;
   setShowModePicker: (v: boolean) => void;
-  setKeyEntryFor: (v: ModelEntry | null) => void;
-  setBillingChooserFor: (v: ModelEntry | null) => void;
-  setUnifiedProbeFor: (v: ModelEntry | null) => void;
   setShowInboxModal: (v: boolean) => void;
   setShowMultiAgentModal: (v: boolean) => void;
   setShowLspWizard: (v: boolean) => void;
@@ -128,7 +123,6 @@ export interface SlashContext {
   setShowHooksDashboard: (v: boolean) => void;
   setShowHelpMenu: (v: boolean) => void;
   setShowMemoryPicker: (v: boolean) => void;
-  setShowGatewayPicker: (v: boolean) => void;
   setShowSkillsPicker: (v: boolean) => void;
   setShowShellPicker: (v: boolean) => void;
   setShowChangelogImagePicker: (v: boolean) => void;
@@ -151,9 +145,6 @@ export interface SlashContext {
   initMcp: () => Promise<void> | void;
   initLsp: () => Promise<void> | void;
   ensureSessionId: () => unknown;
-  upgrade: () => Promise<void> | void;
-  topup: () => Promise<void> | void;
-  manageMembership: () => Promise<void> | void;
 
   // Refs
   lspManagerRef: React.MutableRefObject<LspManager>;
@@ -167,7 +158,7 @@ export interface SlashContext {
   pendingToolCallsRef: React.MutableRefObject<Map<string, string>>;
   usageRef: React.MutableRefObject<Usage | null>;
   turnCounterRef: React.MutableRefObject<number>;
-  gatewayMetaRef: React.MutableRefObject<GatewayMeta | null>;
+  responseMetaRef: React.MutableRefObject<ResponseMeta | null>;
   executorRef: React.MutableRefObject<ToolExecutor>;
   mcpToolsRef: React.MutableRefObject<ToolSpec[]>;
   mcpInitRef: React.MutableRefObject<boolean>;
@@ -223,8 +214,8 @@ const handleClear: Handler = (ctx) => {
   setEvents([]);
   ctx.setUsage(null);
   ctx.setSessionUsage(null);
-  ctx.gatewayMetaRef.current = null;
-  ctx.setGatewayMeta(null);
+  ctx.responseMetaRef.current = null;
+  ctx.setResponseMeta(null);
   ctx.clearTaskTracking();
   ctx.compactSuggestedRef.current = false;
   ctx.updateNudgedRef.current = false;
@@ -262,8 +253,8 @@ export function executeFreshStart(
   ctx.setEvents([]);
   ctx.setUsage(null);
   ctx.setSessionUsage(null);
-  ctx.gatewayMetaRef.current = null;
-  ctx.setGatewayMeta(null);
+  ctx.responseMetaRef.current = null;
+  ctx.setResponseMeta(null);
   ctx.clearTaskTracking();
   ctx.compactSuggestedRef.current = false;
   ctx.updateNudgedRef.current = false;
@@ -275,7 +266,7 @@ export function executeFreshStart(
   rebuildSystemPromptForMode(
     ctx.messagesRef.current,
     ctx.cacheStableRef.current,
-    ctx.cfg?.model ?? (ctx.cfg?.cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL),
+    ctx.cfg?.model ?? DEFAULT_MODEL,
     overrideMode ?? ctx.mode,
     [...ALL_TOOLS, ...ctx.mcpToolsRef.current, ...ctx.lspToolsRef.current],
     ctx.cfg?.preferPullRequests,
@@ -324,18 +315,8 @@ const handleFresh: Handler = async (ctx) => {
       : await generateContinuationSummary({
           messages: ctx.messagesRef.current,
           mode: ctx.mode,
-          accountId: cfg?.accountId ?? "",
-          apiToken: cfg?.apiToken ?? "",
-          model: cfg?.plumbingModel ?? "@cf/moonshotai/kimi-k2.5",
-          gateway: cfg?.aiGatewayId
-            ? {
-                id: cfg.aiGatewayId,
-                cacheTtl: cfg.aiGatewayCacheTtl,
-                skipCache: cfg.aiGatewaySkipCache,
-                collectLogPayload: cfg.aiGatewayCollectLogPayload,
-                metadata: cfg.aiGatewayMetadata,
-              }
-            : undefined,
+          ...llmAuthFromConfig(cfg),
+          model: cfg?.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
           memoryManager: ctx.memoryManagerRef.current,
           memoryEnabled: cfg?.memoryEnabled,
         });
@@ -403,34 +384,10 @@ const handleCost: Handler = (ctx, _rest, arg) => {
   void getCostReport(sessionIdRef.current ?? undefined)
     .then(async (report) => {
       const lines = [formatCostReport(report)];
-      if (cfg?.aiGatewayId && process.env.KIMIFLARE_DISABLE_AI_GATEWAY !== "1") {
-        const sid = sessionIdRef.current;
-        const logs = sid ? await getSessionGatewayLogs(sid).catch(() => []) : [];
-        const gwSection = formatGatewaySection(report, cfg.accountId, cfg.aiGatewayId, logs);
-        if (gwSection) lines.push("", gwSection);
-
-        // Pull per-feature cost from the Gateway logs API (1-hour cache),
-        // and surface drift status alongside the local total.
-        try {
-          const { reconcileWithCloudflare } = await import("../cost-attribution/reconcile.js");
-          const today = new Date().toISOString().slice(0, 10);
-          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .slice(0, 10);
-          const recon = await reconcileWithCloudflare({
-            localCost: report.month.cost,
-            accountId: cfg.accountId,
-            apiToken: cfg.apiToken,
-            gatewayId: cfg.aiGatewayId,
-            startDate: sevenDaysAgo,
-            endDate: today,
-          });
-          const breakdown = formatFeatureBreakdown(recon.featureBreakdown);
-          if (breakdown) lines.push("", breakdown);
-        } catch {
-          /* best-effort; /cost still renders without the breakdown */
-        }
-      }
+      const sid = sessionIdRef.current;
+      const logs = sid ? await getSessionGenerations(sid).catch(() => []) : [];
+      const genSection = formatGenerationsSection(logs);
+      if (genSection) lines.push("", genSection);
       if (cfg?.costAttribution) {
         const { getCategoryReportText } = await import("../cost-attribution/tui-report.js");
         const catReport = await getCategoryReportText(sessionIdRef.current ?? undefined);
@@ -485,16 +442,6 @@ const handleShell: Handler = (ctx, _rest, arg) => {
 
 const handleModel: Handler = (ctx, rest, arg) => {
   const { cfg, setCfg, setEvents, mkKey } = ctx;
-
-  // On KimiFlare Cloud the model is managed for the user — no visibility or control.
-  if (cfg?.cloudMode) {
-    setEvents((e) => [
-      ...e,
-      { kind: "info", key: mkKey(), text: "Model selection isn't available on KimiFlare Cloud — the model is managed for you." },
-    ]);
-    return true;
-  }
-
   const sub = rest[0]?.toLowerCase() ?? "";
 
   // `/model` with no args → open the picker
@@ -503,48 +450,53 @@ const handleModel: Handler = (ctx, rest, arg) => {
     return true;
   }
 
-  // `/model list` → textual list grouped by provider
+  // `/model list [filter]` → textual list grouped by vendor (tool-capable models only)
   if (sub === "list") {
-    const all = listModels();
-    const byProvider = new Map<string, ModelEntry[]>();
+    const filter = rest.slice(1).join(" ").toLowerCase();
+    const all = listModels().filter(
+      (m) => m.supports.tools && (!filter || m.id.toLowerCase().includes(filter)),
+    );
+    const byVendor = new Map<string, ModelEntry[]>();
     for (const m of all) {
-      const arr = byProvider.get(m.provider) ?? [];
+      const v = isFreeModel(m) ? "free" : vendorOf(m.id);
+      const arr = byVendor.get(v) ?? [];
       arr.push(m);
-      byProvider.set(m.provider, arr);
+      byVendor.set(v, arr);
     }
     const lines: string[] = [`available models (current: ${cfg?.model ?? "unknown"}):`];
-    for (const [provider, list] of byProvider) {
-      lines.push(`  ${provider}:`);
+    for (const [vendor, list] of [...byVendor.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      lines.push(`  ${vendor}:`);
       for (const m of list) {
         const marker = m.id === cfg?.model ? "●" : " ";
         const ctxStr = m.contextWindow >= 1_000_000
           ? `${(m.contextWindow / 1_000_000).toFixed(1)}M`
           : `${Math.round(m.contextWindow / 1_000)}k`;
-        const price = m.pricing.inputPerMtok === 0 && m.pricing.outputPerMtok === 0
-          ? "price n/a"
-          : `$${m.pricing.inputPerMtok}/$${m.pricing.outputPerMtok}`;
-        lines.push(`    ${marker} ${m.id}  (${ctxStr} ctx, ${price}, ${m.billingMode})`);
+        const price = isFreeModel(m)
+          ? "free"
+          : `$${Number(m.pricing.inputPerMtok.toPrecision(4))}/$${Number(m.pricing.outputPerMtok.toPrecision(4))}`;
+        lines.push(`    ${marker} ${m.id}  (${ctxStr} ctx, ${price} per Mtok)`);
       }
     }
     setEvents((e) => [...e, { kind: "info", key: mkKey(), text: lines.join("\n") }]);
     return true;
   }
 
-  // `/model <id>` → set directly, then route through the same decision table
-  // as the picker (Workers-AI → ready; Unified-eligible → chooser; BYOK-only → key entry).
+  // `/model <id>` → set directly. Old Cloudflare ids (@cf/…) are translated.
+  const id = migrateLegacyModelId(rest.join(" ").trim());
   try {
-    validateModelId(arg);
+    validateModelId(id);
   } catch {
     setEvents((e) => [
       ...e,
-      { kind: "info", key: mkKey(), text: `invalid model id: ${arg}` },
+      { kind: "info", key: mkKey(), text: `invalid model id: ${id} — OpenRouter ids look like vendor/model, e.g. ${DEFAULT_MODEL}` },
     ]);
     return true;
   }
-  const entry = getModelOrInfer(arg);
+  const entry = getModelOrInfer(id);
+  const known = listModels().some((m) => m.id === id);
   setCfg((prev) => {
     if (!prev) return prev;
-    const updated = { ...prev, model: arg };
+    const updated = { ...prev, model: id };
     void saveConfig(updated).catch(() => {});
     return updated;
   });
@@ -553,159 +505,75 @@ const handleModel: Handler = (ctx, rest, arg) => {
     {
       kind: "info",
       key: mkKey(),
-      text: `model: ${arg} · ${entry.contextWindow.toLocaleString()} ctx`,
+      text: known
+        ? `model: ${id} · ${entry.contextWindow.toLocaleString()} ctx${entry.supports.tools ? "" : " · ⚠ no tool calling — the agent can't edit files or run commands with this model"}`
+        : `model: ${id} · not in OpenRouter's catalog — check the id with /model list if requests fail`,
     },
   ]);
-
-  const next = decideNextStep(cfg, entry);
-  if (next.kind === "needs-gateway") {
-    setEvents((e) => [
-      ...e,
-      { kind: "info", key: mkKey(), text: `⚠ no AI Gateway configured — run /gateway <id>` },
-    ]);
-  } else if (next.kind === "billing-choice") {
-    ctx.setBillingChooserFor(entry);
-  } else if (next.kind === "needs-key") {
-    ctx.setKeyEntryFor(entry);
-  }
   return true;
 };
 
-const handleGateway: Handler = (ctx, rest) => {
-  const { cfg, setCfg, setEvents, mkKey, sessionIdRef } = ctx;
-  if (!cfg) {
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "no config loaded" }]);
-    return true;
-  }
-  if (cfg.cloudMode) {
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "AI Gateway is managed by Kimiflare Cloud" }]);
-    return true;
-  }
+/** /key — show, replace or clear the OpenRouter API key. */
+const handleKey: Handler = async (ctx, rest) => {
+  const { cfg, setCfg, setEvents, mkKey } = ctx;
+  const info = (text: string, kind: "info" | "error" = "info") =>
+    setEvents((e) => [...e, { kind, key: mkKey(), text }]);
   const sub = rest[0]?.toLowerCase() ?? "";
-  const subArg = rest.slice(1).join(" ").trim();
+  const envKey = process.env.OPENROUTER_API_KEY || process.env.KIMIFLARE_OPENROUTER_KEY;
 
-  if (!sub) {
-    ctx.setShowGatewayPicker(true);
-    return true;
-  }
-
-  if (sub === "status") {
-    const lines: string[] = [];
-    if (cfg.aiGatewayId) {
-      lines.push(`gateway: ${cfg.aiGatewayId}`);
-      lines.push(`cache-ttl: ${cfg.aiGatewayCacheTtl ?? "default"}`);
-      lines.push(`skip-cache: ${cfg.aiGatewaySkipCache ?? false}`);
-      lines.push(`collect-logs: ${cfg.aiGatewayCollectLogPayload ?? false}`);
-      const meta = cfg.aiGatewayMetadata;
-      lines.push(`metadata: ${meta && Object.keys(meta).length > 0 ? JSON.stringify(meta) : "none"}`);
-      // Tack on the live cache-hit ratio for the current session — derived
-      // from the cf-aig-cache-status headers we've collected so far.
-      const sid = sessionIdRef.current;
-      if (sid) {
-        void getCostReport(sid)
-          .then((report) => {
-            const req = report.session.gatewayRequests ?? 0;
-            if (req === 0) return;
-            const cached = report.session.gatewayCachedRequests ?? 0;
-            const pct = ((cached / req) * 100).toFixed(1);
-            setEvents((e) => [
-              ...e,
-              { kind: "info", key: mkKey(), text: `cache hits (session): ${cached}/${req} (${pct}%)` },
-            ]);
-          })
-          .catch(() => {});
-      }
-    } else {
-      lines.push("gateway: off (direct Workers AI)");
-    }
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: lines.join("\n") }]);
-    return true;
-  }
-
-  if (sub === "off") {
-    const next = { ...cfg, aiGatewayId: undefined };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "gateway disabled — using direct Workers AI" }]);
-    return true;
-  }
-
-  if (sub === "cache-ttl") {
-    const ttl = parseInt(subArg, 10);
-    if (Number.isNaN(ttl) || ttl < 0) {
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "usage: /gateway cache-ttl <seconds>" }]);
+  if (sub === "set") {
+    const candidate = rest.slice(1).join("").trim();
+    if (!candidate) {
+      info(`usage: /key set <sk-or-…>  (create a key at ${OPENROUTER_KEYS_URL})`);
       return true;
     }
-    const next = { ...cfg, aiGatewayCacheTtl: ttl };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `gateway cache-ttl set to ${ttl}s` }]);
+    if (!looksLikeOpenRouterKey(candidate)) {
+      info("that doesn't look like an OpenRouter key — they start with sk-or-", "error");
+      return true;
+    }
+    info("checking key with OpenRouter…");
+    const res = await checkOpenRouterKey(candidate);
+    if (!res.ok) {
+      info(res.reason === "invalid" ? "OpenRouter rejected that key — nothing was saved" : `couldn't verify the key: ${res.message}`, "error");
+      return true;
+    }
+    await patchPersistedConfig({ openrouterApiKey: candidate });
+    setCfg((prev) => (prev ? { ...prev, openrouterApiKey: candidate } : prev));
+    info(
+      `OpenRouter key saved to ${configPath()}` +
+        (envKey ? " — note: OPENROUTER_API_KEY in your environment still takes precedence" : ""),
+    );
     return true;
   }
 
-  if (sub === "skip-cache") {
-    const val = subArg === "true" ? true : subArg === "false" ? false : undefined;
-    if (val === undefined) {
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "usage: /gateway skip-cache true|false" }]);
-      return true;
-    }
-    const next = { ...cfg, aiGatewaySkipCache: val };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `gateway skip-cache set to ${val}` }]);
+  if (sub === "clear") {
+    await patchPersistedConfig({ openrouterApiKey: undefined });
+    info(
+      envKey
+        ? "removed the key from the config file (the one in OPENROUTER_API_KEY is still used)"
+        : "OpenRouter key removed — kimiflare will ask for one on next launch",
+    );
     return true;
   }
 
-  if (sub === "collect-logs") {
-    const val = subArg === "true" ? true : subArg === "false" ? false : undefined;
-    if (val === undefined) {
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "usage: /gateway collect-logs true|false" }]);
-      return true;
-    }
-    const next = { ...cfg, aiGatewayCollectLogPayload: val };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `gateway collect-logs set to ${val}` }]);
+  const key = cfg?.openrouterApiKey;
+  if (!key) {
+    info(`no OpenRouter key configured — run /key set <key> (create one at ${OPENROUTER_KEYS_URL})`);
     return true;
   }
-
-  if (sub === "metadata") {
-    if (subArg === "clear") {
-      const next = { ...cfg, aiGatewayMetadata: undefined };
-      setCfg(next);
-      void saveConfig(next).catch(() => {});
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "gateway metadata cleared" }]);
-      return true;
-    }
-    const eq = subArg.indexOf("=");
-    if (eq === -1) {
-      setEvents((e) => [
-        ...e,
-        { kind: "info", key: mkKey(), text: "usage: /gateway metadata KEY=VALUE  or  /gateway metadata clear" },
-      ]);
-      return true;
-    }
-    const key = subArg.slice(0, eq).trim();
-    let value: string | number | boolean = subArg.slice(eq + 1).trim();
-    if (value === "true") value = true;
-    else if (value === "false") value = false;
-    else if (/^-?\d+$/.test(value)) value = parseInt(value, 10);
-    const nextMeta = { ...(cfg.aiGatewayMetadata ?? {}), [key]: value };
-    const next = { ...cfg, aiGatewayMetadata: nextMeta };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [
-      ...e,
-      { kind: "info", key: mkKey(), text: `gateway metadata: ${key}=${JSON.stringify(value)}` },
-    ]);
+  const masked = `${key.slice(0, 8)}…${key.slice(-4)}`;
+  const source = envKey ? "environment" : "config file";
+  const res = await checkOpenRouterKey(key);
+  if (!res.ok) {
+    info(`key ${masked} (${source}): ${res.message}`, "error");
     return true;
   }
-
-  // Default: treat sub as a gateway ID to enable
-  const next = { ...cfg, aiGatewayId: rest[0] };
-  setCfg(next);
-  void saveConfig(next).catch(() => {});
-  setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `gateway enabled: ${rest[0]}` }]);
+  const parts = [`key ${masked} (${source})`];
+  if (res.info.label) parts.push(`label: ${res.info.label}`);
+  if (typeof res.info.usage === "number") parts.push(`spent: $${res.info.usage.toFixed(2)}`);
+  if (typeof res.info.limitRemaining === "number") parts.push(`credit left: $${res.info.limitRemaining.toFixed(2)}`);
+  if (res.info.isFreeTier) parts.push("free tier (free models only)");
+  info(parts.join(" · "));
   return true;
 };
 
@@ -1472,95 +1340,27 @@ const handleInbox: Handler = (ctx) => {
   return true;
 };
 
-const handleReport: Handler = (ctx, rest) => {
-  const { setEvents, mkKey, cfg, lastApiErrorRef, sessionIdRef } = ctx;
-  const err = lastApiErrorRef.current;
-  if (!err) {
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "No recent API error to report." }]);
-    return true;
-  }
-  const note = rest.join(" ").trim();
-  const isSend = note.toLowerCase() === "send" || note.toLowerCase().startsWith("send ");
-  if (!isSend) {
-    const preview = [
-      "Report preview:",
-      `  Error: ${err.message}`,
-      err.httpStatus !== undefined ? `  HTTP ${err.httpStatus}` : "",
-      err.code !== undefined ? `  Code: ${err.code}` : "",
-      note ? `  Note: ${note}` : "",
-      "",
-      "Type `/report send` to submit or `/report send <note>` to add context.",
-    ]
-      .filter(Boolean)
-      .join("\n");
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: preview }]);
-    return true;
-  }
-  const userNote = note.slice(4).trim() || undefined;
-  const payload = buildReport({
-    errorMessage: err.message,
-    httpStatus: err.httpStatus,
-    errorCode: err.code,
-    sessionId: sessionIdRef.current ?? undefined,
-    userNote,
-    model: cfg?.model,
-    cloudMode: cfg?.cloudMode,
-  });
-  void sendReport(payload, cfg?.cloudToken).then((result) => {
-    setEvents((e) => [...e, { kind: result.ok ? "info" : "error", key: mkKey(), text: result.message }]);
-    if (result.ok) {
-      lastApiErrorRef.current = null;
-    }
-  });
-  setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Sending report…" }]);
-  return true;
-};
-
 const handleLogout: Handler = (ctx) => {
-  // "Log in with Cloudflare" sessions: revoke the refresh token so the grant
-  // disappears from the user's Cloudflare authorizations too (best effort).
-  const oauth = ctx.cfg?.cloudflareOAuth;
-  if (oauth?.refreshToken) {
-    void import("../cloud/cloudflare-oauth.js").then(({ revokeCloudflareToken }) =>
-      revokeCloudflareToken(oauth.refreshToken!, oauth.clientId),
-    );
-  }
-  unlink(configPath()).catch(() => {});
+  // Remove stored credentials but keep every other setting (theme, MCP
+  // servers, …). A key in OPENROUTER_API_KEY is outside our control.
+  void patchPersistedConfig({
+    openrouterApiKey: undefined,
+    apiKey: undefined,
+    accountId: undefined,
+    apiToken: undefined,
+  }).catch(() => undefined);
+  const envKey = process.env.OPENROUTER_API_KEY || process.env.KIMIFLARE_OPENROUTER_KEY;
   ctx.setEvents((e) => [
     ...e,
     {
       kind: "info",
       key: ctx.mkKey(),
-      text: oauth
-        ? `signed out of Cloudflare and cleared credentials from ${configPath()}`
-        : `credentials cleared from ${configPath()}`,
+      text:
+        `credentials cleared from ${configPath()}` +
+        (envKey ? " (OPENROUTER_API_KEY in your environment will still be used next launch)" : ""),
     },
   ]);
   ctx.setCfg(null);
-  return true;
-};
-
-// /upgrade, /topup and /manage only exist for KimiFlare Cloud, which is
-// temporarily hidden (src/cloud/availability.ts). While hidden they print a
-// short notice instead of reaching into the (still present) billing client.
-const cloudCommandGate = (ctx: SlashContext): boolean => {
-  if (isCloudModeAvailable()) return true;
-  ctx.setEvents((e) => [...e, { kind: "info", key: ctx.mkKey(), text: CLOUD_UNAVAILABLE_NOTICE }]);
-  return false;
-};
-
-const handleUpgrade: Handler = (ctx) => {
-  if (cloudCommandGate(ctx)) void ctx.upgrade();
-  return true;
-};
-
-const handleTopup: Handler = (ctx) => {
-  if (cloudCommandGate(ctx)) void ctx.topup();
-  return true;
-};
-
-const handleManage: Handler = (ctx) => {
-  if (cloudCommandGate(ctx)) void ctx.manageMembership();
   return true;
 };
 
@@ -1818,17 +1618,14 @@ const handleChangelogImage: Handler = (ctx, rest) => {
     void (async () => {
       try {
         const { changelogImageTool } = await import("../tools/changelog-image.js");
-        const { gatewayFromConfig } = await import("./app-helpers.js");
 
         updateTask("fetch-prs", "in_progress");
         updateTask("fetch-release", "in_progress");
         const result = await changelogImageTool.run({ owner: o, repo: r, days: d }, {
           cwd: process.cwd(),
           githubToken: cfg.githubOAuthToken,
-          accountId: cfg.accountId,
-          apiToken: cfg.apiToken,
+          llmAuth: llmAuthFromConfig(cfg),
           model: cfg.model,
-          gateway: gatewayFromConfig(cfg),
         });
         updateTask("fetch-prs", "completed");
         updateTask("fetch-release", "completed");
@@ -1904,7 +1701,7 @@ const handlers: Record<string, Handler> = {
   "/cost": handleCost,
   "/shell": handleShell,
   "/model": handleModel,
-  "/gateway": handleGateway,
+  "/key": handleKey,
   "/mode": handleMode,
   "/multi-agent": handleMultiAgent,
   "/theme": handleTheme,
@@ -1924,11 +1721,7 @@ const handlers: Record<string, Handler> = {
   "/hooks": handleHooks,
   "/hello": handleHello,
   "/inbox": handleInbox,
-  "/report": handleReport,
   "/logout": handleLogout,
-  "/upgrade": handleUpgrade,
-  "/topup": handleTopup,
-  "/manage": handleManage,
   "/command": handleCommand,
   "/remote": handleRemote,
   "/changelog-image": handleChangelogImage,

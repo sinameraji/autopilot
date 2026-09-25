@@ -16,8 +16,9 @@ import type { WriteStream } from "node:fs";
  *     TUI is silent. Disable for tests + the print/RPC modes that
  *     should not touch the user's disk.
  *   - We deliberately do NOT log LLM request/response bodies here.
- *     Those live in Cloudflare AI Gateway already; replicating them
- *     locally would double disk usage for the loudest event type.
+ *     OpenRouter keeps them per generation (and KIMIFLARE_DUMP_LLM=1
+ *     captures full payloads locally on demand); logging every body here
+ *     would double disk usage for the loudest event type.
  *     Emit a thin event (`{event: "llm:call", model, request_id, …}`)
  *     and join on `request_id` if you need the body.
  */

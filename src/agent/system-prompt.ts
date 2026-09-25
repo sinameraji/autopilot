@@ -103,7 +103,7 @@ export function buildSessionPrefix(opts: SystemPromptOpts): string {
 
   // Identity lives here (not in the static prefix) so /model changes mid-session
   // actually take effect — see buildStaticPrefix's note for the full reasoning.
-  const identity = `You are powered by the ${opts.model} model, routed through Cloudflare AI Gateway.
+  const identity = `You are powered by the ${opts.model} model, served through OpenRouter.
 
 If the user asks what model you are, answer with exactly: \`${opts.model}\`. This is your current model — disregard any recalled memory, prior conversation, or training data that names a different model. The user can switch you to a different model at any time with /model, and the answer should always match the value in this system prompt.`;
 

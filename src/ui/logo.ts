@@ -27,12 +27,13 @@ const LOGO_ART = `\x1b[49m                                                \x1b[m
 const LOGO_WIDTH = 48;
 
 /** Styled text lines to render beside the logo. */
-function buildTextLines(version: string, cloudMode?: boolean): string[] {
+function buildTextLines(version: string, model?: string): string[] {
   const accent = "[38;2;255;153;0m";
   const dim = "[2m";
   const reset = "[0m";
   const bold = "[1m";
-  const modelLabel = cloudMode ? "Kimi-K2.7" : "Kimi-K2.6";
+  // "moonshotai/kimi-k2.6" → "kimi-k2.6"
+  const modelLabel = model ? model.slice(model.indexOf("/") + 1) : "Kimi";
 
   return [
     "",
@@ -44,7 +45,7 @@ function buildTextLines(version: string, cloudMode?: boolean): string[] {
     `  ${bold}${accent}Kimiflare${reset}`,
     "",
     `  ${dim}Terminal coding agent${reset}`,
-    `  ${dim}powered by ${modelLabel}${reset}`,
+    `  ${dim}powered by ${modelLabel} via OpenRouter${reset}`,
     "",
     `  ${dim}v${version}${reset}`,
     "",
@@ -75,9 +76,9 @@ function padVisual(str: string, width: number): string {
 }
 
 /** Render the logo with text appended to the right side. */
-export function renderLogo(version: string, cloudMode?: boolean): string {
+export function renderLogo(version: string, model?: string): string {
   const logoLines = LOGO_ART.split("\n");
-  const textLines = buildTextLines(version, cloudMode);
+  const textLines = buildTextLines(version, model);
   const out: string[] = [];
 
   for (let i = 0; i < logoLines.length; i++) {

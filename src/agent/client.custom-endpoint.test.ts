@@ -3,19 +3,14 @@
  *
  * A host application (e.g. an agents platform running kimiflare inside a
  * container) points the CLI at its own gateway/broker with
- * KIMIFLARE_BASE_URL + KIMIFLARE_API_KEY instead of handing the process a raw
- * Cloudflare token. These tests pin the contract:
+ * KIMIFLARE_BASE_URL + KIMIFLARE_API_KEY. These tests pin the contract:
  *
  *   1. Requests go to `<baseUrl>/chat/completions` with
- *      `Authorization: Bearer <apiKey>` — and nothing else auth-wise: no
- *      cf-aig-authorization, no cf-aig-byok-alias, no cf-aig-* gateway
- *      headers, no Cloudflare token fallback.
- *   2. The custom endpoint wins over every Cloudflare path (gateway,
- *      cf-catalog, direct Workers AI, cloud mode) even when those are
- *      configured too.
- *   3. Model ids pass through in the body unchanged — no workers-ai/
- *      prefixing, no Cloudflare id-shape validation.
- *   4. Works with completely empty Cloudflare credentials.
+ *      `Authorization: Bearer <apiKey>` — never the OpenRouter key, and none
+ *      of the OpenRouter-only body fields (provider, session_id, cache_control).
+ *   2. The custom endpoint wins over OpenRouter even when a key is configured.
+ *   3. Model ids pass through in the body unchanged — no id-shape validation.
+ *   4. Works with no OpenRouter key at all.
  */
 
 import { describe, it, before, after, beforeEach } from "node:test";
@@ -55,11 +50,9 @@ describe("runKimi: custom OpenAI-compatible endpoint", () => {
     for (const k of ENV_KEYS) delete process.env[k];
   });
 
-  it("routes to <baseUrl>/chat/completions with the custom bearer and no Cloudflare credentials", async () => {
+  it("routes to <baseUrl>/chat/completions with the custom bearer and no OpenRouter key", async () => {
     for await (const _ of runKimi({
-      accountId: "",
-      apiToken: "",
-      model: "@cf/moonshotai/kimi-k2.6",
+      model: "moonshotai/kimi-k2.6",
       messages: [{ role: "user", content: "hi" }],
       customEndpoint: { baseUrl: "https://aig.example.com/v1", apiKey: "broker-key" },
     })) {
@@ -69,41 +62,36 @@ describe("runKimi: custom OpenAI-compatible endpoint", () => {
     assert.strictEqual(lastRequest!.url, "https://aig.example.com/v1/chat/completions");
     assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer broker-key");
     const body = JSON.parse(await lastRequest!.text()) as Record<string, unknown>;
-    // Model id passes through unchanged — no workers-ai/ prefix.
-    assert.strictEqual(body.model, "@cf/moonshotai/kimi-k2.6");
+    assert.strictEqual(body.model, "moonshotai/kimi-k2.6");
+    // Plain OpenAI-compatible upstreams need the opt-in to stream usage.
     assert.deepStrictEqual(body.stream_options, { include_usage: true });
   });
 
-  it("wins over gateway / BYOK / unified-billing config and sends no cf-aig-* headers", async () => {
+  it("wins over a configured OpenRouter key and sends no OpenRouter-only fields", async () => {
     for await (const _ of runKimi({
-      accountId: "acct",
-      apiToken: "cf-token",
+      openrouterApiKey: "sk-or-should-not-leak",
+      provider: { ignore: ["X"] },
+      sessionId: "sess-1",
       model: "anthropic/claude-haiku-4-5",
       messages: [{ role: "user", content: "hi" }],
-      gateway: { id: "gw", cacheTtl: 60, metadata: { feature: "chat" } },
-      providerKeys: { anthropic: "sk-ant-should-not-leak" },
-      providerKeyAliases: { anthropic: "alias-should-not-leak" },
-      unifiedBilling: true,
       customEndpoint: { baseUrl: "https://aig.example.com/v1", apiKey: "broker-key" },
     })) {
       /* drain */
     }
     assert.ok(lastRequest);
     assert.strictEqual(lastRequest!.url, "https://aig.example.com/v1/chat/completions");
-    // The broker bearer replaces the Cloudflare token — never both.
+    // The broker bearer replaces the OpenRouter key — never both.
     assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer broker-key");
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-authorization"), null);
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-byok-alias"), null);
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-gateway-id"), null);
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-cache-ttl"), null);
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-metadata"), null);
+    assert.strictEqual(lastRequest!.headers.get("HTTP-Referer"), null);
+    const body = JSON.parse(await lastRequest!.text()) as Record<string, unknown>;
+    assert.ok(!("provider" in body));
+    assert.ok(!("session_id" in body));
+    assert.ok(!("cache_control" in body));
   });
 
-  it("accepts model ids the Cloudflare paths would reject (host gateway owns dispatch)", async () => {
+  it("accepts model ids the OpenRouter path would reject (host gateway owns dispatch)", async () => {
     for await (const _ of runKimi({
-      accountId: "",
-      apiToken: "",
-      model: "my-broker-alias", // no @cf/ or provider/ shape
+      model: "my-broker-alias", // no vendor/model shape
       messages: [{ role: "user", content: "hi" }],
       customEndpoint: { baseUrl: "https://aig.example.com/v1", apiKey: "broker-key" },
     })) {
@@ -115,9 +103,7 @@ describe("runKimi: custom OpenAI-compatible endpoint", () => {
 
   it("omits the Authorization header entirely when no apiKey is configured", async () => {
     for await (const _ of runKimi({
-      accountId: "",
-      apiToken: "",
-      model: "@cf/moonshotai/kimi-k2.6",
+      model: "moonshotai/kimi-k2.6",
       messages: [{ role: "user", content: "hi" }],
       customEndpoint: { baseUrl: "http://127.0.0.1:11434/v1" },
     })) {
@@ -128,9 +114,7 @@ describe("runKimi: custom OpenAI-compatible endpoint", () => {
 
   it("does not double /chat/completions when the base already includes it", async () => {
     for await (const _ of runKimi({
-      accountId: "",
-      apiToken: "",
-      model: "@cf/moonshotai/kimi-k2.6",
+      model: "moonshotai/kimi-k2.6",
       messages: [{ role: "user", content: "hi" }],
       customEndpoint: { baseUrl: "https://aig.example.com/v1/chat/completions", apiKey: "k" },
     })) {
@@ -143,43 +127,19 @@ describe("runKimi: custom OpenAI-compatible endpoint", () => {
     process.env.KIMIFLARE_BASE_URL = "https://env.example.com/v1";
     process.env.KIMIFLARE_API_KEY = "env-key";
     for await (const _ of runKimi({
-      accountId: "acct",
-      apiToken: "cf-token",
-      model: "@cf/moonshotai/kimi-k2.6",
+      openrouterApiKey: "sk-or-should-not-leak",
+      model: "moonshotai/kimi-k2.6",
       messages: [{ role: "user", content: "hi" }],
-      gateway: { id: "gw" },
     })) {
       /* drain */
     }
     assert.strictEqual(lastRequest!.url, "https://env.example.com/v1/chat/completions");
     assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer env-key");
-    assert.strictEqual(lastRequest!.headers.get("cf-aig-gateway-id"), null);
-  });
-
-  it("wins over cloud mode and does not demand a cloud token", async () => {
-    // Without a custom endpoint this combination throws before any fetch.
-    for await (const _ of runKimi({
-      accountId: "",
-      apiToken: "",
-      model: "moonshotai/kimi-k3",
-      messages: [{ role: "user", content: "hi" }],
-      cloudMode: true,
-      customEndpoint: { baseUrl: "https://aig.example.com/v1", apiKey: "broker-key" },
-    })) {
-      /* drain */
-    }
-    assert.strictEqual(lastRequest!.url, "https://aig.example.com/v1/chat/completions");
-    assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer broker-key");
-    // Body still carries the model verbatim (cloud shape would omit it).
-    const body = JSON.parse(await lastRequest!.text()) as Record<string, unknown>;
-    assert.strictEqual(body.model, "moonshotai/kimi-k3");
   });
 
   it("rejects an empty model id", async () => {
     await assert.rejects(async () => {
       for await (const _ of runKimi({
-        accountId: "",
-        apiToken: "",
         model: "",
         messages: [{ role: "user", content: "hi" }],
         customEndpoint: { baseUrl: "https://aig.example.com/v1", apiKey: "k" },

@@ -1,7 +1,16 @@
 # Plan: replace Cloudflare with OpenRouter as the model provider
 
-Written by the ops agent, 2026-09-19, after reading the codebase and commit history. Nothing in
-this doc has been implemented yet — this is the plan for review before any code changes.
+Written by the ops agent, 2026-09-19, after reading the codebase and commit history.
+
+**Status (2026-09-25): implemented on `feat/openrouter-provider`** — steps 2–5 landed together
+(OpenRouter route + live catalog, onboarding, per-turn cost confirmation, Cloudflare removal,
+README). Open question 1 stayed as-is: the npm package is still `kimiflare`. Decisions made while
+implementing, from verifying OpenRouter's API: every request sends `provider.require_parameters:
+true` (some endpoints serve a model without tool calling) and `session_id` (sticky routing keeps the
+prompt cache warm); cost is confirmed from the stream's inline `usage.cost`, with
+`GET /generation` as the fallback; memory embeddings use OpenRouter's `baai/bge-base-en-v1.5`, the
+same model Workers AI served, so existing memory DBs stay valid. Commute workers now receive
+`userOpenRouterKey` — the Commute server (separate repo) needs to use it.
 
 **Scope decided by Sina, 2026-09-19: full replacement, not additive.** Cloudflare goes away as
 the model provider; OpenRouter becomes the only one. The provider is not user-choosable — "the

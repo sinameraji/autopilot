@@ -18,7 +18,8 @@ import { summarizeMessagesViaLlm } from "./llm-summarize.js";
 import { ArtifactStore, type SessionState } from "./session-state.js";
 import type { AbortScope } from "../util/abort-scope.js";
 import { logger } from "../util/logger.js";
-import { compactEventsVisual, gatewayFromConfig } from "../ui/app-helpers.js";
+import { compactEventsVisual } from "../ui/app-helpers.js";
+import { llmAuthFromConfig } from "./llm-auth.js";
 import type { HooksManager } from "../hooks/manager.js";
 import type { TurnSupervisor } from "./supervisor.js";
 
@@ -119,12 +120,10 @@ export async function runCompact(deps: RunCompactDeps): Promise<void> {
       }
     } else {
       const result = await summarizeMessagesViaLlm({
-        accountId: cfg.accountId,
-        apiToken: cfg.apiToken,
+        ...llmAuthFromConfig(cfg),
         model: cfg.model,
         messages: messagesRef.current,
         signal: turnScope.signal,
-        gateway: gatewayFromConfig(cfg),
       });
       if (result.replacedCount === 0) {
         setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "nothing to compact yet" }]);

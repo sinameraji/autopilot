@@ -1,8 +1,8 @@
 import { readSSE } from "../util/sse.js";
-import { KimiApiError, KillSwitchError, detectKillSwitch } from "../util/errors.js";
+import { KimiApiError } from "../util/errors.js";
 import { getUserAgent } from "../util/version.js";
 import { jsonReplacer, sanitizeString, stableStringify } from "./messages.js";
-import type { ChatMessage, ToolDef, Usage } from "./messages.js";
+import type { ChatMessage, ReasoningDetail, ToolDef, Usage } from "./messages.js";
 import { logger } from "../util/logger.js";
 import { getLogSessionId, getLogTurnId } from "../util/log-sink.js";
 import {
@@ -12,13 +12,14 @@ import {
   type LlmDumpRecord,
   type LlmDumpResponse,
 } from "../util/llm-dump.js";
-import { getModelOrInfer, isUnifiedEligible, routeFor, type ModelProvider } from "../models/registry.js";
-import { DEFAULT_MODEL, DEFAULT_CLOUD_MODEL } from "../config.js";
+import { getModelOrInfer, vendorOf } from "../models/registry.js";
+import { openRouterHeaders, openRouterUrl, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import { resolveCustomEndpoint, customChatCompletionsUrl, type CustomEndpoint } from "./custom-endpoint.js";
 
 export type KimiEvent =
-  | { type: "gateway_meta"; meta: GatewayMeta }
+  | { type: "response_meta"; meta: ResponseMeta }
   | { type: "reasoning"; delta: string }
+  | { type: "reasoning_details"; details: ReasoningDetail[] }
   | { type: "text"; delta: string }
   | { type: "tool_call_start"; index: number; id: string; name: string }
   | { type: "tool_call_args"; index: number; argsDelta: string }
@@ -27,8 +28,14 @@ export type KimiEvent =
   | { type: "done"; finishReason: string | null; usage: Usage | null };
 
 export interface RunKimiOpts {
-  accountId: string;
-  apiToken: string;
+  /**
+   * The user's OpenRouter API key, sent as `Authorization: Bearer`. Required
+   * unless a custom endpoint is in effect. Build it (with `customEndpoint`
+   * and `provider`) from config via `llmAuthFromConfig()`.
+   */
+  openrouterApiKey?: string;
+  /** Extra OpenRouter provider-routing preferences (config: openrouterProvider). */
+  provider?: OpenRouterProviderPrefs;
   model: string;
   messages: ChatMessage[];
   tools?: ToolDef[];
@@ -37,22 +44,7 @@ export interface RunKimiOpts {
   maxCompletionTokens?: number;
   reasoningEffort?: "low" | "medium" | "high";
   sessionId?: string;
-  gateway?: AiGatewayOptions;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
   requestId?: string;
-  /** Per-provider API keys (BYOK) forwarded to AI Gateway as cf-aig-authorization headers. */
-  providerKeys?: Partial<Record<ModelProvider, string>>;
-  /**
-   * Per-provider alias names referencing keys stored in Cloudflare Secrets Store
-   * (scope: ai_gateway). When present, kimi-code sends cf-aig-byok-alias instead
-   * of the raw provider key — the key never re-enters this process after the
-   * one-time upload. Takes precedence over `providerKeys`.
-   */
-  providerKeyAliases?: Partial<Record<ModelProvider, string>>;
-  /** When true, omit BYOK headers entirely and let CF Unified Billing pay the upstream provider. */
-  unifiedBilling?: boolean;
   /** Abort the stream if no data arrives for this many milliseconds. Default 60000. */
   idleTimeoutMs?: number;
   /** Once the first byte arrives, tighten the idle timeout to this value.
@@ -62,75 +54,69 @@ export interface RunKimiOpts {
    * Custom OpenAI-compatible endpoint (see src/agent/custom-endpoint.ts).
    * When set — or when KIMIFLARE_BASE_URL is in the environment — the request
    * goes to `<baseUrl>/chat/completions` with `Authorization: Bearer <apiKey>`
-   * and every Cloudflare path (Workers AI, AI Gateway, cf-catalog, cloud
-   * mode) is bypassed. Model ids pass through in the body unchanged.
+   * instead of OpenRouter. Model ids pass through in the body unchanged.
    */
   customEndpoint?: CustomEndpoint;
 }
 
-export interface AiGatewayOptions {
-  id: string;
-  cacheTtl?: number;
-  skipCache?: boolean;
-  collectLogPayload?: boolean;
-  metadata?: Record<string, string | number | boolean>;
+/**
+ * OpenRouter `provider` routing object (subset we pass through). See
+ * https://openrouter.ai/docs/guides/routing/provider-selection. Setting
+ * `order` or `sort` disables sticky routing (prompt-cache locality) and
+ * load balancing, so they're opt-in only.
+ */
+export interface OpenRouterProviderPrefs {
+  order?: string[];
+  only?: string[];
+  ignore?: string[];
+  allow_fallbacks?: boolean;
+  require_parameters?: boolean;
+  data_collection?: "allow" | "deny";
+  zdr?: boolean;
+  quantizations?: string[];
+  sort?: "price" | "throughput" | "latency";
+  max_price?: Record<string, number>;
 }
 
-export interface GatewayMeta {
-  cacheStatus?: string;
-  logId?: string;
-  eventId?: string;
+/**
+ * Per-response metadata OpenRouter reports in the stream. `generationId` is
+ * the key for the authoritative cost lookup (GET /generation?id=…, see
+ * usage-tracker.ts); `provider` is the upstream OpenRouter routed to.
+ */
+export interface ResponseMeta {
+  generationId?: string;
   model?: string;
+  provider?: string;
 }
 
-const RETRYABLE_CODES = new Set([3040]); // "Capacity temporarily exceeded"
 const MAX_ATTEMPTS = 5;
-
-function cleanErrorMessage(msg: string): string {
-  // Cloudflare Workers AI sometimes prefixes messages with redundant "AiError: "
-  return msg.replace(/^(AiError:\s*)+/, "").trim();
-}
 
 function isRetryable(err: KimiApiError, attempt: number): boolean {
   if (attempt >= MAX_ATTEMPTS - 1) return false;
-  if (err.code !== undefined && RETRYABLE_CODES.has(err.code)) return true;
-  if (err.httpStatus === 429) return true;
+  if (err.httpStatus === 408 || err.httpStatus === 429) return true;
+  // 402 "in-flight budget" is transient (a concurrent request is holding the
+  // key's remaining credit); a plain out-of-credits 402 is not.
+  if (err.httpStatus === 402 && /in.?flight/i.test(err.message)) return true;
   if (err.httpStatus !== undefined && err.httpStatus >= 500 && err.httpStatus < 600) return true;
   if (err.message.includes("Internal server error")) return true;
   return false;
 }
 
 export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, void, void> {
-  // Custom endpoint wins over everything, including cloud mode. The env
-  // fallback means side-call paths (memory extraction, summarization, …)
-  // that build RunKimiOpts from raw accountId/apiToken are rerouted too.
+  // Custom endpoint wins over OpenRouter. The env fallback means side-call
+  // paths (memory extraction, summarization, …) are rerouted too.
   const customEndpoint = opts.customEndpoint ?? resolveCustomEndpoint();
-  if (!customEndpoint && opts.cloudMode && !opts.cloudToken) {
-    throw new KimiApiError("kimiflare: cloud mode requires a cloud token. Run `kimiflare auth cloud` to authenticate.", undefined, 401);
-  }
   const requestId = opts.requestId ?? crypto.randomUUID();
-  const { url, headers: gatewayHeaders } = buildKimiRequestTarget(opts, customEndpoint);
-  const isCloudEndpoint = !customEndpoint && url.startsWith("https://api.kimiflare.com");
-  // Per-model capability gates. Some providers reject params they don't
-  // support — gpt-5/gpt-5-mini and claude-opus-4-7 reject any non-default
-  // `temperature`; Groq's llama-3.3 rejects `reasoning_effort`. We look up the
-  // capabilities once and conditionally include each field.
+  const { url, headers: targetHeaders } = buildKimiRequestTarget(opts, customEndpoint);
+  // Per-model capability gates, from the OpenRouter catalog. OpenRouter drops
+  // params a model doesn't support, but a few models reject a supported param
+  // outright for non-default values (Kimi K3 only allows temperature=1).
   const entry = getModelOrInfer(opts.model);
   const supportsTemperature = entry.supports.temperature !== false;
   const supportsReasoning = entry.supports.reasoning === true;
 
-  // Universal Endpoint routes by the `model` body field. For Workers AI we
-  // prefix with "workers-ai/" so /compat dispatches to the Workers AI provider
-  // (e.g. "workers-ai/@cf/moonshotai/kimi-k2.7-code"). Cloud mode uses its own
-  // shape and ignores this field. The direct Workers AI path (api.cloudflare.com)
-  // also ignores the body model field because the model is already in the URL.
-  const isDirectWorkersAi = !customEndpoint && url.includes("/ai/run/");
-  // Custom endpoints receive the model id verbatim — the host's gateway owns
-  // provider dispatch, so no workers-ai/ prefixing.
-  const compatModel =
-    !customEndpoint && entry.provider === "workers-ai" ? `workers-ai/${opts.model}` : opts.model;
-
   const body: Record<string, unknown> = {
+    model: opts.model,
     messages: sanitizeMessagesForApi(opts.messages),
     ...(opts.tools && opts.tools.length
       ? { tools: opts.tools, tool_choice: "auto", parallel_tool_calls: true }
@@ -138,18 +124,29 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
     stream: true,
     ...(supportsTemperature ? { temperature: opts.temperature ?? 0.2 } : {}),
     max_completion_tokens: opts.maxCompletionTokens ?? 16384,
-    ...(isCloudEndpoint || isDirectWorkersAi ? {} : { model: compatModel }),
-    // OpenAI's streaming API omits `usage` by default — you have to explicitly
-    // opt in via stream_options. Without this, the status bar's token /
-    // context-% / cost columns stay blank. CF docs don't mention
-    // stream_options but accept it transparently and forward it upstream;
-    // providers that don't recognize the field ignore it.
-    // Only relevant for the AI Gateway /compat path; direct Workers AI and
-    // cloud mode use their own response shapes.
-    ...(isCloudEndpoint || isDirectWorkersAi ? {} : { stream_options: { include_usage: true } }),
+    ...(opts.reasoningEffort && supportsReasoning ? { reasoning_effort: opts.reasoningEffort } : {}),
   };
-  if (opts.reasoningEffort && supportsReasoning) {
-    body.reasoning_effort = opts.reasoningEffort;
+  if (customEndpoint) {
+    // OpenAI's streaming API omits `usage` unless asked; OpenRouter always
+    // sends it (and documents this flag as a no-op), so only custom
+    // endpoints get it.
+    body.stream_options = { include_usage: true };
+  } else {
+    // Sticky routing: OpenRouter pins a session to the provider that served
+    // it, so the prompt-prefix cache stays warm across turns (10 min idle
+    // window). Without it OpenRouter hashes the first system + user message,
+    // which also works but can't tell two sessions with the same opener apart.
+    if (opts.sessionId) body.session_id = opts.sessionId.slice(0, 256);
+    // Only route to providers that support every parameter we send — above
+    // all `tools`: a few endpoints for some models serve the model without
+    // tool calling, and a coding agent is useless there. Tool-calling quality
+    // ordering (Auto Exacto) is applied by OpenRouter on top of this.
+    body.provider = { require_parameters: true, ...(opts.provider ?? {}) };
+    // Anthropic models only cache with explicit breakpoints; the top-level
+    // directive makes OpenRouter place them automatically. Everyone else
+    // kimiflare defaults to (Moonshot, DeepSeek, Z.AI, OpenAI, …) caches
+    // implicitly.
+    if (vendorOf(opts.model) === "anthropic") body.cache_control = { type: "ephemeral" };
   }
 
   // Debug-only payload dump (KIMIFLARE_DUMP_LLM=1). Pure post-assembly
@@ -192,21 +189,12 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let res: Response;
     try {
-      // For custom endpoints the bearer (if any) rides in gatewayHeaders —
-      // never fall back to the Cloudflare/cloud token, and send no
-      // Authorization header at all when no apiKey is configured.
       const headers: Record<string, string> = {
-        ...(customEndpoint
-          ? {}
-          : { Authorization: `Bearer ${opts.cloudMode && opts.cloudToken ? opts.cloudToken : opts.apiToken}` }),
         "Content-Type": "application/json",
         "User-Agent": getUserAgent(),
-        ...gatewayHeaders,
+        ...targetHeaders,
       };
-      if (opts.sessionId) {
-        headers["X-Session-ID"] = opts.sessionId;
-        headers["x-session-affinity"] = opts.sessionId;
-      }
+      if (opts.sessionId) headers["X-Session-ID"] = opts.sessionId;
       headers["X-Request-ID"] = requestId;
       res = await fetch(url, {
         method: "POST",
@@ -214,9 +202,8 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
         body: stableStringify(body, jsonReplacer),
         signal: opts.signal,
       });
-      await detectKillSwitch(res);
     } catch (fetchErr) {
-      if (fetchErr instanceof KillSwitchError) throw fetchErr;
+      if (isAbortError(fetchErr)) throw fetchErr;
       const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
       logger.warn("runKimi:fetch_error", { requestId, attempt, error: msg });
       if (attempt < MAX_ATTEMPTS - 1) {
@@ -229,9 +216,9 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
 
     const contentType = res.headers.get("content-type") ?? "";
 
-    // Cloudflare returns HTTP 200 + application/json with {success:false,errors:[{code:3040}]}
-    // for transient capacity errors. It also returns HTTP 5xx or OpenAI-style error objects
-    // for transient internal failures. Retry those; surface everything else.
+    // Errors come back as JSON (not SSE): OpenRouter's { error: { code,
+    // message } } or an OpenAI-style error from a custom endpoint. Retry the
+    // transient ones (408/429/5xx); surface everything else with a fix.
     if (!contentType.includes("text/event-stream")) {
       if (res.bodyUsed) {
         throw new KimiApiError(
@@ -247,42 +234,24 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
       } catch {
         /* ignore */
       }
-      const err = extractCloudflareError(parsed, text);
-      const rawMsg = err?.message ?? `HTTP ${res.status}: ${text.slice(0, 300)}`;
-      const msg = cleanErrorMessage(rawMsg);
-      // For 401/403 on a non-Workers-AI model, the most likely cause is a
-      // bad or missing provider key — not a Cloudflare token problem. Wrap
-      // the upstream error with the actionable "/keys" guidance so the user
-      // isn't sent to the generic cloud-auth message.
-      const modelProvider = (() => {
-        try { return getModelOrInfer(opts.model).provider; } catch { return null; }
-      })();
-      const isProviderAuthError =
-        !customEndpoint &&
-        (res.status === 401 || res.status === 403) &&
-        modelProvider !== null &&
-        modelProvider !== "workers-ai";
-      const wrappedMsg = customEndpoint && (res.status === 401 || res.status === 403)
-        ? [
-            `${opts.model} rejected the request (HTTP ${res.status}): ${msg || "authentication failed"}.`,
-            ``,
-            `Check that KIMIFLARE_API_KEY (or \`apiKey\` in config) matches what ${customEndpoint.baseUrl} expects.`,
-          ].join("\n")
-        : isProviderAuthError
-        ? [
-            `${opts.model} rejected the request (HTTP ${res.status}): ${msg || "authentication failed"}.`,
-            ``,
-            `Your stored ${modelProvider} key is likely invalid or expired. Fix:`,
-            `  /keys set ${modelProvider} <new-key>   replace the stored key`,
-            `  /keys clear ${modelProvider}           remove it and reopen the picker to paste fresh`,
-            `  /model ${opts.cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL}  switch back to Workers AI (no key needed)`,
-          ].join("\n")
-        : msg;
-      const apiErr = new KimiApiError(`kimiflare: ${wrappedMsg}`, err?.code, res.status);
+      const err = extractApiError(parsed, text);
+      const msg = err?.message ?? `HTTP ${res.status}: ${text.slice(0, 300)}`;
+      const status = err?.status ?? res.status;
+      const apiErr = new KimiApiError(
+        `kimiflare: ${describeHttpError(opts.model, status, msg, customEndpoint)}`,
+        err?.code,
+        status,
+      );
       if (isRetryable(apiErr, attempt)) {
         const isRateLimit = apiErr.httpStatus === 429;
         const baseDelay = isRateLimit ? 2000 : 500;
-        const delay = Math.random() * (baseDelay * 2 ** attempt);
+        // OpenRouter sends Retry-After (seconds) on 429/503; honour it, capped
+        // so a long server hint can't wedge an interactive turn.
+        const retryAfterSec = Number(res.headers.get("retry-after"));
+        const delay =
+          Number.isFinite(retryAfterSec) && retryAfterSec > 0
+            ? Math.min(retryAfterSec * 1000, 30_000)
+            : Math.random() * (baseDelay * 2 ** attempt);
         logger.warn("runKimi:retrying", { requestId, attempt, code: apiErr.code, httpStatus: apiErr.httpStatus, delay });
         await sleep(delay, opts.signal);
         continue;
@@ -292,15 +261,10 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
 
     if (!res.body) throw new KimiApiError("kimiflare: empty response body", undefined, res.status);
 
-    const meta = readGatewayMeta(res.headers);
-    if (meta) yield { type: "gateway_meta", meta };
-
-    let lastUsage: Usage | null = null;
     logger.debug("runKimi:stream_start", { requestId });
     try {
       for await (const ev of parseStream(res.body, opts.signal, opts.idleTimeoutMs, opts.postFirstByteIdleTimeoutMs)) {
         if (dumpRecord) accumulateDumpResponse(dumpRecord.response, ev);
-        if (ev.type === "usage") lastUsage = ev.usage;
         yield ev;
       }
     } finally {
@@ -311,32 +275,64 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
       }
     }
     logger.debug("runKimi:stream_end", { requestId });
-
-    // Client-side fallback: report usage to cloud worker for reconciliation.
-    // Only applies to Workers AI models (api.kimiflare.com handles those bills).
-    // Never fires for custom endpoints — the host's gateway does its own metering.
-    if (!customEndpoint && opts.cloudMode && lastUsage && opts.cloudToken && getModelOrInfer(opts.model).provider === "workers-ai") {
-      const reportUrl = "https://api.kimiflare.com/v1/usage/report";
-      const reportHeaders: Record<string, string> = {
-        Authorization: `Bearer ${opts.cloudToken}`,
-        "Content-Type": "application/json",
-      };
-      if (opts.cloudDeviceId) reportHeaders["X-Device-ID"] = opts.cloudDeviceId;
-      if (opts.sessionId) reportHeaders["X-Session-ID"] = opts.sessionId;
-      fetch(reportUrl, {
-        method: "POST",
-        headers: reportHeaders,
-        body: JSON.stringify({
-          request_id: requestId,
-          prompt_tokens: lastUsage.prompt_tokens,
-          completion_tokens: lastUsage.completion_tokens,
-          cached_tokens: lastUsage.prompt_tokens_details?.cached_tokens ?? 0,
-        }),
-      }).catch(() => {}); // Best-effort fire-and-forget
-    }
-
     return;
   }
+}
+
+function isAbortError(e: unknown): boolean {
+  return e instanceof DOMException && e.name === "AbortError";
+}
+
+/**
+ * Turn an HTTP error into the message the user sees, with the concrete fix
+ * for the cases that have one (bad key, no credits, unknown model).
+ */
+function describeHttpError(
+  model: string,
+  status: number,
+  msg: string,
+  customEndpoint: CustomEndpoint | null,
+): string {
+  if (customEndpoint) {
+    if (status === 401 || status === 403) {
+      return [
+        `${model} rejected the request (HTTP ${status}): ${msg || "authentication failed"}.`,
+        ``,
+        `Check that KIMIFLARE_API_KEY (or \`apiKey\` in config) matches what ${customEndpoint.baseUrl} expects.`,
+      ].join("\n");
+    }
+    return msg;
+  }
+  if (status === 401) {
+    return [
+      `OpenRouter rejected your API key (HTTP 401): ${msg || "invalid key"}.`,
+      ``,
+      `Fix: run  /key set <your-key>  with a key from ${OPENROUTER_KEYS_URL}`,
+      `(or set OPENROUTER_API_KEY in the environment).`,
+    ].join("\n");
+  }
+  if (status === 402) {
+    return [
+      `Your OpenRouter account is out of credits (HTTP 402): ${msg}.`,
+      ``,
+      `Add credits at https://openrouter.ai/settings/credits, or pick a free model with  /model  (look for the "Free" section).`,
+    ].join("\n");
+  }
+  if (status === 403) {
+    return [
+      `OpenRouter refused the request (HTTP 403): ${msg}.`,
+      ``,
+      `This is usually a moderation or guardrail block on the key, or a model your account can't access.`,
+    ].join("\n");
+  }
+  if (status === 404 && /model|endpoint/i.test(msg)) {
+    return [
+      `OpenRouter can't serve ${model} (HTTP 404): ${msg}.`,
+      ``,
+      `Pick another model with  /model .`,
+    ].join("\n");
+  }
+  return msg;
 }
 
 /** Fold a streamed event into the debug dump's response accumulator.
@@ -363,77 +359,26 @@ function accumulateDumpResponse(resp: LlmDumpResponse, ev: KimiEvent): void {
   }
 }
 
-/** Validate that a model ID looks like a legitimate Cloudflare or AI-Gateway-routable model.
+/** Validate that a model id is OpenRouter-shaped before it goes on the wire.
  *
- *  Accepted shapes:
- *    - "@namespace/name(/version)?" — Cloudflare Workers AI catalog
- *    - "<provider>/<model-id>"      — AI Gateway Universal Endpoint (anthropic/, openai/, google-ai-studio/, groq/, deepseek/, …)
- *
- *  Prevents path traversal via malicious model strings. */
+ *  Accepted: "<vendor>/<model>[:variant]", optionally with OpenRouter's "~"
+ *  alias prefix — e.g. "moonshotai/kimi-k2.6", "deepseek/deepseek-r1:free",
+ *  "~moonshotai/kimi-latest", "openrouter/auto". Vendor must be
+ *  alnum/-/_; the model segment may contain ./-/_ but no slashes or
+ *  whitespace. */
 export function validateModelId(model: string): void {
   if (!model) throw new KimiApiError(`Invalid model ID: ${model}`, 400);
-  // Workers AI catalog form: @ns/name or @ns/name/version
-  if (/^@[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+(\/[a-zA-Z0-9._-]+)*$/.test(model)) return;
-  // Provider-prefixed form: <provider>/<model-id>[:variant] — no leading @, exactly one path
-  // segment after provider. Provider must be alnum/-/_; model id may contain ./-/_ but no
-  // slashes or whitespace. The optional `:variant` suffix covers OpenRouter's free/nitro/
-  // floor variants (e.g. "deepseek/deepseek-r1:free").
-  if (/^[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+(:[a-zA-Z0-9._-]+)?$/.test(model)) return;
+  if (/^~?[a-zA-Z0-9_-]+\/[a-zA-Z0-9._-]+(:[a-zA-Z0-9._-]+)?$/.test(model)) return;
   throw new KimiApiError(`Invalid model ID: ${model}`, 400);
-}
-
-const PROVIDER_DOC: Record<string, { name: string; where: string }> = {
-  anthropic: { name: "Anthropic", where: "https://console.anthropic.com/settings/keys" },
-  openai: { name: "OpenAI", where: "https://platform.openai.com/api-keys" },
-  google: { name: "Google AI Studio", where: "https://aistudio.google.com/app/apikey" },
-  moonshotai: { name: "Moonshot AI", where: "https://platform.moonshot.cn/" },
-  "openai-compatible": { name: "your provider", where: "your provider's dashboard" },
-};
-
-function missingKeyMessage(model: string, provider: string, unifiedAvailable: boolean, cloudMode?: boolean): string {
-  const doc = PROVIDER_DOC[provider] ?? { name: "your provider", where: "your provider's dashboard" };
-  const lines = [
-    `kimiflare: ${model} needs a ${doc.name} API key.`,
-    ``,
-    `To fix this, do ONE of:`,
-    `  1. Get a key from ${doc.where}, then run:  /keys set ${provider} <your-key>`,
-  ];
-  if (unifiedAvailable) {
-    lines.push(`  2. Enable Cloudflare Unified Billing for this gateway in the CF dashboard, then run:  /keys unified on`);
-  }
-  const fallbackModel = cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL;
-  lines.push(`  ${unifiedAvailable ? "3" : "2"}. Switch back to a Workers AI model:  /model ${fallbackModel}`);
-  return lines.join("\n");
-}
-
-function gatewayHeadersFor(opts: RunKimiOpts): Record<string, string> {
-  const headers: Record<string, string> = {};
-  if (!opts.gateway) return headers;
-  if (opts.gateway.cacheTtl !== undefined) {
-    headers["cf-aig-cache-ttl"] = String(opts.gateway.cacheTtl);
-  }
-  if (opts.gateway.skipCache !== undefined) {
-    headers["cf-aig-skip-cache"] = String(opts.gateway.skipCache);
-  }
-  if (opts.gateway.collectLogPayload !== undefined) {
-    headers["cf-aig-collect-log-payload"] = String(opts.gateway.collectLogPayload);
-  }
-  if (opts.gateway.metadata && Object.keys(opts.gateway.metadata).length > 0) {
-    const entries = Object.entries(opts.gateway.metadata).slice(0, 5);
-    headers["cf-aig-metadata"] = stableStringify(Object.fromEntries(entries), jsonReplacer);
-  }
-  return headers;
 }
 
 function buildKimiRequestTarget(
   opts: RunKimiOpts,
   customEndpoint: CustomEndpoint | null,
 ): { url: string; headers: Record<string, string> } {
-  // Custom OpenAI-compatible endpoint: the host app owns routing and auth,
-  // so every Cloudflare path below is bypassed — no account-id URLs, no
-  // cf-aig-* headers, no BYOK / Unified Billing logic. The model id only
-  // rides in the JSON body on this path (never the URL), so the strict
-  // Cloudflare id shapes don't apply: any non-empty id passes through.
+  // Custom OpenAI-compatible endpoint: the host app owns routing and auth.
+  // The model id only rides in the JSON body on this path, so any non-empty
+  // id passes through.
   if (customEndpoint) {
     if (!opts.model) throw new KimiApiError(`Invalid model ID: ${opts.model}`, 400);
     return {
@@ -443,145 +388,22 @@ function buildKimiRequestTarget(
   }
 
   validateModelId(opts.model);
-
-  if (opts.cloudMode) {
-    const headers: Record<string, string> = opts.cloudToken ? { Authorization: `Bearer ${opts.cloudToken}` } : {};
-    if (opts.cloudDeviceId) headers["X-Device-ID"] = opts.cloudDeviceId;
-    return { url: "https://api.kimiflare.com/v1/chat", headers };
-  }
-
-  const entry = getModelOrInfer(opts.model);
-
-  // Cloudflare-catalog models (Kimi K3 today): Cloudflare's unified REST API.
-  // Same OpenAI-shaped request/stream as the gateway path, but auth is only
-  // the Cloudflare token — Cloudflare pays the provider from the account's AI
-  // Gateway credits (Unified Billing). The gateway is optional: with
-  // `cf-aig-gateway-id` set the request is logged in that gateway, otherwise
-  // Cloudflare uses (and auto-creates) the "default" gateway. cf-aig-* headers
-  // (cache TTL, skip-cache, metadata, collect-log) apply here too.
-  if (routeFor(entry) === "cf-catalog") {
-    const headers = gatewayHeadersFor(opts);
-    if (opts.gateway?.id) headers["cf-aig-gateway-id"] = opts.gateway.id;
-    return {
-      url: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
-        opts.accountId,
-      )}/ai/v1/chat/completions`,
-      headers,
-    };
-  }
-
-  // OpenRouter models: never Cloudflare at all — direct to openrouter.ai with the
-  // user's own OpenRouter key as a plain bearer. No account id, no cf-aig-* headers,
-  // no gateway required, no Unified Billing (OpenRouter has no such concept — it's
-  // BYOK only, per Sina's decision to keep this bring-your-own-key).
-  if (routeFor(entry) === "openrouter") {
-    const key = opts.providerKeys?.openrouter;
-    if (!key) {
-      throw new KimiApiError(
-        [
-          `kimiflare: ${opts.model} requires an OpenRouter API key.`,
-          ``,
-          `To fix: run  /keys set openrouter <your-key>  (get one at https://openrouter.ai/keys).`,
-        ].join("\n"),
-        undefined,
-        401,
-      );
-    }
-    return {
-      url: "https://openrouter.ai/api/v1/chat/completions",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        // OpenRouter's attribution headers — optional, but this is how a project
-        // shows up in its public rankings; cheap to send.
-        "HTTP-Referer": "https://kimiflare.com",
-        "X-Title": "kimiflare",
-      },
-    };
-  }
-
-  // If no gateway is configured, Workers AI models can use the direct
-  // api.cloudflare.com path for lower latency. Non-Workers-AI models still
-  // require AI Gateway (there is no direct path for Anthropic, OpenAI, etc.).
-  if (!opts.gateway?.id) {
-    if (entry.provider === "workers-ai") {
-      return {
-        url: `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(
-          opts.accountId,
-        )}/ai/run/${opts.model}`,
-        headers: {
-          Authorization: `Bearer ${opts.apiToken}`,
-          "Content-Type": "application/json",
-        },
-      };
-    }
+  if (!opts.openrouterApiKey) {
     throw new KimiApiError(
       [
-        `kimiflare: ${opts.model} requires Cloudflare AI Gateway, but no gateway is configured.`,
+        `kimiflare: no OpenRouter API key configured.`,
         ``,
-        `To fix: run  /gateway <your-gateway-id>  (create one at https://dash.cloudflare.com/?to=/:account/ai-gateway).`,
+        `Fix: run  /key set <your-key>  with a key from ${OPENROUTER_KEYS_URL}`,
+        `(or set OPENROUTER_API_KEY in the environment).`,
       ].join("\n"),
       undefined,
-      400,
+      401,
     );
   }
-
-  // Gateway path: AI Gateway Universal Endpoint handles all providers.
-  const headers = gatewayHeadersFor(opts);
-
-  if (entry.provider !== "workers-ai") {
-    // Three BYOK paths, in priority order:
-    //   1. Unified Billing  → no provider auth at all; CF pays the upstream provider
-    //                         using credits attached to the account. Auth is only the
-    //                         gateway-level Authorization: Bearer <CF token>.
-    //   2. Stored Keys      → cf-aig-byok-alias points at a CF Secrets Store secret;
-    //                         CF resolves it server-side. We never read the secret.
-    //   3. Local BYOK       → cf-aig-authorization carries the raw provider key.
-    // Only use Unified Billing when the model/provider explicitly supports it.
-    // Some providers (e.g. Moonshot AI) are BYOK-only on AI Gateway, so a
-    // global unifiedBilling=true must not silently send an unauthenticated
-    // request that fails with a generic upstream 503.
-    const useUnified = !!opts.unifiedBilling && isUnifiedEligible(entry);
-    const alias = opts.providerKeyAliases?.[entry.provider];
-    const providerKey = opts.providerKeys?.[entry.provider];
-    if (useUnified) {
-      // no provider-auth header
-    } else if (alias) {
-      headers["cf-aig-byok-alias"] = alias;
-    } else if (providerKey) {
-      headers["cf-aig-authorization"] = `Bearer ${providerKey}`;
-    } else {
-      throw new KimiApiError(
-        missingKeyMessage(opts.model, entry.provider, entry.billingMode === "unified", opts.cloudMode),
-        undefined,
-        401,
-      );
-    }
-  }
-  // For workers-ai there is no upstream key to set: Workers AI bills against
-  // the same Cloudflare account whose token signs the request, so the
-  // gateway-level Authorization header is the only auth needed.
-
   return {
-    url: `https://gateway.ai.cloudflare.com/v1/${encodeURIComponent(opts.accountId)}/${encodeURIComponent(
-      opts.gateway.id,
-    )}/compat/chat/completions`,
-    headers,
+    url: openRouterUrl("chat/completions"),
+    headers: openRouterHeaders(opts.openrouterApiKey),
   };
-}
-
-function readGatewayMeta(headers: Headers): GatewayMeta | null {
-  const meta: GatewayMeta = {};
-  const cacheStatus = headers.get("cf-aig-cache-status");
-  const logId = headers.get("cf-aig-log-id");
-  const eventId = headers.get("cf-aig-event-id");
-  const model = headers.get("cf-aig-model");
-
-  if (cacheStatus) meta.cacheStatus = cacheStatus;
-  if (logId) meta.logId = logId;
-  if (eventId) meta.eventId = eventId;
-  if (model) meta.model = model;
-
-  return Object.keys(meta).length > 0 ? meta : null;
 }
 
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
@@ -596,6 +418,7 @@ async function* parseStream(
   const toolCalls = new Map<number, { id: string; name: string; args: string }>();
   let lastUsage: Usage | null = null;
   let finishReason: string | null = null;
+  let metaSent = false;
 
   for await (const dataStr of readSSE(body, signal, idleTimeoutMs, postFirstByteIdleTimeoutMs)) {
     if (dataStr === "[DONE]") break;
@@ -607,17 +430,33 @@ async function* parseStream(
     }
     if (!chunk) continue;
 
+    // A failure after the stream has started (upstream provider died
+    // mid-generation) arrives as a chunk carrying `error`, not an HTTP status.
+    if (chunk.error) {
+      const code = typeof chunk.error.code === "number" ? chunk.error.code : undefined;
+      throw new KimiApiError(
+        `kimiflare: ${chunk.error.message ?? "the model provider failed mid-response"}`,
+        undefined,
+        code,
+      );
+    }
+
+    // Every OpenRouter chunk carries the generation id; report it once.
+    if (!metaSent && typeof chunk.id === "string" && chunk.id) {
+      metaSent = true;
+      yield {
+        type: "response_meta",
+        meta: {
+          generationId: chunk.id,
+          ...(typeof chunk.model === "string" ? { model: chunk.model } : {}),
+          ...(typeof chunk.provider === "string" ? { provider: chunk.provider } : {}),
+        },
+      };
+    }
+
     if (chunk.usage) {
       lastUsage = chunk.usage;
       yield { type: "usage", usage: chunk.usage };
-    }
-
-    // Cloudflare native format: { response: "..." }
-    if (typeof (chunk as Record<string, unknown>).response === "string") {
-      const resp = (chunk as Record<string, unknown>).response as string;
-      if (resp.length) {
-        yield { type: "text", delta: resp };
-      }
     }
 
     // OpenAI-compatible format: { choices: [{ delta: { content: "..." } }] }
@@ -625,8 +464,17 @@ async function* parseStream(
     if (choice) {
       const d = choice.delta;
       if (d) {
-        if (typeof d.reasoning_content === "string" && d.reasoning_content.length) {
-          yield { type: "reasoning", delta: d.reasoning_content };
+        // OpenRouter streams reasoning as `reasoning`; OpenAI-compatible
+        // custom endpoints (vLLM, Moonshot-style) use `reasoning_content`.
+        const reasoningDelta = d.reasoning ?? d.reasoning_content;
+        if (typeof reasoningDelta === "string" && reasoningDelta.length) {
+          yield { type: "reasoning", delta: reasoningDelta };
+        }
+        // Structured reasoning (Claude signatures, OpenAI/Gemini encrypted
+        // blocks). Must be echoed back verbatim during tool use; the loop
+        // merges these by `index` (see mergeReasoningDetails in messages.ts).
+        if (Array.isArray(d.reasoning_details) && d.reasoning_details.length) {
+          yield { type: "reasoning_details", details: d.reasoning_details };
         }
         if (typeof d.content === "string" && d.content.length) {
           yield { type: "text", delta: d.content };
@@ -678,8 +526,12 @@ async function* parseStream(
 }
 
 interface StreamChunk {
+  id?: string;
+  model?: string;
+  provider?: string;
   choices?: StreamChoice[];
   usage?: Usage;
+  error?: { code?: number | string; message?: string };
 }
 interface StreamChoice {
   delta?: StreamDelta;
@@ -689,7 +541,9 @@ interface StreamChoice {
 interface StreamDelta {
   role?: string | null;
   content?: string | null;
+  reasoning?: string | null;
   reasoning_content?: string | null;
+  reasoning_details?: ReasoningDetail[];
   tool_calls?: StreamToolCall[];
 }
 interface StreamToolCall {
@@ -734,18 +588,29 @@ function validateJsonArguments(raw: string): string {
   }
 }
 
-function extractCloudflareError(
+function extractApiError(
   parsed: unknown,
   rawText?: string,
-): { code?: number; message?: string } | null {
+): { code?: number; status?: number; message?: string } | null {
   if (parsed && typeof parsed === "object") {
-    // Cloudflare native format: { success: false, errors: [...] }
-    const cf = parsed as { success?: boolean; errors?: Array<{ code?: number; message?: string }> };
-    if (cf.success === false && Array.isArray(cf.errors) && cf.errors.length > 0) {
-      return { code: cf.errors[0]?.code, message: cf.errors[0]?.message };
+    // OpenRouter / OpenAI format: { error: { code, message, metadata? } }.
+    // OpenRouter's `code` is the HTTP status; upstream provider detail (the
+    // actual reason a provider refused) sits in metadata.raw.
+    const wrapped = (parsed as { error?: unknown }).error;
+    if (wrapped && typeof wrapped === "object") {
+      const e = wrapped as { code?: number | string; message?: string; metadata?: { raw?: unknown; provider_name?: string } };
+      const status = typeof e.code === "number" ? e.code : undefined;
+      let message = typeof e.message === "string" ? e.message : undefined;
+      const raw = e.metadata?.raw;
+      if (message && typeof raw === "string" && raw && !message.includes(raw)) {
+        const who = e.metadata?.provider_name ? `${e.metadata.provider_name}: ` : "";
+        message = `${message} (${who}${raw.slice(0, 300)})`;
+      }
+      return { status, message };
     }
+    if (typeof wrapped === "string") return { message: wrapped };
 
-    // OpenAI-compatible format: { object: "error", message, code }
+    // Bare OpenAI-compatible format: { object: "error", message, code }
     const oai = parsed as { object?: string; message?: string; code?: string | number };
     if (oai.object === "error" && typeof oai.message === "string") {
       const codeNum = typeof oai.code === "number" ? oai.code : undefined;

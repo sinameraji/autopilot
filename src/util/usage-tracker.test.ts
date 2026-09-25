@@ -3,158 +3,100 @@ import assert from "node:assert";
 import { mkdtemp, rm, readFile, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fetchGatewayUsageSnapshot, getCostReport, recordUsage, usageEvents } from "../usage-tracker.js";
+import { fetchGenerationSnapshot, getCostReport, reconcileTurnCost, recordUsage, usageEvents, type UsageLog } from "../usage-tracker.js";
 
-describe("AI Gateway usage enrichment", () => {
-  let originalFetch: typeof globalThis.fetch;
+describe("OpenRouter cost confirmation", () => {
   let originalXdgDataHome: string | undefined;
-  let lastRequest: Request | null = null;
+  const dirs: string[] = [];
 
   before(() => {
-    originalFetch = globalThis.fetch;
     originalXdgDataHome = process.env.XDG_DATA_HOME;
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      lastRequest = new Request(input, init);
-      return Response.json({
-        result: [
-          {
-            id: "log_123",
-            cached: true,
-            duration: 42,
-            model: "@cf/test/model",
-            provider: "workers-ai",
-            status_code: 200,
-            tokens_in: 10,
-            tokens_out: 2,
-            cost: 0.00001,
-          },
-        ],
-      });
-    };
   });
 
-  after(() => {
-    globalThis.fetch = originalFetch;
+  after(async () => {
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
     else process.env.XDG_DATA_HOME = originalXdgDataHome;
+    for (const d of dirs) await rm(d, { recursive: true, force: true });
   });
 
-  it("fetches a gateway log by cf-aig-log-id", async () => {
-    const snapshot = await fetchGatewayUsageSnapshot({
-      accountId: "acct",
-      apiToken: "token",
-      gatewayId: "gateway",
-      meta: { logId: "log_123", cacheStatus: "HIT", eventId: "evt_123" },
-    });
-
-    assert.ok(lastRequest);
-    assert.strictEqual(
-      lastRequest!.url,
-      "https://api.cloudflare.com/client/v4/accounts/acct/ai-gateway/gateways/gateway/logs",
-    );
-    assert.strictEqual(lastRequest!.headers.get("Authorization"), "Bearer token");
-    assert.deepStrictEqual(snapshot, {
-      logId: "log_123",
-      eventId: "evt_123",
-      cacheStatus: "HIT",
-      cached: true,
-      duration: 42,
-      statusCode: 200,
-      model: "@cf/test/model",
-      provider: "workers-ai",
-      tokensIn: 10,
-      tokensOut: 2,
-      cost: 0.00001,
-    });
-  });
-
-  it("records local usage with gateway metadata as best-effort enrichment", async () => {
+  async function freshDataDir(): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "kimiflare-usage-"));
+    dirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
-    try {
-      // Reconcile is now fire-and-forget — wait for the second emit, which
-      // fires after the background Gateway log fetch patches the turn cost.
-      // (The first emit fires synchronously inside recordUsage with the
-      // estimate-only state.)
-      let updates = 0;
-      const reconciled = new Promise<void>((resolve) => {
-        const handler = (sid: string) => {
-          if (sid !== "session_1") return;
-          updates += 1;
-          if (updates >= 2) {
-            usageEvents.off("update", handler);
-            resolve();
-          }
-        };
-        usageEvents.on("update", handler);
-      });
+    return dir;
+  }
 
-      await recordUsage(
-        "session_1",
-        {
-          prompt_tokens: 10,
-          completion_tokens: 2,
-          total_tokens: 12,
-          prompt_tokens_details: { cached_tokens: 0 },
-        },
-        {
-          accountId: "acct",
-          apiToken: "token",
-          gatewayId: "gateway",
-          meta: { logId: "log_123", cacheStatus: "HIT" },
-        },
-      );
+  async function readSession(dir: string, id: string) {
+    const log = JSON.parse(await readFile(join(dir, "kimiflare", "usage.json"), "utf8")) as UsageLog;
+    return log.sessions.find((s) => s.id === id)!;
+  }
 
-      await reconciled;
+  const usage = { prompt_tokens: 1200, completion_tokens: 40, total_tokens: 1240, prompt_tokens_details: { cached_tokens: 1000 } };
 
-      const report = await getCostReport("session_1");
-      assert.strictEqual(report.session.promptTokens, 10);
-      assert.strictEqual(report.session.completionTokens, 2);
-      assert.strictEqual(report.session.gatewayRequests, 1);
-      assert.strictEqual(report.session.gatewayCachedRequests, 1);
-      assert.strictEqual(report.session.gatewayCost, 0.00001);
-      assert.strictEqual(report.session.cost, 0.00001);
-      assert.strictEqual(report.session.reconcilePending, false);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+  it("confirms a turn immediately from the stream's inline usage.cost", async () => {
+    const dir = await freshDataDir();
+    await recordUsage("s-inline", { ...usage, cost: 0.00123 }, { apiKey: "k", meta: { generationId: "gen-1", provider: "Moonshot AI" } }, "moonshotai/kimi-k2.6");
+    const s = await readSession(dir, "s-inline");
+    const turn = s.turns![0]!;
+    assert.strictEqual(turn.confirmedCost, 0.00123);
+    assert.strictEqual(turn.logId, "gen-1");
+    assert.ok(Math.abs(s.cost - 0.00123) < 1e-12, "session cost moves from the estimate to the billed number");
+    assert.strictEqual(s.gatewayCost, 0.00123);
+    assert.strictEqual(s.gatewayLogs![0]!.provider, "Moonshot AI");
+    const report = await getCostReport("s-inline");
+    assert.strictEqual(report.session.reconcilePending, false);
   });
 
-  it("reports reconcilePending=true immediately after recordUsage", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "kimiflare-usage-pending-"));
-    process.env.XDG_DATA_HOME = dir;
-    try {
-      // Block the Gateway fetch so reconcile cannot complete during this test.
-      const blockedFetch = globalThis.fetch;
-      globalThis.fetch = () => new Promise(() => {});
-      try {
-        await recordUsage(
-          "session_pending",
-          {
-            prompt_tokens: 10,
-            completion_tokens: 2,
-            total_tokens: 12,
-            prompt_tokens_details: { cached_tokens: 0 },
-          },
-          {
-            accountId: "acct",
-            apiToken: "token",
-            gatewayId: "gateway",
-            meta: { logId: "log_pending", cacheStatus: "MISS" },
-          },
-        );
+  it("without inline cost, stays pending until the /generation lookup confirms it", async () => {
+    const dir = await freshDataDir();
+    // No apiKey → recordUsage won't start its own background poll.
+    await recordUsage("s-poll", usage, { apiKey: "", meta: { generationId: "gen-2" } }, "moonshotai/kimi-k2.6");
+    assert.strictEqual((await getCostReport("s-poll")).session.reconcilePending, true);
 
-        const report = await getCostReport("session_pending");
-        // Local-pricing estimate should be present, gateway cost not yet.
-        assert.ok(report.session.cost > 0);
-        assert.strictEqual(report.session.gatewayCost, undefined);
-        assert.strictEqual(report.session.reconcilePending, true);
-      } finally {
-        globalThis.fetch = blockedFetch;
-      }
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
+    const turnId = (await readSession(dir, "s-poll")).turns![0]!.turnId;
+    let calls = 0;
+    const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      calls++;
+      assert.ok(String(url).endsWith("/generation?id=gen-2"));
+      assert.strictEqual(new Headers(init?.headers).get("Authorization"), "Bearer sk-or-x");
+      if (calls === 1) return new Response("{}", { status: 404 }); // not indexed yet
+      return new Response(JSON.stringify({ data: { total_cost: 0.0042, latency: 900, provider_name: "DeepInfra", native_tokens_prompt: 1200, native_tokens_completion: 40 } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await reconcileTurnCost("s-poll", turnId, { apiKey: "sk-or-x", meta: { generationId: "gen-2" } }, fetchImpl, [1, 1, 1]);
+
+    const s = await readSession(dir, "s-poll");
+    assert.strictEqual(s.turns![0]!.confirmedCost, 0.0042);
+    assert.strictEqual(s.turns![0]!.durationMs, 900);
+    assert.strictEqual(calls, 2);
+    assert.strictEqual((await getCostReport("s-poll")).session.reconcilePending, false);
+  });
+
+  it("marks the turn reconcileFailed once the retry budget is spent", async () => {
+    const dir = await freshDataDir();
+    await recordUsage("s-fail", usage, { apiKey: "", meta: { generationId: "gen-3" } });
+    const turnId = (await readSession(dir, "s-fail")).turns![0]!.turnId;
+    const fetchImpl = (async () => new Response("{}", { status: 404 })) as unknown as typeof fetch;
+    await reconcileTurnCost("s-fail", turnId, { apiKey: "k", meta: { generationId: "gen-3" } }, fetchImpl, [1, 1]);
+    const s = await readSession(dir, "s-fail");
+    assert.strictEqual(s.turns![0]!.reconcileFailed, true);
+    assert.strictEqual((await getCostReport("s-fail")).session.reconcilePending, false);
+  });
+
+  it("maps a /generation record into a snapshot", async () => {
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ data: { total_cost: 0.5, generation_time: 1200, model: "moonshotai/kimi-k2.6", provider_name: "Fireworks", tokens_prompt: 10, tokens_completion: 5 } }), { status: 200 })) as unknown as typeof fetch;
+    const snap = await fetchGenerationSnapshot({ apiKey: "k", meta: { generationId: "gen-4" } }, fetchImpl);
+    assert.deepStrictEqual(snap, { logId: "gen-4", cost: 0.5, duration: 1200, model: "moonshotai/kimi-k2.6", provider: "Fireworks", tokensIn: 10, tokensOut: 5 });
+  });
+
+  it("emits an update event so the status bar refreshes", async () => {
+    await freshDataDir();
+    let seen = "";
+    const onUpdate = (sid: string) => { seen = sid; };
+    usageEvents.on("update", onUpdate);
+    await recordUsage("s-evt", { ...usage, cost: 0.001 });
+    usageEvents.off("update", onUpdate);
+    assert.strictEqual(seen, "s-evt");
   });
 });
 

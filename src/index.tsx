@@ -1,8 +1,5 @@
-import { readFileSync } from "node:fs";
 import { Command, Option } from "commander";
-import { loadConfig, saveConfig, DEFAULT_MODEL, DEFAULT_CLOUD_MODEL, configPath } from "./config.js";
-import { isCloudModeAvailable, CLOUD_UNAVAILABLE_NOTICE } from "./cloud/availability.js";
-import { isKillSwitchError } from "./util/errors.js";
+import { loadConfig, DEFAULT_MODEL } from "./config.js";
 import { resolveLspConfig } from "./util/lsp-config.js";
 import { checkForUpdate } from "./util/update-check.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
@@ -12,38 +9,16 @@ import { renderLogo } from "./ui/logo.js";
 import { runPrintMode } from "./print-mode.js";
 import type { PrintFormat } from "./print-mode.js";
 
-/** Best-effort synchronous check for whether cloud mode is the default.
- *  Used only for static --help copy; runtime resolution uses loadConfig(). */
-function isCloudModeConfigured(): boolean {
-  if (!isCloudModeAvailable()) return false;
-  if (process.env.KIMIFLARE_CLOUD === "1" || process.env.KIMIFLARE_CLOUD === "true") return true;
-  try {
-    const raw = readFileSync(configPath(), "utf8");
-    const parsed = JSON.parse(raw) as { cloudMode?: boolean };
-    return parsed.cloudMode === true;
-  } catch {
-    return false;
-  }
-}
-
-const helpDefaultModel = isCloudModeConfigured() ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL;
-const helpModelName = helpDefaultModel === DEFAULT_CLOUD_MODEL ? "Kimi-K3" : "Kimi-K2.6";
-
 const program = new Command();
 program
   .name("kimiflare")
-  .description(`Terminal coding agent powered by ${helpModelName} on Cloudflare Workers AI.`)
+  .description("Terminal coding agent. Runs any OpenRouter model with your own OpenRouter key (default: Kimi K2.6).")
   .version(getAppVersion())
   .option("-p, --print <prompt>", "one-shot mode: send prompt, stream reply to stdout, exit")
-  .option("-m, --model <id>", `model id (defaults to ${helpDefaultModel})`)
-  // KimiFlare Cloud is temporarily hidden (src/cloud/availability.ts): keep the
-  // flag parseable so old scripts don't break, but hide it from --help and
-  // ignore it at runtime while the managed service is switched off.
-  .addOption(
-    isCloudModeAvailable()
-      ? new Option("--cloud", "use Kimiflare Cloud (api.kimiflare.com) instead of direct Workers AI")
-      : new Option("--cloud", "(temporarily unavailable) use Kimiflare Cloud").hideHelp(),
-  )
+  .option("-m, --model <id>", `OpenRouter model id (defaults to ${DEFAULT_MODEL})`)
+  // KimiFlare Cloud was retired with the move to OpenRouter. Keep the flag
+  // parseable so old scripts don't break; it's ignored with a notice.
+  .addOption(new Option("--cloud", "(retired) KimiFlare Cloud").hideHelp())
   .option("--dangerously-allow-all", "auto-approve every permission prompt (print mode only)")
   .option("--reasoning", "include reasoning in stdout (print mode only)")
   .option("--thinking", "alias for --reasoning")
@@ -71,7 +46,7 @@ program
   .option("-c, --category <name>", "filter by category")
   .option("--json", "machine-readable output")
   .option("--reclassify", "re-run classification on all sessions")
-  .option("--local-only", "skip Cloudflare reconciliation")
+  .option("--local-only", "skip OpenRouter reconciliation (no network)")
   .action(async (cmdOpts) => {
     const cfg = await loadConfig();
     const enabled = cfg?.costAttribution ?? false;
@@ -86,32 +61,6 @@ program
 
     const { runCostCommand } = await import("./cost-attribution/cli.js");
     await runCostCommand({ ...cmdOpts, config: cfg });
-  });
-
-program
-  .command("usage", { hidden: !isCloudModeAvailable() })
-  .description("Show Kimiflare Cloud token usage (requires cloud authentication)")
-  .action(async () => {
-    if (!isCloudModeAvailable()) {
-      console.error(CLOUD_UNAVAILABLE_NOTICE);
-      process.exit(1);
-    }
-    const { loadCloudCredentials } = await import("./cloud/auth.js");
-    const creds = await loadCloudCredentials();
-    if (!creds) {
-      console.error("Not authenticated with Kimiflare Cloud. Run: kimiflare auth cloud");
-      process.exit(1);
-    }
-    const { fetchCloudUsage } = await import("./cloud/auth.js");
-    const usage = await fetchCloudUsage(creds.accessToken, creds.deviceId);
-    if (!usage) {
-      console.error("Failed to fetch usage: invalid response from server");
-      process.exit(1);
-    }
-    console.log(`Token budget: ${usage.remaining.toLocaleString()} / ${usage.input_token_limit.toLocaleString()} remaining`);
-    console.log(`Used: ${usage.input_tokens_used.toLocaleString()}`);
-    console.log(`Grant expires: ${usage.expires_at}`);
-    console.log("Or when the global pool of free tokens runs out.");
   });
 
 program.addCommand(createRemoteCommand());
@@ -157,76 +106,30 @@ program
   .command("auth")
   .description("Authenticate with external services")
   .addCommand(
-    new Command("cloudflare")
-      .description("Log in with Cloudflare (browser OAuth) — no API token or Account ID to copy")
-      .option("--account <id>", "Cloudflare account id to use (skips the picker for multi-account users)")
-      .option("--no-browser", "print the sign-in URL instead of opening a browser")
-      .action(async (cmdOpts: { account?: string; browser?: boolean }) => {
-        const { loginWithCloudflare, listCloudflareAccounts, whoAmI, CF_OAUTH_CLIENT_ID } = await import(
-          "./cloud/cloudflare-oauth.js"
-        );
+    new Command("openrouter")
+      .description("Save your OpenRouter API key (validated first). For headless setups, OPENROUTER_API_KEY works too.")
+      .argument("[key]", "the key (sk-or-…); omit to be prompted without echo")
+      .action(async (keyArg: string | undefined) => {
+        const { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } = await import("./models/openrouter.js");
         const { patchPersistedConfig } = await import("./config.js");
-        try {
-          const tokens = await loginWithCloudflare({
-            onAuthUrl: (url) => {
-              console.log("\nLog in with Cloudflare");
-              if (cmdOpts.browser !== false) {
-                console.log("Opening your browser… approve kimiflare there, then come back here.");
-                void import("./ui/app-helpers.js").then(({ openBrowser }) => openBrowser(url));
-              }
-              console.log(`If the browser didn't open, visit:\n  ${url}\n`);
-            },
-          });
-          const [me, accounts] = await Promise.all([whoAmI(tokens.accessToken), listCloudflareAccounts(tokens.accessToken)]);
-          if (accounts.length === 0) {
-            console.error("Signed in, but this Cloudflare user has no accounts kimiflare can use.");
-            process.exit(1);
-          }
-          let picked = accounts.length === 1 ? accounts[0]! : undefined;
-          if (cmdOpts.account) {
-            picked = accounts.find((a) => a.id === cmdOpts.account);
-            if (!picked) {
-              console.error(`Account ${cmdOpts.account} is not one of your accounts:`);
-              for (const a of accounts) console.error(`  ${a.id}  ${a.name}`);
-              process.exit(1);
-            }
-          }
-          if (!picked) {
-            console.log("Which Cloudflare account should kimiflare use?");
-            accounts.forEach((a, i) => console.log(`  [${i + 1}] ${a.name}  (${a.id})`));
-            const { createInterface } = await import("node:readline/promises");
-            const rl = createInterface({ input: process.stdin, output: process.stdout });
-            const answer = (await rl.question(`Select 1-${accounts.length} [1]: `)).trim();
-            rl.close();
-            const idx = answer ? parseInt(answer, 10) - 1 : 0;
-            picked = accounts[idx];
-            if (!picked) {
-              console.error("Invalid selection.");
-              process.exit(1);
-            }
-          }
-          const existing = await loadConfig().catch(() => null);
-          const savedTo = await patchPersistedConfig({
-            accountId: picked.id,
-            apiToken: tokens.accessToken,
-            model: existing?.model ?? DEFAULT_MODEL,
-            cloudflareOAuth: {
-              refreshToken: tokens.refreshToken,
-              expiresAt: tokens.expiresAt,
-              scopes: tokens.scopes,
-              clientId: CF_OAUTH_CLIENT_ID,
-              email: me?.email,
-              accountName: picked.name,
-            },
-            // A fresh Cloudflare login supersedes any managed-cloud mode.
-            cloudMode: undefined,
-          });
-          console.log(`\n✓ Signed in${me?.email ? ` as ${me.email}` : ""} · account "${picked.name}" (${picked.id})`);
-          console.log(`Saved to ${savedTo}. Run \`kimiflare\` to start.`);
-        } catch (err) {
-          console.error("Log in with Cloudflare failed:", err instanceof Error ? err.message : String(err));
+        let key = keyArg?.trim();
+        if (!key) {
+          console.log(`Create a key at ${OPENROUTER_KEYS_URL}, then paste it here.`);
+          key = (await promptHidden("OpenRouter API key: ")).trim();
+        }
+        if (!looksLikeOpenRouterKey(key)) {
+          console.error("That doesn't look like an OpenRouter key — they start with sk-or-.");
           process.exit(1);
         }
+        const res = await checkOpenRouterKey(key);
+        if (!res.ok) {
+          console.error(res.reason === "invalid" ? "OpenRouter rejected this key." : `Couldn't verify the key: ${res.message}`);
+          process.exit(1);
+        }
+        const savedTo = await patchPersistedConfig({ openrouterApiKey: key });
+        const credit = typeof res.info.limitRemaining === "number" ? ` · $${res.info.limitRemaining.toFixed(2)} credit left` : "";
+        console.log(`✓ Key accepted${res.info.label ? ` (${res.info.label})` : ""}${credit}`);
+        console.log(`Saved to ${savedTo}. Run \`kimiflare\` to start.`);
       }),
   )
   .addCommand(
@@ -244,62 +147,6 @@ program
           if (step.error) process.exit(1);
         }
       }),
-  )
-  .addCommand(
-    new Command("cloud")
-      .description("Authenticate with Kimiflare Cloud")
-      .action(async () => {
-        if (!isCloudModeAvailable()) {
-          console.error(CLOUD_UNAVAILABLE_NOTICE);
-          process.exit(1);
-        }
-        const { authenticateDevice } = await import("./cloud/auth.js");
-        try {
-          const creds = await authenticateDevice(({ url, userCode, polling }) => {
-            if (!polling) {
-              console.log(`\nKimiflare Cloud Authentication`);
-              console.log(`\n1. Open this URL in your browser:`);
-              console.log(`   ${url}`);
-              console.log(`\n2. Sign in with GitHub or Email\n`);
-            }
-          });
-          console.log(`Authenticated! Token expires at ${new Date(creds.expiresAt * 1000).toISOString()}`);
-
-          // Also enable cloud mode in config so the user doesn't need --cloud on every run
-          const existing = await loadConfig();
-          await saveConfig({
-            accountId: "",
-            apiToken: "",
-            model: existing?.model ?? DEFAULT_CLOUD_MODEL,
-            cloudMode: true,
-          });
-          console.log("Cloud mode enabled. Run `kimiflare` to start using it.");
-
-          // Fetch usage info
-          const { fetchCloudUsage } = await import("./cloud/auth.js");
-          const usage = await fetchCloudUsage(creds.accessToken, creds.deviceId);
-          if (usage) {
-            console.log(`\nToken budget: ${usage.remaining.toLocaleString()} / ${usage.input_token_limit.toLocaleString()} remaining`);
-            console.log(`Grant expires: ${usage.expires_at}`);
-            console.log("Or when the global pool of free tokens runs out.");
-          }
-        } catch (err) {
-          if (isKillSwitchError(err)) {
-            console.error(
-              "\nKimiFlare Cloud has reached its maximum budget across all users.\n" +
-                "The free credits period has ended.\n\n" +
-                "To continue using KimiFlare, switch to BYOK mode:\n" +
-                "  • kimiflare config set-key <your-cloudflare-api-key>\n" +
-                "  • kimiflare config set-account <your-account-id>\n" +
-                "  • Or re-run kimiflare and select BYOK\n",
-            );
-            process.exit(0);
-          }
-          console.error("Authentication failed:", err instanceof Error ? err.message : String(err));
-          process.exit(1);
-        }
-      }),
-    { hidden: !isCloudModeAvailable() },
   );
 
 program
@@ -310,25 +157,12 @@ program
   .action(async (cmdOpts) => {
     const cfg = await loadConfig();
     if (!cfg) {
-      console.error("kimiflare serve: missing credentials.");
+      console.error("kimiflare serve: no OpenRouter API key — set OPENROUTER_API_KEY or run `kimiflare auth openrouter`.");
       process.exit(2);
     }
+    const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
+    await ensureOpenRouterCatalog();
     const { startServer } = await import("./server/index.js");
-    // Long-running: rotate a "Log in with Cloudflare" access token in place
-    // (routes read config.apiToken on every request, so mutating the shared
-    // object is enough).
-    if (cfg.cloudflareOAuth?.refreshToken) {
-      const { refreshCloudflareSession } = await import("./config.js");
-      const timer = setInterval(() => {
-        void refreshCloudflareSession(cfg).then((next) => {
-          if (next) {
-            cfg.apiToken = next.apiToken;
-            cfg.cloudflareOAuth = next.cloudflareOAuth;
-          }
-        });
-      }, 60_000);
-      timer.unref();
-    }
     await startServer({
       port: cmdOpts.port,
       hostname: cmdOpts.hostname,
@@ -391,47 +225,15 @@ async function main() {
     lspProjectPath = resolved.projectPath;
   }
 
-  // Handle cloud mode. While KimiFlare Cloud is hidden (src/cloud/availability.ts)
-  // `--cloud` is a no-op: we tell the user once and continue with BYOK.
-  if (opts.cloud && !isCloudModeAvailable()) {
-    console.error(`kimiflare: --cloud ignored — ${CLOUD_UNAVAILABLE_NOTICE}`);
-  }
-  const cloudMode = isCloudModeAvailable() && (opts.cloud ?? cfg?.cloudMode ?? false);
-  let cloudToken: string | undefined;
-  let cloudDeviceId: string | undefined;
-  if (cloudMode) {
-    const { loadCloudCredentials, authenticateDevice } = await import("./cloud/auth.js");
-    let cloudCreds = await loadCloudCredentials();
-    if (!cloudCreds) {
-      console.error("kimiflare: cloud mode requires authentication.\nRun: kimiflare auth cloud\n");
-      process.exit(2);
-    }
-    cloudToken = cloudCreds.accessToken;
-    cloudDeviceId = cloudCreds.deviceId;
+  // Load OpenRouter's model catalog (cache-first, 6h TTL; public endpoint, no
+  // key needed) so context windows, pricing, capability gates and the model
+  // picker reflect every model OpenRouter serves. Never blocks startup on a
+  // network failure — the registry falls back to its seed list.
+  const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
+  await ensureOpenRouterCatalog();
 
-    // Proactive health check: detect kill switch early before the first prompt
-    try {
-      const { fetchCloudUsage } = await import("./cloud/auth.js");
-      await fetchCloudUsage(cloudToken, cloudDeviceId);
-    } catch (err) {
-      if (isKillSwitchError(err)) {
-        console.error(
-          "\nKimiFlare Cloud has reached its maximum budget across all users.\n" +
-            "The free credits period has ended.\n\n" +
-            "To continue using KimiFlare, switch to BYOK mode:\n" +
-            "  • kimiflare config set-key <your-cloudflare-api-key>\n" +
-            "  • kimiflare config set-account <your-account-id>\n" +
-            "  • Or re-run kimiflare and select BYOK\n",
-        );
-        process.exit(0);
-      }
-      // Other errors (network, etc.) — don't block, let it retry on first request
-    }
-
-    cfg = {
-      ...(cfg ?? { accountId: "", apiToken: "", model: DEFAULT_CLOUD_MODEL, memoryEnabled: false }),
-      cloudMode: true,
-    };
+  if (opts.cloud) {
+    console.error("kimiflare: --cloud ignored — KimiFlare Cloud was retired; kimiflare now runs on your own OpenRouter key.");
   }
 
   if (opts.mode === "rpc") {
@@ -457,11 +259,10 @@ async function main() {
       console.error("kimiflare: --emit-events requires credentials.");
       process.exit(2);
     }
-    const model = opts.model ?? cfg.model ?? (cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL);
+    const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
     const { runEmitMode } = await import("./emit-mode.js");
     await runEmitMode({
-      accountId: cfg.accountId,
-      apiToken: cfg.apiToken,
+      ...cfg,
       model,
       prompt: opts.print,
       allowAll: !!opts.dangerouslyAllowAll,
@@ -469,26 +270,22 @@ async function main() {
       codeMode: cfg.codeMode,
       continueOnLimit: !!opts.continueOnLimit,
       maxInputTokens: opts.maxInputTokens,
-      cloudMode,
-      cloudToken,
-      cloudDeviceId,
     });
     return;
   }
 
   if (opts.print !== undefined) {
-    const exampleModel = cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL;
     if (!cfg) {
       console.error(
-        "kimiflare: missing credentials.\n" +
-          "Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN, or write them to\n" +
-          "  ~/.config/kimiflare/config.json  (chmod 600)\n" +
-          `  { "accountId": "...", "apiToken": "...", "model": "${exampleModel}" }\n` +
-          "Or use cloud mode: kimiflare --cloud -p \"...\"",
+        "kimiflare: no OpenRouter API key configured.\n" +
+          "Set OPENROUTER_API_KEY (create a key at https://openrouter.ai/keys), run\n" +
+          "  kimiflare auth openrouter\n" +
+          "or write it to ~/.config/kimiflare/config.json (chmod 600):\n" +
+          `  { "openrouterApiKey": "sk-or-...", "model": "${DEFAULT_MODEL}" }`,
       );
       process.exit(2);
     }
-    const model = opts.model ?? cfg.model ?? (cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL);
+    const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
     const format = (opts.format ?? "text") as PrintFormat;
     if (format !== "text" && format !== "json" && format !== "stream-json") {
       console.error(`kimiflare: invalid --format "${format}". Use: text, json, stream-json`);
@@ -519,9 +316,6 @@ async function main() {
       codeMode: cfg.codeMode,
       continueOnLimit: !!opts.continueOnLimit,
       maxInputTokens: opts.maxInputTokens,
-      cloudMode,
-      cloudToken,
-      cloudDeviceId,
       updateResult,
       continueSession: !!opts.continue,
       sessionId: opts.session,
@@ -546,7 +340,7 @@ async function main() {
   // renderer as a Splash event so it stays visible until the user's
   // first prompt — console.log here would get swallowed by Camouflage's
   // alt-screen and flash for a fraction of a second.
-  const logoText = renderLogo(getAppVersion(), cloudMode);
+  const logoText = renderLogo(getAppVersion(), opts.model ?? cfg?.model);
 
   // UI engine resolution: React Ink is always used. Camouflage UI access is
   // temporarily disabled, so `--ui`, `KIMIFLARE_UI`, and any persisted
@@ -561,12 +355,34 @@ async function main() {
   const { renderApp } = await import("./app.js");
   if (cfg) {
     const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
-    await renderApp({ ...cfg, model }, updateResult, lspScope, lspProjectPath, cloudToken, cloudDeviceId);
+    await renderApp({ ...cfg, model }, updateResult, lspScope, lspProjectPath);
   } else {
-    await renderApp(null, updateResult, lspScope, lspProjectPath, cloudToken, cloudDeviceId);
+    await renderApp(null, updateResult, lspScope, lspProjectPath);
   }
 }
 
 
 
 
+
+/** Read a line from the terminal without echoing it (for secrets). */
+async function promptHidden(question: string): Promise<string> {
+  const { createInterface } = await import("node:readline");
+  const { Writable } = await import("node:stream");
+  let muted = false;
+  const output = new Writable({
+    write(chunk, _enc, cb) {
+      if (!muted) process.stdout.write(chunk);
+      cb();
+    },
+  });
+  const rl = createInterface({ input: process.stdin, output, terminal: true });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      process.stdout.write("\n");
+      resolve(answer);
+    });
+    muted = true;
+  });
+}

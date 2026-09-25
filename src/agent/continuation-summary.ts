@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import { runKimi } from "./client.js";
-import type { AiGatewayOptions } from "./client.js";
+import type { OpenRouterProviderPrefs } from "./client.js";
+import type { CustomEndpoint } from "./custom-endpoint.js";
 import type { ChatMessage } from "./messages.js";
 import type { Mode } from "../mode.js";
 import type { MemoryManager } from "../memory/manager.js";
@@ -9,10 +10,10 @@ import { distillSessionPlan } from "./distill.js";
 export interface ContinuationSummaryOpts {
   messages: ChatMessage[];
   mode: Mode;
-  accountId: string;
-  apiToken: string;
+  openrouterApiKey?: string;
+  customEndpoint?: CustomEndpoint;
   model: string;
-  gateway?: AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
   memoryManager?: MemoryManager | null;
   memoryEnabled?: boolean;
   signal?: AbortSignal;
@@ -123,22 +124,22 @@ async function gatherMemoryEvidence(
 }
 
 async function runKimiText(opts: {
-  accountId: string;
-  apiToken: string;
+  openrouterApiKey?: string;
+  customEndpoint?: CustomEndpoint;
   model: string;
-  gateway?: AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
   messages: ChatMessage[];
   signal?: AbortSignal;
   onProgress?: (delta: number) => void;
 }): Promise<string> {
   const events = runKimi({
-    accountId: opts.accountId,
-    apiToken: opts.apiToken,
+    openrouterApiKey: opts.openrouterApiKey,
+    customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: opts.messages,
     temperature: 0.1,
     reasoningEffort: "low",
-    gateway: opts.gateway,
+    provider: opts.provider,
     signal: opts.signal,
   });
   let text = "";
@@ -188,10 +189,10 @@ export async function generateContinuationSummary(
   const userPrompt = evidenceParts.join("\n\n");
 
   const summary = await runKimiText({
-    accountId: opts.accountId,
-    apiToken: opts.apiToken,
+    openrouterApiKey: opts.openrouterApiKey,
+    customEndpoint: opts.customEndpoint,
     model: opts.model,
-    gateway: opts.gateway,
+    provider: opts.provider,
     signal: opts.signal,
     onProgress: opts.onProgress,
     messages: [

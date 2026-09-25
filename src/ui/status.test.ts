@@ -1,49 +1,41 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { buildRightParts, formatGatewayCacheStatus } from "./status.js";
+import { buildRightParts, formatProviderTag, shortenModelId } from "./status.js";
 
-describe("status gateway cache formatting", () => {
-  it("shows gateway cache status separately from token cache", () => {
-    const parts = buildRightParts(
-      {
-        prompt_tokens: 100,
-        completion_tokens: 20,
-        total_tokens: 120,
-        prompt_tokens_details: { cached_tokens: 50 },
-      },
-      1_000,
-      null,
-      { cacheStatus: "hit" },
-    );
+const usage = {
+  prompt_tokens: 100,
+  completion_tokens: 20,
+  total_tokens: 120,
+  prompt_tokens_details: { cached_tokens: 50 },
+};
 
-    assert.deepStrictEqual(parts, [
-      "in 100 (50 cached)",
-      "ctx 10%",
-      "$0.00",
-      "AI Gateway · cache hit",
-    ]);
+describe("status bar right parts", () => {
+  it("prefers OpenRouter's inline billed cost over the price table", () => {
+    const parts = buildRightParts({ ...usage, cost: 0.1234 }, 1_000, null, null, "moonshotai/kimi-k2.6");
+    assert.deepStrictEqual(parts, ["in 100 (50 cached)", "ctx 10%", "$0.12"]);
   });
 
-  it("omits gateway cache status when Cloudflare does not return it", () => {
-    assert.strictEqual(formatGatewayCacheStatus({ logId: "log_123" }), null);
+  it("appends the upstream provider that served the turn", () => {
+    const parts = buildRightParts({ ...usage, cost: 0 }, 1_000, null, { provider: "Moonshot AI" });
+    assert.strictEqual(parts.at(-1), "via Moonshot AI");
   });
 
-  it("suppresses MISS so users without caching don't see a constant 'cache miss'", () => {
-    // Cloudflare returns cf-aig-cache-status: MISS on every uncached request,
-    // including when caching isn't configured. Surfacing it would read as a
-    // failure indicator on every turn.
-    assert.strictEqual(formatGatewayCacheStatus({ cacheStatus: "MISS" }), null);
-    assert.strictEqual(formatGatewayCacheStatus({ cacheStatus: "miss" }), null);
+  it("marks a session cost as an estimate until OpenRouter confirms it", () => {
+    const session = { date: "2026-09-25", promptTokens: 100, completionTokens: 20, cachedTokens: 0, cost: 0.5, reconcilePending: true };
+    assert.ok(buildRightParts(usage, 1_000, session).includes("≈$0.50"));
+    assert.ok(buildRightParts(usage, 1_000, { ...session, reconcilePending: false }).includes("$0.50"));
   });
+});
 
-  it("still surfaces non-miss cache statuses (hit, revalidated, bypass)", () => {
-    assert.strictEqual(
-      formatGatewayCacheStatus({ cacheStatus: "HIT" }),
-      "AI Gateway · cache hit",
-    );
-    assert.strictEqual(
-      formatGatewayCacheStatus({ cacheStatus: "REVALIDATED" }),
-      "AI Gateway · cache revalidated",
-    );
+describe("formatProviderTag", () => {
+  it("is null without a provider", () => {
+    assert.strictEqual(formatProviderTag(null), null);
+    assert.strictEqual(formatProviderTag({ generationId: "gen-1" }), null);
+  });
+});
+
+describe("shortenModelId", () => {
+  it("drops the vendor prefix", () => {
+    assert.strictEqual(shortenModelId("moonshotai/kimi-k2.7-code"), "kimi-k2.7-code");
   });
 });

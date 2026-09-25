@@ -1,3 +1,5 @@
+import type { OpenRouterProviderPrefs } from "../agent/client.js";
+import type { CustomEndpoint } from "../agent/custom-endpoint.js";
 /**
  * Deterministic extractors that auto-populate memory from tool results.
  * Most are pure regex / JSON.parse. The edit_event extractor can optionally
@@ -13,12 +15,12 @@ export interface ExtractorContext {
   toolArgs?: Record<string, unknown>;
   /** The assistant message that triggered this tool call. */
   assistantMessage?: string;
-  /** LLM opts for synthesis (accountId, apiToken, model, gateway). */
+  /** LLM opts for synthesis (credentials + model). */
   llmOpts?: {
-    accountId: string;
-    apiToken: string;
+    openrouterApiKey?: string;
+    customEndpoint?: CustomEndpoint;
     model: string;
-    gateway?: { id: string; cacheTtl?: number; skipCache?: boolean; collectLogPayload?: boolean; metadata?: Record<string, string | number | boolean> };
+    provider?: OpenRouterProviderPrefs;
     signal?: AbortSignal;
   };
 }
@@ -88,13 +90,13 @@ async function callLlm(
 ): Promise<string> {
   if (!llmOpts) return "";
   const events = runKimi({
-    accountId: llmOpts.accountId,
-    apiToken: llmOpts.apiToken,
+    openrouterApiKey: llmOpts.openrouterApiKey,
+    customEndpoint: llmOpts.customEndpoint,
     model: llmOpts.model,
     messages,
     temperature: 0.1,
     maxCompletionTokens: maxTokens,
-    gateway: llmOpts.gateway,
+    provider: llmOpts.provider,
     signal: llmOpts.signal,
   });
   let text = "";

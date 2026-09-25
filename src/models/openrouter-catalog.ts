@@ -14,9 +14,11 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
-import type { ModelEntry, ModelProvider } from "./registry.js";
+import { registerOpenRouterModels, type ModelEntry } from "./registry.js";
+import { fetchWithNetworkRetry, openRouterUrl } from "./openrouter.js";
 
-export const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models";
+/** Bump when the cached `ModelEntry` shape changes, so an old cache is refetched. */
+const CACHE_VERSION = 2;
 
 /** Default: refetch after 6 hours; always fall back to a stale cache on fetch failure. */
 export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -24,6 +26,7 @@ export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 /** Shape of one entry in OpenRouter's `/models` response — only the fields we use. */
 export interface OpenRouterRawModel {
   id: string;
+  name?: string;
   context_length?: number;
   top_provider?: { max_completion_tokens?: number | null } | null;
   pricing?: { prompt?: string; completion?: string; input_cache_read?: string };
@@ -49,10 +52,9 @@ function perMtok(perToken: string | undefined): number {
 /** Pure mapping, no I/O — kept separate so it's directly unit-testable. */
 export function mapOpenRouterModel(raw: OpenRouterRawModel): ModelEntry {
   const supported = new Set(raw.supported_parameters ?? []);
-  const provider: ModelProvider = "openrouter";
   return {
     id: raw.id,
-    provider,
+    ...(raw.name ? { name: raw.name } : {}),
     contextWindow: raw.context_length ?? 128_000,
     maxOutputTokens: raw.top_provider?.max_completion_tokens ?? 4_096,
     pricing: {
@@ -70,13 +72,12 @@ export function mapOpenRouterModel(raw: OpenRouterRawModel): ModelEntry {
       vision: (raw.architecture?.input_modalities ?? []).includes("image"),
       temperature: supported.has("temperature") ? true : undefined,
     },
-    billingMode: "byok",
   };
 }
 
 /** Fetch + map the full live catalog. Throws on network/HTTP failure — callers decide the fallback. */
 export async function fetchOpenRouterCatalog(fetchImpl: typeof fetch = fetch): Promise<ModelEntry[]> {
-  const res = await fetchImpl(OPENROUTER_MODELS_URL, {
+  const res = await fetchWithNetworkRetry(fetchImpl, openRouterUrl("models"), {
     headers: { Accept: "application/json" },
   });
   if (!res.ok) {
@@ -87,6 +88,7 @@ export async function fetchOpenRouterCatalog(fetchImpl: typeof fetch = fetch): P
 }
 
 interface CacheFile {
+  version?: number;
   fetchedAt: string;
   models: ModelEntry[];
 }
@@ -94,7 +96,9 @@ interface CacheFile {
 async function readCache(): Promise<CacheFile | null> {
   try {
     const raw = await readFile(catalogCachePath(), "utf8");
-    return JSON.parse(raw) as CacheFile;
+    const parsed = JSON.parse(raw) as CacheFile;
+    // Caches written by an older build carry a different ModelEntry shape.
+    return parsed.version === CACHE_VERSION ? parsed : null;
   } catch {
     return null;
   }
@@ -104,7 +108,7 @@ async function writeCache(models: ModelEntry[]): Promise<void> {
   const path = catalogCachePath();
   try {
     await mkdir(dirname(path), { recursive: true });
-    const cache: CacheFile = { fetchedAt: new Date().toISOString(), models };
+    const cache: CacheFile = { version: CACHE_VERSION, fetchedAt: new Date().toISOString(), models };
     await writeFile(path, JSON.stringify(cache, null, 2), "utf8");
   } catch {
     // Best-effort — an unwritable config dir shouldn't block using the catalog this run.
@@ -131,5 +135,24 @@ export async function loadOpenRouterCatalog(
   } catch {
     // Network down, OpenRouter unreachable, etc. — a stale catalog beats an empty picker.
     return cached?.models ?? [];
+  }
+}
+
+/**
+ * Load the catalog (cache-first, see above) and register it with the model
+ * registry, so `getModel()` / `listModels()` / the model picker see every
+ * OpenRouter model. Called once at startup by every entry point (TUI, print
+ * mode, RPC, serve). Never throws — with no network and no cache, the
+ * registry keeps its seed list and the app still works.
+ */
+export async function ensureOpenRouterCatalog(
+  opts: { ttlMs?: number; fetchImpl?: typeof fetch } = {},
+): Promise<number> {
+  try {
+    const models = await loadOpenRouterCatalog(opts);
+    if (models.length > 0) registerOpenRouterModels(models);
+    return models.length;
+  } catch {
+    return 0;
   }
 }

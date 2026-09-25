@@ -12,9 +12,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
 
-import type { AiGatewayOptions, GatewayMeta } from "../agent/client.js";
+import type { ResponseMeta } from "../agent/client.js";
+import { resolveCustomEndpoint } from "../agent/custom-endpoint.js";
 import type { ChatMessage } from "../agent/messages.js";
-import type { GatewayUsageLookup } from "../usage-tracker.js";
+import type { CostLookup } from "../usage-tracker.js";
 import type { Mode } from "../mode.js";
 import { buildSystemMessages, buildSystemPrompt } from "../agent/system-prompt.js";
 import type { ToolSpec } from "../tools/registry.js";
@@ -166,32 +167,15 @@ export function buildFilePickerIgnoreList(cwd: string): string[] {
   return [...hardcoded, ...gitignorePatterns];
 }
 
-// ── AI Gateway config ────────────────────────────────────────────────────
+// ── Cost confirmation ────────────────────────────────────────────────────
 
-export function gatewayFromConfig(cfg: Cfg): AiGatewayOptions | undefined {
-  if (process.env.KIMIFLARE_DISABLE_AI_GATEWAY === "1") return undefined;
-  if (!cfg.aiGatewayId) return undefined;
-  return {
-    id: cfg.aiGatewayId,
-    cacheTtl: cfg.aiGatewayCacheTtl,
-    skipCache: cfg.aiGatewaySkipCache,
-    collectLogPayload: cfg.aiGatewayCollectLogPayload,
-    metadata: cfg.aiGatewayMetadata,
-  };
-}
-
-export function gatewayUsageLookupFromConfig(
-  cfg: Cfg,
-  meta: GatewayMeta | null,
-): GatewayUsageLookup | undefined {
-  if (process.env.KIMIFLARE_DISABLE_AI_GATEWAY === "1") return undefined;
-  if (!cfg.aiGatewayId || !meta) return undefined;
-  return {
-    accountId: cfg.accountId,
-    apiToken: cfg.apiToken,
-    gatewayId: cfg.aiGatewayId,
-    meta,
-  };
+/** What recordUsage needs to confirm a turn's billed cost with OpenRouter.
+ *  Undefined on a custom endpoint (the host's gateway meters) or without
+ *  a generation id. */
+export function costLookupFromConfig(cfg: Cfg, meta: ResponseMeta | null | undefined): CostLookup | undefined {
+  if (!cfg.openrouterApiKey || !meta?.generationId) return undefined;
+  if (resolveCustomEndpoint(cfg)) return undefined;
+  return { apiKey: cfg.openrouterApiKey, meta };
 }
 
 // ── Process / OS helpers ─────────────────────────────────────────────────

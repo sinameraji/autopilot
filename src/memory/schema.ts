@@ -59,4 +59,4 @@ export interface MemoryStats {
 }
 
 export const DEFAULT_EMBEDDING_DIM = 768;
-export const DEFAULT_EMBEDDING_MODEL = "@cf/baai/bge-base-en-v1.5";
+export { DEFAULT_EMBEDDING_MODEL } from "./embeddings.js";

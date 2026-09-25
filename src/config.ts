@@ -1,12 +1,8 @@
 import { readFile, mkdir, writeFile, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isCloudModeAvailable } from "./cloud/availability.js";
-import {
-  refreshCloudflareToken,
-  tokenNeedsRefresh,
-  CF_OAUTH_CLIENT_ID,
-} from "./cloud/cloudflare-oauth.js";
+import { migrateLegacyModelId } from "./models/registry.js";
+import type { OpenRouterProviderPrefs } from "./agent/client.js";
 
 export type ReasoningEffort = "low" | "medium" | "high";
 export const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high"];
@@ -39,54 +35,45 @@ export type PermissionRule = "allow" | "deny" | "ask";
 /** Per-tool permission rules keyed by glob pattern. */
 export type PermissionRules = Record<string, PermissionRule>;
 
-/**
- * Present when the Cloudflare credentials came from "Log in with Cloudflare"
- * (OAuth 2.0 + PKCE, see src/cloud/cloudflare-oauth.ts). `apiToken` holds the
- * current short-lived access token; this block holds what we need to rotate
- * it silently in the background.
- */
-export interface CloudflareOAuthConfig {
-  /** Refresh token (rotates on every refresh). Absent if offline_access was not granted. */
-  refreshToken?: string;
-  /** Access-token expiry, epoch milliseconds. */
-  expiresAt: number;
-  /** Scopes granted on the consent screen. */
-  scopes: string[];
-  /** OAuth client id the tokens were issued to. */
-  clientId: string;
-  /** Email of the signed-in Cloudflare user (display only). */
-  email?: string;
-  /** Display name of the selected account (display only). */
-  accountName?: string;
-}
-
 export interface KimiConfig {
-  accountId: string;
-  apiToken: string;
+  /**
+   * The user's own OpenRouter API key (`sk-or-…`; env: OPENROUTER_API_KEY or
+   * KIMIFLARE_OPENROUTER_KEY, which win over the file). Every model call —
+   * chat, memory embeddings, plumbing side-calls — is billed to this key.
+   * Bring-your-own only: kimiflare never pays for or proxies model calls.
+   */
+  openrouterApiKey?: string;
+  /** OpenRouter model id, e.g. "moonshotai/kimi-k2.6". */
   model: string;
-  /** Set when apiToken is an OAuth access token from "Log in with Cloudflare". */
-  cloudflareOAuth?: CloudflareOAuthConfig;
+  /**
+   * Optional OpenRouter provider-routing preferences, merged into every
+   * request's `provider` object (kimiflare always sends
+   * `require_parameters: true`). E.g. `{ "ignore": ["SomeProvider"] }` or
+   * `{ "quantizations": ["fp8", "bf16"] }`. Avoid `order`/`sort` unless you
+   * need them: they disable OpenRouter's sticky routing, which is what keeps
+   * the prompt cache warm. See https://openrouter.ai/docs/guides/routing/provider-selection
+   */
+  openrouterProvider?: OpenRouterProviderPrefs;
   /**
    * Custom OpenAI-compatible endpoint base URL (env: KIMIFLARE_BASE_URL).
-   * When set, ALL model calls go to `<baseUrl>/chat/completions` and every
-   * Cloudflare routing/auth path is bypassed: no account-id lookups, no
-   * cf-aig-* headers, no Cloudflare token, and no whoami-style preflights or
-   * OAuth token refresh. Cloudflare credentials become optional. See
-   * src/agent/custom-endpoint.ts.
+   * For a host application that embeds kimiflare and owns its own broker:
+   * when set, ALL model calls go to `<baseUrl>/chat/completions` instead of
+   * OpenRouter and no OpenRouter key is needed. See src/agent/custom-endpoint.ts.
    */
   baseUrl?: string;
   /**
    * Bearer sent as `Authorization` to `baseUrl` (env: KIMIFLARE_API_KEY).
    * Only used when `baseUrl` is set; omitted from the request entirely when
-   * unset (for unauthenticated local gateways). Not a Cloudflare token —
-   * that stays in `apiToken`.
+   * unset (for unauthenticated local gateways).
    */
   apiKey?: string;
-  aiGatewayId?: string;
-  aiGatewayCacheTtl?: number;
-  aiGatewaySkipCache?: boolean;
-  aiGatewayCollectLogPayload?: boolean;
-  aiGatewayMetadata?: Record<string, string | number | boolean>;
+  /**
+   * Cloudflare account id + API token (env: CLOUDFLARE_ACCOUNT_ID /
+   * CLOUDFLARE_API_TOKEN). Not used for model calls. Only `/multi-agent`
+   * Commute reads these, to deploy its Worker into the user's own account.
+   */
+  accountId?: string;
+  apiToken?: string;
   reasoningEffort?: ReasoningEffort;
   coauthor?: boolean;
   coauthorName?: string;
@@ -105,11 +92,11 @@ export interface KimiConfig {
   memoryMaxAgeDays?: number;
   /** Max memories per repo. Default: 1000. */
   memoryMaxEntries?: number;
-  /** Embedding model for memory vectors. Default: @cf/baai/bge-base-en-v1.5. */
+  /** Embedding model for memory vectors (OpenRouter id). Default: baai/bge-base-en-v1.5. */
   memoryEmbeddingModel?: string;
-  /** Model for internal plumbing tasks (memory verification, hypothetical queries). Default: @cf/moonshotai/kimi-k2.5. */
+  /** Model for internal plumbing tasks (memory verification, hypothetical queries). Default: DEFAULT_PLUMBING_MODEL. */
   plumbingModel?: string;
-  /** Model for auto-extracting high-signal edit events. Default: @cf/moonshotai/kimi-k2.5. */
+  /** Model for auto-extracting high-signal edit events. Default: DEFAULT_PLUMBING_MODEL. */
   memoryExtractionModel?: string;
   /** Enable Code Mode: present tools as a TypeScript API and execute generated code in a sandbox. */
   codeMode?: boolean;
@@ -139,14 +126,6 @@ export interface KimiConfig {
   githubTokenExpiry?: number;
   /** Default GitHub repo for remote sessions (owner/repo). */
   githubRepo?: string;
-  /**
-   * Enable cloud mode: use api.kimiflare.com instead of direct Workers AI.
-   * NOTE: KimiFlare Cloud is temporarily hidden (see src/cloud/availability.ts).
-   * While it is hidden, loadConfig() never returns cloudMode=true — a persisted
-   * `cloudMode: true` or `KIMIFLARE_CLOUD=1` is ignored and the user is routed
-   * to BYOK onboarding instead. The field is kept so existing configs still parse.
-   */
-  cloudMode?: boolean;
   /** Shell override for the bash tool. "auto" (default) detects the platform, or specify "bash", "cmd", "powershell", or an absolute path. */
   shell?: string;
   /**
@@ -155,33 +134,6 @@ export interface KimiConfig {
    * effect. Kept in the type so existing configs do not break on load.
    */
   uiEngine?: "ink" | "camouflage";
-  /**
-   * Per-provider API keys. For anthropic/openai/google/moonshotai/openai-compatible
-   * these are forwarded to AI Gateway as cf-aig-authorization for BYOK. `openrouter`
-   * is different: it's sent directly to openrouter.ai as a normal Authorization
-   * bearer — OpenRouter is never routed through Cloudflare at all (see `routeFor()`
-   * in models/registry.ts).
-   */
-  providerKeys?: {
-    anthropic?: string;
-    openai?: string;
-    google?: string;
-    moonshotai?: string;
-    "openai-compatible"?: string;
-    openrouter?: string;
-  };
-  /** When true, models marked billingMode="unified" use Cloudflare's Unified Billing (no BYOK header). */
-  unifiedBilling?: boolean;
-  /** Non-secret names referencing provider keys stored in Cloudflare Secrets Store with scope: ai_gateway. */
-  providerKeyAliases?: {
-    anthropic?: string;
-    openai?: string;
-    google?: string;
-    moonshotai?: string;
-    "openai-compatible"?: string;
-  };
-  /** Id of the Cloudflare Secrets Store kimi-code uses for provider-key BYOK aliases. */
-  secretsStoreId?: string;
   /** Worker endpoint URL for spawning standalone research/executor workers. */
   workerEndpoint?: string;
   /** Max cost per worker in USD (default: 1.0). */
@@ -220,7 +172,7 @@ export interface KimiConfig {
   /** Forward MCP context to multi-agent workers. Default: false. */
   workerProxyMcp?: boolean;
   /** Model used for LLM-based task decomposition in multi-agent mode.
-   *  Default: @cf/moonshotai/kimi-k2.5 (fast and cheap). */
+   *  Default: DEFAULT_PLUMBING_MODEL (fast and cheap). */
   decompositionModel?: string;
   /** Strategy for decomposing heavy prompts into parallel research tasks.
    *  - "llm": use a lightweight LLM call (default)
@@ -228,7 +180,7 @@ export interface KimiConfig {
    *  - "hybrid": regex for explicit lists, LLM for prose */
   decompositionStrategy?: "llm" | "regex" | "hybrid";
   /** Model for synthesizing multi-agent findings.
-   *  Default: @cf/moonshotai/kimi-k2.5 (fast and cheap). */
+   *  Default: DEFAULT_PLUMBING_MODEL (fast and cheap). */
   synthesisModel?: string;
   /** Strategy for synthesizing worker findings.
    *  - "llm": use a lightweight LLM call (default)
@@ -257,8 +209,10 @@ export interface KimiConfig {
   allowDirectPush?: boolean;
 }
 
-export const DEFAULT_MODEL = "@cf/moonshotai/kimi-k2.6";
-export const DEFAULT_CLOUD_MODEL = "moonshotai/kimi-k3";
+export const DEFAULT_MODEL = "moonshotai/kimi-k2.6";
+/** Cheap, fast model for internal side-calls (summaries, memory extraction,
+ *  task decomposition, …) when no per-task model is configured. */
+export const DEFAULT_PLUMBING_MODEL = "moonshotai/kimi-k2.5";
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "medium";
 
 export function configPath(): string {
@@ -297,456 +251,226 @@ function readNumberEnv(name: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
-function readProviderKeysEnv():
-  | {
-      anthropic?: string;
-      openai?: string;
-      google?: string;
-      moonshotai?: string;
-      "openai-compatible"?: string;
-      openrouter?: string;
-    }
-  | undefined {
-  const anthropic = process.env.ANTHROPIC_API_KEY || process.env.KIMIFLARE_ANTHROPIC_KEY;
-  const openai = process.env.OPENAI_API_KEY || process.env.KIMIFLARE_OPENAI_KEY;
-  const google = process.env.GOOGLE_API_KEY || process.env.KIMIFLARE_GOOGLE_KEY;
-  const moonshotai = process.env.MOONSHOT_API_KEY || process.env.KIMIFLARE_MOONSHOT_KEY;
-  const generic = process.env.KIMIFLARE_OPENAI_COMPAT_KEY;
-  const openrouter = process.env.OPENROUTER_API_KEY || process.env.KIMIFLARE_OPENROUTER_KEY;
-  if (!anthropic && !openai && !google && !moonshotai && !generic && !openrouter) return undefined;
-  const out: {
-    anthropic?: string;
-    openai?: string;
-    google?: string;
-    moonshotai?: string;
-    "openai-compatible"?: string;
-    openrouter?: string;
-  } = {};
-  if (anthropic) out.anthropic = anthropic;
-  if (openai) out.openai = openai;
-  if (google) out.google = google;
-  if (moonshotai) out.moonshotai = moonshotai;
-  if (generic) out["openai-compatible"] = generic;
-  if (openrouter) out.openrouter = openrouter;
-  return out;
-}
-
-function readGatewayMetadataEnv(): Record<string, string | number | boolean> | undefined {
-  const raw = process.env.KIMIFLARE_AI_GATEWAY_METADATA;
-  if (!raw) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    const out: Record<string, string | number | boolean> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (
-        typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean"
-      ) {
-        out[key] = value;
-      }
-    }
-    return Object.keys(out).length > 0 ? out : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function warnIfBlankGatewayId(value: string | undefined, source: string): void {
-  if (value === undefined) return;
-  if (value.trim().length === 0) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `kimiflare: ${source} aiGatewayId is set but empty — gateway routing will be skipped.`,
-    );
-  }
-}
-
 export async function loadConfig(): Promise<KimiConfig | null> {
-  // v0.72+: always read the file up front, even when env vars provide
-  // credentials. The env path used to short-circuit and return an
-  // entirely env-derived object, which silently dropped settings-only
-  // fields (like `uiEngine` from `/ui camouflage`, or `theme` from
-  // `/theme everforest-light`) on the next launch.
-  let persisted: Partial<KimiConfig> | null = null;
+  // Always read the file up front, even when env vars provide credentials:
+  // settings-only fields (theme, mcpServers, …) live only in the file and
+  // must survive an env-driven launch.
+  let persisted: Partial<KimiConfig> & LegacyConfigFields = {};
+  let hasFile = false;
   try {
     const raw = await readFile(configPath(), "utf8");
-    persisted = JSON.parse(raw) as Partial<KimiConfig>;
+    persisted = JSON.parse(raw) as Partial<KimiConfig> & LegacyConfigFields;
+    hasFile = true;
   } catch {
     /* no config file yet — env-only is still valid */
   }
 
-  const envAccount = process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID;
-  const envToken = process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN;
-  // Custom OpenAI-compatible endpoint (see src/agent/custom-endpoint.ts).
-  // When a base URL resolves, kimiflare is fully usable without any
-  // Cloudflare credentials — routing and auth belong to the host's gateway.
-  const envBaseUrl = process.env.KIMIFLARE_BASE_URL;
-  const envApiKey = process.env.KIMIFLARE_API_KEY;
+  // The one required credential: the user's own OpenRouter key. Env wins so a
+  // headless instance can be configured without ever touching the file.
+  // Configs written by the pre-release OpenRouter branch kept the key under
+  // providerKeys.openrouter — honoured as a fallback.
+  const openrouterApiKey =
+    process.env.OPENROUTER_API_KEY ||
+    process.env.KIMIFLARE_OPENROUTER_KEY ||
+    persisted.openrouterApiKey ||
+    persisted.providerKeys?.openrouter ||
+    undefined;
+
+  // Custom OpenAI-compatible endpoint (see src/agent/custom-endpoint.ts): a
+  // complete setup on its own, no OpenRouter key needed.
+  const baseUrl = process.env.KIMIFLARE_BASE_URL ?? persisted.baseUrl;
+  const apiKey = process.env.KIMIFLARE_API_KEY ?? persisted.apiKey;
+
+  if (!openrouterApiKey && !baseUrl) return null;
+
   // KIMI_MODEL is an override, not a default: leave it undefined when unset so
   // the persisted `model` (set via /model) is honoured on the next launch.
   const envModel = process.env.KIMI_MODEL || undefined;
   const envEffort = readReasoningEffortEnv();
   const envCoauthor = readCoauthorEnv();
-  const envAiGatewayId = process.env.KIMIFLARE_AI_GATEWAY_ID;
-  warnIfBlankGatewayId(envAiGatewayId, "env");
-  const envAiGatewayCacheTtl = readNumberEnv("KIMIFLARE_AI_GATEWAY_CACHE_TTL");
-  const envAiGatewaySkipCache = readBooleanEnv("KIMIFLARE_AI_GATEWAY_SKIP_CACHE");
-  const envAiGatewayCollectLogPayload = readBooleanEnv(
-    "KIMIFLARE_AI_GATEWAY_COLLECT_LOG_PAYLOAD",
-  );
-  const envAiGatewayMetadata = readGatewayMetadataEnv();
 
   const envCacheStable = process.env.KIMIFLARE_CACHE_STABLE_PROMPTS;
   const cacheStablePrompts = envCacheStable === "0" || envCacheStable === "false" ? false : true;
-
   const envCompiled = process.env.KIMIFLARE_COMPILED_CONTEXT;
   const compiledContext = envCompiled === "0" || envCompiled === "false" ? false : true;
-
   const envImageTurns = process.env.KIMIFLARE_IMAGE_HISTORY_TURNS;
   const imageHistoryTurns = envImageTurns ? parseInt(envImageTurns, 10) : undefined;
 
-  const envMemoryEnabled = readBooleanEnv("KIMIFLARE_MEMORY_ENABLED");
-  const envMemoryDbPath = process.env.KIMIFLARE_MEMORY_DB_PATH;
-  const envMemoryMaxAgeDays = readNumberEnv("KIMIFLARE_MEMORY_MAX_AGE_DAYS");
-  const envMemoryMaxEntries = readNumberEnv("KIMIFLARE_MEMORY_MAX_ENTRIES");
-  const envMemoryEmbeddingModel = process.env.KIMIFLARE_MEMORY_EMBEDDING_MODEL;
-  const envPlumbingModel = process.env.KIMIFLARE_PLUMBING_MODEL;
-  const envMemoryExtractionModel = process.env.KIMIFLARE_MEMORY_EXTRACTION_MODEL;
-  const envCodeMode = readBooleanEnv("KIMIFLARE_CODE_MODE");
-  const envCostAttribution = readBooleanEnv("KIMI_COST_ATTRIBUTION");
-  const envFilePicker = readBooleanEnv("KIMIFLARE_FILE_PICKER");
-  // KimiFlare Cloud is temporarily hidden: while isCloudModeAvailable() is
-  // false, neither KIMIFLARE_CLOUD=1 nor a persisted cloudMode:true can put the
-  // user on the managed service. See src/cloud/availability.ts.
-  const cloudAllowed = isCloudModeAvailable();
-  const envCloudMode = cloudAllowed ? readBooleanEnv("KIMIFLARE_CLOUD") : undefined;
-  const envShell = process.env.KIMIFLARE_SHELL;
-  const envProviderKeys = readProviderKeysEnv();
-  const envUnifiedBilling = readBooleanEnv("KIMIFLARE_UNIFIED_BILLING");
-  const envMultiAgentEnabled = readBooleanEnv("KIMIFLARE_MULTI_AGENT_ENABLED");
   const envWorkerPreReadFiles = process.env.KIMIFLARE_WORKER_PRE_READ_FILES
     ? process.env.KIMIFLARE_WORKER_PRE_READ_FILES.split(",").map((s) => s.trim()).filter(Boolean)
     : undefined;
-  const envWorkerPreReadMaxChars = readNumberEnv("KIMIFLARE_WORKER_PRE_READ_MAX_CHARS");
-  const envPreferPullRequests = readBooleanEnv("KIMIFLARE_PREFER_PULL_REQUESTS");
-  const envAllowDirectPush = readBooleanEnv("KIMIFLARE_ALLOW_DIRECT_PUSH");
 
-  if (envCloudMode) {
-    return {
-      accountId: "",
-      apiToken: "",
-      model: envModel ?? DEFAULT_MODEL,
-      cloudMode: true,
-      reasoningEffort: envEffort,
-      coauthor: envCoauthor?.enabled ?? true,
-      coauthorName: envCoauthor?.name,
-      coauthorEmail: envCoauthor?.email,
-      cacheStablePrompts,
-      compiledContext,
-      imageHistoryTurns: Number.isNaN(imageHistoryTurns) ? undefined : imageHistoryTurns,
-      memoryEnabled: envMemoryEnabled ?? false,
-      memoryDbPath: envMemoryDbPath,
-      memoryMaxAgeDays: envMemoryMaxAgeDays,
-      memoryMaxEntries: envMemoryMaxEntries,
-      memoryEmbeddingModel: envMemoryEmbeddingModel,
-      plumbingModel: envPlumbingModel,
-      memoryExtractionModel: envMemoryExtractionModel,
-      codeMode: envCodeMode,
-      costAttribution: envCostAttribution ?? false,
-      filePicker: envFilePicker ?? true,
-      shell: envShell,
-      uiEngine: persisted?.uiEngine,
-      theme: persisted?.theme,
-      providerKeys: envProviderKeys ?? persisted?.providerKeys,
-      providerKeyAliases: persisted?.providerKeyAliases,
-      secretsStoreId: persisted?.secretsStoreId,
-      unifiedBilling: envUnifiedBilling,
-      workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT,
-      workerBudgetUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_USD"),
-      workerBudgetMaxUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_MAX_USD"),
-      workerMaxParallel: readNumberEnv("KIMIFLARE_WORKER_MAX_PARALLEL"),
-      workerTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS"),
-      multiAgentEnabled: envMultiAgentEnabled,
-      workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY,
-      autoExecute: readBooleanEnv("KIMIFLARE_AUTO_EXECUTE"),
-      workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? true,
-      workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? true,
-      workerPreReadFiles: envWorkerPreReadFiles ?? persisted?.workerPreReadFiles,
-      workerPreReadMaxChars: envWorkerPreReadMaxChars ?? persisted?.workerPreReadMaxChars,
-    };
+  const m = migrateLegacyModelId;
+  const cfg: KimiConfig = {
+    openrouterApiKey,
+    baseUrl,
+    apiKey,
+    // Cloudflare credentials survive only for /multi-agent Commute, which
+    // deploys a Worker into the user's own Cloudflare account.
+    accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID ?? persisted.accountId,
+    apiToken: process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN ?? persisted.apiToken,
+    model: m(envModel ?? persisted.model) ?? DEFAULT_MODEL,
+    openrouterProvider: persisted.openrouterProvider,
+    reasoningEffort: envEffort ?? persisted.reasoningEffort,
+    coauthor: envCoauthor?.enabled ?? persisted.coauthor ?? true,
+    coauthorName: envCoauthor?.name ?? persisted.coauthorName,
+    coauthorEmail: envCoauthor?.email ?? persisted.coauthorEmail,
+    mcpServers: persisted.mcpServers,
+    cacheStablePrompts: persisted.cacheStablePrompts ?? cacheStablePrompts,
+    compiledContext: persisted.compiledContext ?? compiledContext,
+    imageHistoryTurns:
+      imageHistoryTurns === undefined || Number.isNaN(imageHistoryTurns)
+        ? persisted.imageHistoryTurns
+        : imageHistoryTurns,
+    memoryEnabled: readBooleanEnv("KIMIFLARE_MEMORY_ENABLED") ?? persisted.memoryEnabled ?? false,
+    memoryDbPath: process.env.KIMIFLARE_MEMORY_DB_PATH ?? persisted.memoryDbPath,
+    memoryMaxAgeDays: readNumberEnv("KIMIFLARE_MEMORY_MAX_AGE_DAYS") ?? persisted.memoryMaxAgeDays,
+    memoryMaxEntries: readNumberEnv("KIMIFLARE_MEMORY_MAX_ENTRIES") ?? persisted.memoryMaxEntries,
+    memoryEmbeddingModel: m(process.env.KIMIFLARE_MEMORY_EMBEDDING_MODEL ?? persisted.memoryEmbeddingModel),
+    plumbingModel: m(process.env.KIMIFLARE_PLUMBING_MODEL ?? persisted.plumbingModel),
+    memoryExtractionModel: m(process.env.KIMIFLARE_MEMORY_EXTRACTION_MODEL ?? persisted.memoryExtractionModel),
+    codeMode: readBooleanEnv("KIMIFLARE_CODE_MODE") ?? persisted.codeMode ?? true,
+    lspEnabled: persisted.lspEnabled,
+    lspServers: persisted.lspServers,
+    costAttribution: readBooleanEnv("KIMI_COST_ATTRIBUTION") ?? persisted.costAttribution ?? true,
+    filePicker: readBooleanEnv("KIMIFLARE_FILE_PICKER") ?? persisted.filePicker ?? true,
+    theme: persisted.theme,
+    shell: process.env.KIMIFLARE_SHELL ?? persisted.shell,
+    uiEngine: persisted.uiEngine,
+    remoteWorkerUrl: persisted.remoteWorkerUrl,
+    remoteAuthSecret: persisted.remoteAuthSecret,
+    remoteTtlMinutes: persisted.remoteTtlMinutes,
+    remoteMaxInputTokens: persisted.remoteMaxInputTokens,
+    githubOAuthToken: persisted.githubOAuthToken,
+    githubRefreshToken: persisted.githubRefreshToken,
+    githubTokenExpiry: persisted.githubTokenExpiry,
+    githubRepo: persisted.githubRepo,
+    workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT ?? persisted.workerEndpoint,
+    workerBudgetUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_USD") ?? persisted.workerBudgetUsd,
+    workerBudgetMaxUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_MAX_USD") ?? persisted.workerBudgetMaxUsd,
+    workerMaxParallel: readNumberEnv("KIMIFLARE_WORKER_MAX_PARALLEL") ?? persisted.workerMaxParallel,
+    workerTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS") ?? persisted.workerTimeoutMs,
+    multiAgentEnabled: readBooleanEnv("KIMIFLARE_MULTI_AGENT_ENABLED") ?? persisted.multiAgentEnabled,
+    autoFreshSuggestionTurns: persisted.autoFreshSuggestionTurns,
+    autoFreshEnabled: persisted.autoFreshEnabled,
+    autoCompactTokenThreshold: persisted.autoCompactTokenThreshold,
+    autoFreshTokenThreshold: persisted.autoFreshTokenThreshold,
+    workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY ?? persisted.workerApiKey,
+    workerName: persisted.workerName,
+    autoExecute: readBooleanEnv("KIMIFLARE_AUTO_EXECUTE") ?? persisted.autoExecute,
+    workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? persisted.workerShallowClone ?? true,
+    workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? persisted.workerRepoCache ?? true,
+    workerProxyMemory: persisted.workerProxyMemory,
+    workerProxyLsp: persisted.workerProxyLsp,
+    workerProxyMcp: persisted.workerProxyMcp,
+    decompositionModel: m(persisted.decompositionModel),
+    decompositionStrategy: persisted.decompositionStrategy,
+    synthesisModel: m(persisted.synthesisModel),
+    synthesisStrategy: persisted.synthesisStrategy,
+    disableLlmSynthesis: persisted.disableLlmSynthesis,
+    workerPreReadFiles: envWorkerPreReadFiles ?? persisted.workerPreReadFiles,
+    workerPreReadMaxChars: readNumberEnv("KIMIFLARE_WORKER_PRE_READ_MAX_CHARS") ?? persisted.workerPreReadMaxChars,
+    permissions: persisted.permissions,
+    preferPullRequests: readBooleanEnv("KIMIFLARE_PREFER_PULL_REQUESTS") ?? persisted.preferPullRequests ?? true,
+    allowDirectPush: readBooleanEnv("KIMIFLARE_ALLOW_DIRECT_PUSH") ?? persisted.allowDirectPush ?? false,
+  };
+
+  // One-time cleanup of a Cloudflare-era config file: rewrite it without the
+  // retired fields (OAuth session, gateway, unified billing, BYOK keys for
+  // other providers, cloud mode) and with migrated model ids, so the file on
+  // disk matches what is actually used. Env-derived values are not persisted.
+  if (hasFile && hasLegacyFields(persisted)) {
+    await rewriteLegacyConfig(persisted, openrouterApiKey).catch(() => undefined);
   }
 
-  if (envAccount && envToken) {
-    return {
-      accountId: envAccount,
-      apiToken: envToken,
-      baseUrl: envBaseUrl ?? persisted?.baseUrl,
-      apiKey: envApiKey ?? persisted?.apiKey,
-      model: envModel ?? DEFAULT_MODEL,
-      aiGatewayId: envAiGatewayId,
-      aiGatewayCacheTtl: envAiGatewayCacheTtl,
-      aiGatewaySkipCache: envAiGatewaySkipCache,
-      aiGatewayCollectLogPayload: envAiGatewayCollectLogPayload,
-      aiGatewayMetadata: envAiGatewayMetadata,
-      reasoningEffort: envEffort,
-      coauthor: envCoauthor?.enabled ?? true,
-      coauthorName: envCoauthor?.name,
-      coauthorEmail: envCoauthor?.email,
-      cacheStablePrompts,
-      compiledContext,
-      imageHistoryTurns: Number.isNaN(imageHistoryTurns) ? undefined : imageHistoryTurns,
-      memoryEnabled: envMemoryEnabled ?? false,
-      memoryDbPath: envMemoryDbPath,
-      memoryMaxAgeDays: envMemoryMaxAgeDays,
-      memoryMaxEntries: envMemoryMaxEntries,
-      memoryEmbeddingModel: envMemoryEmbeddingModel,
-      plumbingModel: envPlumbingModel,
-      memoryExtractionModel: envMemoryExtractionModel,
-      codeMode: envCodeMode ?? true,
-      costAttribution: envCostAttribution ?? true,
-      filePicker: envFilePicker ?? true,
-      cloudMode: cloudAllowed ? (envCloudMode ?? persisted?.cloudMode) : undefined,
-      shell: envShell,
-      // Settings-only fields: env vars don't carry these, so we read
-      // them from the persisted file (when present) so the user's TUI
-      // choices survive across restarts.
-      uiEngine: persisted?.uiEngine,
-      theme: persisted?.theme,
-      providerKeys: envProviderKeys ?? persisted?.providerKeys,
-      providerKeyAliases: persisted?.providerKeyAliases,
-      secretsStoreId: persisted?.secretsStoreId,
-      unifiedBilling: envUnifiedBilling ?? persisted?.unifiedBilling,
-      workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT,
-      workerBudgetUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_USD"),
-      workerBudgetMaxUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_MAX_USD"),
-      workerMaxParallel: readNumberEnv("KIMIFLARE_WORKER_MAX_PARALLEL"),
-      workerTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS"),
-      multiAgentEnabled: envMultiAgentEnabled,
-      workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY,
-      autoExecute: readBooleanEnv("KIMIFLARE_AUTO_EXECUTE"),
-      workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? true,
-      workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? true,
-      workerPreReadFiles: envWorkerPreReadFiles ?? persisted?.workerPreReadFiles,
-      workerPreReadMaxChars: envWorkerPreReadMaxChars ?? persisted?.workerPreReadMaxChars,
-      preferPullRequests: envPreferPullRequests ?? persisted?.preferPullRequests ?? true,
-      allowDirectPush: envAllowDirectPush ?? persisted?.allowDirectPush ?? false,
-    };
-  }
-
-  if (persisted) {
-    const parsed = persisted;
-    if (parsed.cloudMode && cloudAllowed) {
-      return {
-        accountId: envAccount ?? parsed.accountId ?? "",
-        apiToken: envToken ?? parsed.apiToken ?? "",
-        model: envModel ?? parsed.model ?? DEFAULT_MODEL,
-        cloudMode: true,
-        reasoningEffort: envEffort ?? parsed.reasoningEffort,
-        coauthor: envCoauthor?.enabled ?? parsed.coauthor ?? true,
-        coauthorName: envCoauthor?.name ?? parsed.coauthorName,
-        coauthorEmail: envCoauthor?.email ?? parsed.coauthorEmail,
-        mcpServers: parsed.mcpServers,
-        cacheStablePrompts: parsed.cacheStablePrompts ?? cacheStablePrompts,
-        compiledContext: parsed.compiledContext ?? compiledContext,
-        imageHistoryTurns: Number.isNaN(imageHistoryTurns) ? parsed.imageHistoryTurns : imageHistoryTurns,
-        memoryEnabled: envMemoryEnabled ?? parsed.memoryEnabled ?? false,
-        memoryDbPath: envMemoryDbPath ?? parsed.memoryDbPath,
-        memoryMaxAgeDays: envMemoryMaxAgeDays ?? parsed.memoryMaxAgeDays,
-        memoryMaxEntries: envMemoryMaxEntries ?? parsed.memoryMaxEntries,
-        memoryEmbeddingModel: envMemoryEmbeddingModel ?? parsed.memoryEmbeddingModel,
-        plumbingModel: envPlumbingModel ?? parsed.plumbingModel,
-        memoryExtractionModel: envMemoryExtractionModel ?? parsed.memoryExtractionModel,
-        codeMode: envCodeMode ?? parsed.codeMode,
-        costAttribution: envCostAttribution ?? parsed.costAttribution ?? false,
-        filePicker: envFilePicker ?? parsed.filePicker ?? true,
-        theme: parsed.theme,
-        shell: envShell ?? parsed.shell,
-        uiEngine: parsed.uiEngine,
-        providerKeys: envProviderKeys ?? parsed.providerKeys,
-        providerKeyAliases: parsed.providerKeyAliases,
-        secretsStoreId: parsed.secretsStoreId,
-        unifiedBilling: envUnifiedBilling ?? parsed.unifiedBilling,
-        workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT ?? parsed.workerEndpoint,
-        workerBudgetUsd: parsed.workerBudgetUsd,
-        workerBudgetMaxUsd: parsed.workerBudgetMaxUsd,
-        workerMaxParallel: parsed.workerMaxParallel,
-        workerTimeoutMs: parsed.workerTimeoutMs,
-        multiAgentEnabled: envMultiAgentEnabled ?? parsed.multiAgentEnabled,
-        workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY ?? parsed.workerApiKey,
-        autoExecute: parsed.autoExecute,
-        workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? parsed.workerShallowClone ?? true,
-        workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? parsed.workerRepoCache ?? true,
-        workerPreReadFiles: envWorkerPreReadFiles ?? parsed.workerPreReadFiles,
-        workerPreReadMaxChars: envWorkerPreReadMaxChars ?? parsed.workerPreReadMaxChars,
-      };
-    }
-    if (parsed.accountId && parsed.apiToken) {
-      warnIfBlankGatewayId(parsed.aiGatewayId, "config");
-      const resolved: KimiConfig = {
-        accountId: envAccount ?? parsed.accountId,
-        apiToken: envToken ?? parsed.apiToken,
-        // An env token overrides the stored OAuth session entirely.
-        cloudflareOAuth: envToken ? undefined : parsed.cloudflareOAuth,
-        baseUrl: envBaseUrl ?? parsed.baseUrl,
-        apiKey: envApiKey ?? parsed.apiKey,
-        model: envModel ?? parsed.model ?? DEFAULT_MODEL,
-        aiGatewayId: envAiGatewayId ?? parsed.aiGatewayId,
-        aiGatewayCacheTtl: envAiGatewayCacheTtl ?? parsed.aiGatewayCacheTtl,
-        aiGatewaySkipCache: envAiGatewaySkipCache ?? parsed.aiGatewaySkipCache,
-        aiGatewayCollectLogPayload:
-          envAiGatewayCollectLogPayload ?? parsed.aiGatewayCollectLogPayload,
-        aiGatewayMetadata: envAiGatewayMetadata ?? parsed.aiGatewayMetadata,
-        reasoningEffort: envEffort ?? parsed.reasoningEffort,
-        coauthor: envCoauthor?.enabled ?? parsed.coauthor ?? true,
-        coauthorName: envCoauthor?.name ?? parsed.coauthorName,
-        coauthorEmail: envCoauthor?.email ?? parsed.coauthorEmail,
-        mcpServers: parsed.mcpServers,
-        cacheStablePrompts: parsed.cacheStablePrompts ?? cacheStablePrompts,
-        compiledContext: parsed.compiledContext ?? compiledContext,
-        imageHistoryTurns: Number.isNaN(imageHistoryTurns) ? parsed.imageHistoryTurns : imageHistoryTurns,
-        memoryEnabled: envMemoryEnabled ?? parsed.memoryEnabled ?? false,
-        memoryDbPath: envMemoryDbPath ?? parsed.memoryDbPath,
-        memoryMaxAgeDays: envMemoryMaxAgeDays ?? parsed.memoryMaxAgeDays,
-        memoryMaxEntries: envMemoryMaxEntries ?? parsed.memoryMaxEntries,
-        memoryEmbeddingModel: envMemoryEmbeddingModel ?? parsed.memoryEmbeddingModel,
-        plumbingModel: envPlumbingModel ?? parsed.plumbingModel,
-        memoryExtractionModel: envMemoryExtractionModel ?? parsed.memoryExtractionModel,
-        codeMode: envCodeMode ?? parsed.codeMode ?? true,
-        costAttribution: envCostAttribution ?? parsed.costAttribution ?? true,
-        filePicker: envFilePicker ?? parsed.filePicker ?? true,
-        cloudMode: cloudAllowed ? (envCloudMode ?? parsed.cloudMode) : undefined,
-        theme: parsed.theme,
-        shell: envShell ?? parsed.shell,
-        uiEngine: parsed.uiEngine,
-        providerKeys: envProviderKeys ?? parsed.providerKeys,
-        providerKeyAliases: parsed.providerKeyAliases,
-        secretsStoreId: parsed.secretsStoreId,
-        unifiedBilling: envUnifiedBilling ?? parsed.unifiedBilling,
-        workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT ?? parsed.workerEndpoint,
-        workerBudgetUsd: parsed.workerBudgetUsd,
-        workerBudgetMaxUsd: parsed.workerBudgetMaxUsd,
-        workerMaxParallel: parsed.workerMaxParallel,
-        workerTimeoutMs: parsed.workerTimeoutMs,
-        multiAgentEnabled: envMultiAgentEnabled ?? parsed.multiAgentEnabled,
-        workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY ?? parsed.workerApiKey,
-        autoExecute: parsed.autoExecute,
-        workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? parsed.workerShallowClone ?? true,
-        workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? parsed.workerRepoCache ?? true,
-        workerPreReadFiles: envWorkerPreReadFiles ?? parsed.workerPreReadFiles,
-        workerPreReadMaxChars: envWorkerPreReadMaxChars ?? parsed.workerPreReadMaxChars,
-        preferPullRequests: envPreferPullRequests ?? parsed.preferPullRequests ?? true,
-        allowDirectPush: envAllowDirectPush ?? parsed.allowDirectPush ?? false,
-      };
-      // A custom endpoint means no Cloudflare API traffic at all — including
-      // the background OAuth token refresh (the Cloudflare token isn't used
-      // while the custom endpoint is active).
-      return resolved.baseUrl ? resolved : withFreshCloudflareToken(resolved);
-    }
-  }
-
-  // Custom OpenAI-compatible endpoint without Cloudflare credentials:
-  // KIMIFLARE_BASE_URL (+ optional KIMIFLARE_API_KEY) is a complete setup on
-  // its own. The host's gateway owns routing and auth, so the Cloudflare
-  // fields stay empty and nothing ever calls a Cloudflare API.
-  const customBaseUrl = envBaseUrl ?? persisted?.baseUrl;
-  if (customBaseUrl) {
-    return {
-      accountId: envAccount ?? persisted?.accountId ?? "",
-      apiToken: envToken ?? persisted?.apiToken ?? "",
-      baseUrl: customBaseUrl,
-      apiKey: envApiKey ?? persisted?.apiKey,
-      model: envModel ?? persisted?.model ?? DEFAULT_MODEL,
-      reasoningEffort: envEffort ?? persisted?.reasoningEffort,
-      coauthor: envCoauthor?.enabled ?? persisted?.coauthor ?? true,
-      coauthorName: envCoauthor?.name ?? persisted?.coauthorName,
-      coauthorEmail: envCoauthor?.email ?? persisted?.coauthorEmail,
-      mcpServers: persisted?.mcpServers,
-      cacheStablePrompts: persisted?.cacheStablePrompts ?? cacheStablePrompts,
-      compiledContext: persisted?.compiledContext ?? compiledContext,
-      imageHistoryTurns: Number.isNaN(imageHistoryTurns) ? persisted?.imageHistoryTurns : imageHistoryTurns,
-      memoryEnabled: envMemoryEnabled ?? persisted?.memoryEnabled ?? false,
-      memoryDbPath: envMemoryDbPath ?? persisted?.memoryDbPath,
-      memoryMaxAgeDays: envMemoryMaxAgeDays ?? persisted?.memoryMaxAgeDays,
-      memoryMaxEntries: envMemoryMaxEntries ?? persisted?.memoryMaxEntries,
-      memoryEmbeddingModel: envMemoryEmbeddingModel ?? persisted?.memoryEmbeddingModel,
-      plumbingModel: envPlumbingModel ?? persisted?.plumbingModel,
-      memoryExtractionModel: envMemoryExtractionModel ?? persisted?.memoryExtractionModel,
-      codeMode: envCodeMode ?? persisted?.codeMode ?? true,
-      costAttribution: envCostAttribution ?? persisted?.costAttribution ?? true,
-      filePicker: envFilePicker ?? persisted?.filePicker ?? true,
-      shell: envShell ?? persisted?.shell,
-      theme: persisted?.theme,
-      uiEngine: persisted?.uiEngine,
-      preferPullRequests: envPreferPullRequests ?? persisted?.preferPullRequests ?? true,
-      allowDirectPush: envAllowDirectPush ?? persisted?.allowDirectPush ?? false,
-    };
-  }
-  return null;
+  return stripUndefined(cfg);
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Log in with Cloudflare — background token refresh
-// ─────────────────────────────────────────────────────────────────────────────
-
-let refreshInFlight: Promise<KimiConfig | null> | null = null;
 
 /**
- * If `cfg` carries an OAuth session whose access token is expired or about
- * to expire, refresh it, persist the rotated tokens, and return the updated
- * config. Returns `null` when nothing needed to change. Never throws — on
- * failure the caller keeps the current token and the next 401 tells the
- * user to run `kimiflare auth cloudflare` again.
+ * True when the config file on disk was written by the Cloudflare-era
+ * kimiflare (it has Cloudflare credentials but no OpenRouter key). Onboarding
+ * uses this to explain the switch to upgrading users instead of greeting
+ * them like a first run.
  */
-export async function refreshCloudflareSession(cfg: KimiConfig): Promise<KimiConfig | null> {
-  const oauth = cfg.cloudflareOAuth;
-  if (!oauth?.refreshToken) return null;
-  if (!tokenNeedsRefresh(oauth.expiresAt)) return null;
-  if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = (async () => {
-    try {
-      const fresh = await refreshCloudflareToken(oauth.refreshToken!, oauth.clientId || CF_OAUTH_CLIENT_ID);
-      const nextOAuth: CloudflareOAuthConfig = {
-        ...oauth,
-        refreshToken: fresh.refreshToken ?? oauth.refreshToken,
-        expiresAt: fresh.expiresAt,
-        scopes: fresh.scopes.length > 0 ? fresh.scopes : oauth.scopes,
-      };
-      await patchPersistedConfig({ apiToken: fresh.accessToken, cloudflareOAuth: nextOAuth });
-      return { ...cfg, apiToken: fresh.accessToken, cloudflareOAuth: nextOAuth };
-    } catch (e) {
-      // Another kimiflare process may have rotated the refresh token first —
-      // re-read the file and adopt its session if it is newer than ours.
-      try {
-        const raw = await readFile(configPath(), "utf8");
-        const onDisk = JSON.parse(raw) as Partial<KimiConfig>;
-        if (
-          onDisk.cloudflareOAuth &&
-          onDisk.apiToken &&
-          onDisk.cloudflareOAuth.expiresAt > oauth.expiresAt
-        ) {
-          return { ...cfg, apiToken: onDisk.apiToken, cloudflareOAuth: onDisk.cloudflareOAuth };
-        }
-      } catch {
-        /* ignore */
-      }
-      // eslint-disable-next-line no-console
-      console.warn(
-        `kimiflare: couldn't refresh your Cloudflare login (${e instanceof Error ? e.message : String(e)}). ` +
-          "If requests start failing with 401, run `kimiflare auth cloudflare` to sign in again.",
-      );
-      return null;
-    } finally {
-      refreshInFlight = null;
-    }
-  })();
-  return refreshInFlight;
+export async function hasLegacyCloudflareConfig(): Promise<boolean> {
+  try {
+    const raw = JSON.parse(await readFile(configPath(), "utf8")) as Partial<KimiConfig> & LegacyConfigFields;
+    return !raw.openrouterApiKey && !!(raw.cloudflareOAuth || raw.apiToken || raw.aiGatewayId || raw.cloudMode);
+  } catch {
+    return false;
+  }
 }
 
-async function withFreshCloudflareToken(cfg: KimiConfig): Promise<KimiConfig> {
-  if (!cfg.cloudflareOAuth?.refreshToken) return cfg;
-  return (await refreshCloudflareSession(cfg)) ?? cfg;
+/** Fields written by kimiflare ≤0.99 (Cloudflare era) that are no longer read. */
+interface LegacyConfigFields {
+  cloudflareOAuth?: unknown;
+  aiGatewayId?: string;
+  aiGatewayCacheTtl?: number;
+  aiGatewaySkipCache?: boolean;
+  aiGatewayCollectLogPayload?: boolean;
+  aiGatewayMetadata?: unknown;
+  providerKeys?: Record<string, string | undefined>;
+  providerKeyAliases?: unknown;
+  secretsStoreId?: string;
+  unifiedBilling?: boolean;
+  cloudMode?: boolean;
+}
+
+const LEGACY_KEYS: readonly (keyof LegacyConfigFields)[] = [
+  "cloudflareOAuth",
+  "aiGatewayId",
+  "aiGatewayCacheTtl",
+  "aiGatewaySkipCache",
+  "aiGatewayCollectLogPayload",
+  "aiGatewayMetadata",
+  "providerKeys",
+  "providerKeyAliases",
+  "secretsStoreId",
+  "unifiedBilling",
+  "cloudMode",
+];
+
+const MODEL_ID_KEYS = [
+  "model",
+  "plumbingModel",
+  "memoryExtractionModel",
+  "memoryEmbeddingModel",
+  "decompositionModel",
+  "synthesisModel",
+] as const;
+
+function hasLegacyFields(persisted: Partial<KimiConfig> & LegacyConfigFields): boolean {
+  if (LEGACY_KEYS.some((k) => persisted[k] !== undefined)) return true;
+  return MODEL_ID_KEYS.some((k) => {
+    const v = persisted[k];
+    return typeof v === "string" && migrateLegacyModelId(v) !== v;
+  });
+}
+
+async function rewriteLegacyConfig(
+  persisted: Partial<KimiConfig> & LegacyConfigFields,
+  openrouterApiKey: string | undefined,
+): Promise<void> {
+  const next: Record<string, unknown> = { ...persisted };
+  for (const k of LEGACY_KEYS) delete next[k];
+  for (const k of MODEL_ID_KEYS) {
+    const v = persisted[k];
+    if (typeof v === "string") next[k] = migrateLegacyModelId(v);
+  }
+  // Keep a key that only lived under providerKeys.openrouter — but never copy
+  // an env-provided key into the file.
+  const fileKey = persisted.openrouterApiKey ?? persisted.providerKeys?.openrouter;
+  if (fileKey && fileKey === openrouterApiKey) next.openrouterApiKey = fileKey;
+  const p = configPath();
+  await writeFile(p, JSON.stringify(next, null, 2), "utf8");
+  await chmod(p, 0o600);
+}
+
+function stripUndefined<T extends object>(obj: T): T {
+  for (const k of Object.keys(obj) as (keyof T)[]) {
+    if (obj[k] === undefined) delete obj[k];
+  }
+  return obj;
 }
 
 /**

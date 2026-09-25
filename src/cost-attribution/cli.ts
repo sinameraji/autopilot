@@ -9,7 +9,7 @@ import type { KimiConfig } from "../config.js";
 import type { SessionUsage, UsageLog } from "../usage-tracker.js";
 import { buildReport } from "./report.js";
 import { renderTerminal, renderJson } from "./renderer.js";
-import { reconcileWithCloudflare } from "./reconcile.js";
+import { reconcileWithOpenRouter } from "./reconcile.js";
 import { classifyFromSessionFile } from "./classify-from-session.js";
 import type { TaskCategory } from "./types.js";
 
@@ -114,13 +114,10 @@ export async function runCostCommand(opts: CostCommandOptions): Promise<void> {
   const localCost = sessions.reduce((sum, s) => sum + s.cost, 0);
   const reconciliation = opts.localOnly
     ? { status: "local-only" as const, localCost }
-    : await reconcileWithCloudflare({
+    : await reconcileWithOpenRouter({
         localCost,
-        accountId: opts.config.accountId,
-        apiToken: opts.config.apiToken,
-        gatewayId: opts.config.aiGatewayId,
-        startDate,
-        endDate,
+        sessions,
+        apiKey: opts.config.openrouterApiKey,
       });
 
   const report = buildReport({

@@ -5,7 +5,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { URL } from "node:url";
 import type { KimiConfig } from "../config.js";
-import { DEFAULT_MODEL, DEFAULT_CLOUD_MODEL } from "../config.js";
+import { DEFAULT_MODEL } from "../config.js";
+import { llmAuthFromConfig } from "../agent/llm-auth.js";
 import { runAgentTurn } from "../agent/loop.js";
 import type { AgentCallbacks } from "../agent/loop.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
@@ -200,7 +201,7 @@ export function setupRoutes(config: KimiConfig) {
       if (pathname === "/prompt" && method === "POST") {
         const body = (await readBody(req)) as Record<string, unknown>;
         const prompt = typeof body.prompt === "string" ? body.prompt : "";
-        const model = typeof body.model === "string" ? body.model : (config.model ?? (config.cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL));
+        const model = typeof body.model === "string" ? body.model : (config.model ?? DEFAULT_MODEL);
         const cwd = typeof body.cwd === "string" ? body.cwd : process.cwd();
         const title = typeof body.title === "string" ? body.title : undefined;
         const files = Array.isArray(body.files) ? body.files.filter((f): f is string => typeof f === "string") : [];
@@ -374,9 +375,10 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
 
   try {
     await runAgentTurn({
-      accountId: config.accountId,
-      apiToken: config.apiToken,
+      ...llmAuthFromConfig(config),
       model: sessionFile.model,
+      reasoningEffort: config.reasoningEffort,
+      sessionId: sessionFile.id,
       messages,
       tools: ALL_TOOLS,
       executor,

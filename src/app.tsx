@@ -3,7 +3,8 @@ import { Box, Text, useApp, useInput, useWindowSize, render } from "ink";
 import Spinner from "ink-spinner";
 
 import { runAgentTurn, AgentLoopError } from "./agent/loop.js";
-import type { GatewayMeta } from "./agent/client.js";
+import type { ResponseMeta } from "./agent/client.js";
+import { llmAuthFromConfig } from "./agent/llm-auth.js";
 import { buildSystemPrompt, buildSessionPrefix } from "./agent/system-prompt.js";
 import { summarizeMessagesViaLlm } from "./agent/llm-summarize.js";
 import {
@@ -27,7 +28,7 @@ import { LspManager } from "./lsp/manager.js";
 import { HooksManager } from "./hooks/manager.js";
 import { sanitizeString } from "./agent/messages.js";
 import type { ChatMessage, ContentPart, Usage } from "./agent/messages.js";
-import { KimiApiError, isCloudQuotaExhaustedError, isKillSwitchError, humanizeCloudflareError } from "./util/errors.js";
+import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { AbortScope } from "./util/abort-scope.js";
 import { logger } from "./util/logger.js";
 import { ChatView, type ChatEvent } from "./ui/chat.js";
@@ -50,15 +51,7 @@ import { checkForUpdate } from "./util/update-check.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { Onboarding } from "./ui/onboarding.js";
 import { Welcome } from "./ui/welcome.js";
-import {
-  configPath,
-  DEFAULT_MODEL,
-  DEFAULT_REASONING_EFFORT,
-  loadConfig,
-  saveConfig,
-  refreshCloudflareSession,
-  type ReasoningEffort,
-} from "./config.js";
+import { configPath, DEFAULT_MODEL, DEFAULT_REASONING_EFFORT, loadConfig, saveConfig, type KimiConfig, type ReasoningEffort, DEFAULT_PLUMBING_MODEL } from "./config.js";
 import { startRemoteSession, streamRemoteProgress } from "./remote/worker-client.js";
 import { saveRemoteSession, type RemoteSession } from "./remote/session-store.js";
 import { deployForTui } from "./remote/deploy.js";
@@ -76,8 +69,8 @@ import {
 } from "./sessions.js";
 import { unlink } from "node:fs/promises";
 import { encodeImageFile, type EncodedImage } from "./util/image.js";
-import { recordUsage, getCostReport, formatCostReport, formatGatewaySection, formatFeatureBreakdown, getSessionGatewayLogs, usageEvents } from "./usage-tracker.js";
-import type { GatewayUsageLookup, DailyUsage } from "./usage-tracker.js";
+import { recordUsage, getCostReport, usageEvents } from "./usage-tracker.js";
+import type { DailyUsage } from "./usage-tracker.js";
 import { MemoryManager } from "./memory/manager.js";
 import { injectRecalledMemoryOnce } from "./memory/recall-inject.js";
 import { loadCustomCommands } from "./commands/loader.js";
@@ -91,9 +84,6 @@ import { resolveTheme, themeList, themeNames, DEFAULT_THEME_NAME } from "./ui/th
 import { loadAndMergeThemes } from "./ui/theme-loader.js";
 import type { Theme } from "./ui/theme.js";
 import { getModelOrInfer, type ModelEntry } from "./models/registry.js";
-import { decideNextStep } from "./models/next-step.js";
-import type { KeyResult } from "./ui/key-entry-modal.js";
-import type { BillingChoice } from "./ui/billing-chooser.js";
 import type { ResolvedLspConfig } from "./util/lsp-config.js";
 import { maybeLspNudge } from "./util/lsp-nudge.js";
 import { glob } from "./util/glob.js";
@@ -137,8 +127,7 @@ import {
   detectGitBranch,
   detectGitHubRepo,
   findImagePaths,
-  gatewayFromConfig,
-  gatewayUsageLookupFromConfig,
+  costLookupFromConfig,
   makePrefixMessages,
   MAX_IMAGES_PER_MESSAGE,
   mkAssistantId,
@@ -148,93 +137,18 @@ import {
   trackRecentFile,
 } from "./ui/app-helpers.js";
 
-export interface Cfg {
-  accountId: string;
-  apiToken: string;
-  model: string;
-  /** Set when apiToken is a "Log in with Cloudflare" OAuth access token (see config.ts). */
-  cloudflareOAuth?: import("./config.js").CloudflareOAuthConfig;
-  aiGatewayId?: string;
-  aiGatewayCacheTtl?: number;
-  aiGatewaySkipCache?: boolean;
-  aiGatewayCollectLogPayload?: boolean;
-  aiGatewayMetadata?: Record<string, string | number | boolean>;
-  reasoningEffort?: ReasoningEffort;
-  coauthor?: boolean;
-  coauthorName?: string;
-  coauthorEmail?: string;
-  mcpServers?: Record<string, { type: "local" | "remote"; command?: string[]; url?: string; env?: Record<string, string>; headers?: Record<string, string>; enabled?: boolean; timeoutMs?: number }>;
-  cacheStablePrompts?: boolean;
-  compiledContext?: boolean;
-  imageHistoryTurns?: number;
-  memoryEnabled?: boolean;
-  memoryDbPath?: string;
-  memoryMaxAgeDays?: number;
-  memoryMaxEntries?: number;
-  memoryEmbeddingModel?: string;
-  plumbingModel?: string;
-  memoryExtractionModel?: string;
-  codeMode?: boolean;
-  lspEnabled?: boolean;
-  lspServers?: Record<string, { command: string[]; env?: Record<string, string>; enabled?: boolean; rootPatterns?: string[] }>;
-  costAttribution?: boolean;
-  filePicker?: boolean;
-  theme?: string;
-  remoteWorkerUrl?: string;
-  remoteAuthSecret?: string;
-  remoteTtlMinutes?: number;
-  remoteMaxInputTokens?: number;
-  githubOAuthToken?: string;
-  githubRefreshToken?: string;
-  githubTokenExpiry?: number;
-  githubRepo?: string;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  shell?: string;
-  /** Preferred interactive UI engine. Persisted via the `/ui` slash command. */
-  uiEngine?: "ink" | "camouflage";
-  providerKeys?: {
-    anthropic?: string;
-    openai?: string;
-    google?: string;
-    moonshotai?: string;
-    "openai-compatible"?: string;
-  };
-  providerKeyAliases?: {
-    anthropic?: string;
-    openai?: string;
-    google?: string;
-    moonshotai?: string;
-    "openai-compatible"?: string;
-  };
-  secretsStoreId?: string;
-  unifiedBilling?: boolean;
-  multiAgentEnabled?: boolean;
-  workerEndpoint?: string;
-  workerApiKey?: string;
-  workerName?: string;
-  autoExecute?: boolean;
-  autoFreshSuggestionTurns?: number;
-  autoFreshEnabled?: boolean;
-  autoCompactTokenThreshold?: number;
-  autoFreshTokenThreshold?: number;
-  preferPullRequests?: boolean;
-  allowDirectPush?: boolean;
-}
+/** The TUI's config is exactly the loaded config. */
+export type Cfg = KimiConfig;
 function App({
   initialCfg,
   initialUpdateResult,
   initialLspScope,
   initialLspProjectPath,
-  initialCloudToken,
-  initialCloudDeviceId,
 }: {
   initialCfg: Cfg | null;
   initialUpdateResult?: UpdateCheckResult;
   initialLspScope: "project" | "global";
   initialLspProjectPath: string | null;
-  initialCloudToken?: string;
-  initialCloudDeviceId?: string;
 }) {
   const { exit } = useApp();
   const { columns } = useWindowSize();
@@ -260,7 +174,7 @@ function App({
   const [sessionUsage, setSessionUsage] = useState<DailyUsage | null>(null);
 
   // Refresh sessionUsage when usage-tracker emits an out-of-band update
-  // (e.g. after a Gateway-log reconcile lands and patches a turn's real cost).
+  // (e.g. after OpenRouter confirms a turn's cost and patches a turn's real cost).
   useEffect(() => {
     const handler = (sid: string) => {
       if (sessionIdRef.current && sid === sessionIdRef.current) {
@@ -272,10 +186,7 @@ function App({
       usageEvents.off("update", handler);
     };
   }, []);
-  const [gatewayMeta, setGatewayMeta] = useState<GatewayMeta | null>(null);
-  const [cloudToken, setCloudToken] = useState(initialCloudToken);
-  const [cloudDeviceId, setCloudDeviceId] = useState(initialCloudDeviceId);
-  const [cloudBudget, setCloudBudget] = useState<{ remaining: number; limit: number } | null>(null);
+  const [responseMeta, setResponseMeta] = useState<ResponseMeta | null>(null);
   const turn = useTurnController();
   const {
     busy, busyRef,
@@ -327,15 +238,11 @@ function App({
     showUiPicker, setShowUiPicker,
     setShowModelPicker,
     showModePicker, setShowModePicker,
-    keyEntryFor: _keyEntryFor, setKeyEntryFor,
-    setBillingChooserFor,
-    setUnifiedProbeFor,
     showRemoteDashboard, setShowRemoteDashboard,
     showInboxModal, setShowInboxModal,
     showMultiAgentModal, setShowMultiAgentModal,
     showHelpMenu, setShowHelpMenu,
     showMemoryPicker, setShowMemoryPicker,
-    showGatewayPicker, setShowGatewayPicker,
     showSkillsPicker, setShowSkillsPicker,
     showShellPicker, setShowShellPicker,
     showPlanCompletePicker, setShowPlanCompletePicker,
@@ -443,66 +350,6 @@ function App({
     return () => { cancelled = true; };
   }, []);
 
-  // "Log in with Cloudflare" sessions carry a short-lived access token. Keep
-  // it fresh for the lifetime of the TUI: schedule a refresh a few minutes
-  // before expiry (refreshCloudflareSession() is a no-op until then), swap the
-  // new token into cfg, and re-arm for the next expiry. Turns already in
-  // flight keep the token they started with.
-  useEffect(() => {
-    const oauth = cfg?.cloudflareOAuth;
-    if (!cfg || !oauth?.refreshToken) return;
-    let cancelled = false;
-    const REFRESH_LEAD_MS = 5 * 60 * 1000;
-    const delay = Math.max(1_000, oauth.expiresAt - Date.now() - REFRESH_LEAD_MS + 500);
-    const timer = setTimeout(() => {
-      void refreshCloudflareSession(cfg).then((next) => {
-        if (cancelled || !next) return;
-        setCfg((prev) =>
-          prev ? { ...prev, apiToken: next.apiToken, cloudflareOAuth: next.cloudflareOAuth } : prev,
-        );
-      });
-    }, delay);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [cfg?.cloudflareOAuth?.expiresAt, cfg?.cloudflareOAuth?.refreshToken]);
-
-  // Fetch cloud token budget on startup
-  useEffect(() => {
-    if (!cfg?.cloudMode || !initialCloudToken) return;
-    let cancelled = false;
-    const fetchBudget = async () => {
-      const did = cloudDeviceId ?? initialCloudDeviceId;
-      // If the user is a paying subscriber, provision/refresh their Pro grant
-      // server-side first so the budget below reflects the lifted cap (works
-      // even if the Stripe webhook never reached the worker).
-      try {
-        const { fetchBillingStatus } = await import("./cloud/billing.js");
-        await fetchBillingStatus(initialCloudToken, did);
-      } catch { /* non-fatal — free-tier users have no subscription */ }
-      try {
-        const { fetchCloudUsage } = await import("./cloud/auth.js");
-        const usage = await fetchCloudUsage(initialCloudToken, did);
-        if (usage && !cancelled) {
-          setCloudBudget({ remaining: usage.remaining, limit: usage.input_token_limit });
-        }
-      } catch (err) {
-        if (isKillSwitchError(err) && !cancelled) {
-          setCloudToken(undefined);
-          setCloudDeviceId(undefined);
-          setEvents((es) => [
-            ...es,
-            { kind: "service_ended", key: mkKey(), endedAt: err.endedAt },
-          ]);
-        }
-        // Other errors are non-fatal
-      }
-    };
-    fetchBudget();
-    return () => { cancelled = true; };
-  }, [cfg?.cloudMode, initialCloudToken]);
-
   // Cursor offset for the input box. The picker controller owns its own
   // open/close/selection state — see `usePickerController` below.
   const [cursorOffset, setCursorOffset] = useState(0);
@@ -524,7 +371,7 @@ function App({
   const modeRef = useRef<Mode>(mode);
   const effortRef = useRef<ReasoningEffort>(effort);
   const usageRef = useRef<Usage | null>(null);
-  const gatewayMetaRef = useRef<GatewayMeta | null>(null);
+  const responseMetaRef = useRef<ResponseMeta | null>(null);
   const lastApiErrorRef = useRef<{ httpStatus?: number; code?: number; message: string } | null>(null);
   const updateCheckedRef = useRef(false);
   const sessionStateRef = useRef<SessionState>(emptySessionState());
@@ -572,13 +419,13 @@ function App({
     sessionStateRef,
     artifactStoreRef,
     compiledContextRef,
-    gatewayMetaRef,
+    responseMetaRef,
     memoryManagerRef,
     setEvents,
     setHistory,
     setUsage,
     setSessionUsage,
-    setGatewayMeta,
+    setResponseMeta,
     mkKey,
   });
   const {
@@ -616,22 +463,8 @@ function App({
         description: c.description ?? "",
         source: c.source,
       }));
-    // /upgrade only makes sense on KimiFlare Cloud — surface it in the picker
-    // only when the user is in cloud mode (the handler stays available either way).
-    const cloudCommands: SlashItem[] = cfg?.cloudMode
-      ? [
-          { name: "upgrade", description: "Upgrade to KimiFlare Pro", source: "builtin" },
-          { name: "topup", description: "Buy a one-time token top-up (+50M)", source: "builtin" },
-          { name: "manage", description: "Manage membership, billing & invoices", source: "builtin" },
-        ]
-      : [];
-    // In cloud mode the model is managed by KimiFlare Cloud — hide /model so the
-    // user has no visibility into or control over which model is used.
-    const builtins = cfg?.cloudMode
-      ? BUILTIN_COMMANDS.filter((c) => c.name !== "model")
-      : BUILTIN_COMMANDS;
-    return [...builtins, ...cloudCommands, ...customs];
-  }, [customCommandsVersion, cfg?.cloudMode]);
+    return [...BUILTIN_COMMANDS, ...customs];
+  }, [customCommandsVersion]);
 
   // Preserves the pre-refactor asymmetry: the picker close-on-modal check
   // includes showInboxModal but EXCLUDES showRemoteDashboard and
@@ -654,7 +487,6 @@ function App({
     showHelpMenu ||
     showModePicker ||
     showMemoryPicker ||
-    showGatewayPicker ||
     showSkillsPicker ||
     showShellPicker;
 
@@ -706,8 +538,6 @@ function App({
       setKimiMdStale,
       customCommandsRef,
       setCustomCommandsVersion,
-      cloudToken: cloudToken ?? initialCloudToken,
-      cloudDeviceId: cloudDeviceId ?? initialCloudDeviceId,
     });
   }, [cfg, setEvents]);
 
@@ -984,12 +814,10 @@ function App({
       if (cfg && !signal.aborted) {
         try {
           const result = await summarizeMessagesViaLlm({
-            accountId: cfg.accountId,
-            apiToken: cfg.apiToken,
+            ...llmAuthFromConfig(cfg),
             model: cfg.model,
             messages,
             signal,
-            gateway: gatewayFromConfig(cfg),
           });
           if (result.replacedCount > 0) {
             setEvents((e) => [
@@ -1182,9 +1010,9 @@ function App({
     [],
   );
 
-  const updateGatewayMeta = useCallback((meta: GatewayMeta) => {
-    gatewayMetaRef.current = meta;
-    setGatewayMeta(meta);
+  const updateResponseMeta = useCallback((meta: ResponseMeta) => {
+    responseMetaRef.current = meta;
+    setResponseMeta(meta);
   }, []);
 
   // Keep the interruptDepsRef in sync with the latest refs / state. Read
@@ -1231,19 +1059,12 @@ function App({
       busy,
       mkKey,
       setEvents,
-      cloudToken: cloudToken ?? initialCloudToken,
-      initialCloudToken,
-      cloudDeviceId: cloudDeviceId ?? initialCloudDeviceId,
-      initialCloudDeviceId,
       setCodeMode,
       setTurnPhase,
       setCurrentToolName,
       setLastActivityAt,
       setUsage,
       setSessionUsage,
-      setCloudBudget,
-      setCloudToken,
-      setCloudDeviceId,
       setKimiMdStale,
       setLoopModal,
       beginTurn,
@@ -1252,7 +1073,7 @@ function App({
       onIterationEnd,
       updateAssistant,
       updateTool,
-      updateGatewayMeta,
+      updateResponseMeta,
       askForPermission,
       clearPermissionResolveRef,
       messagesRef,
@@ -1267,7 +1088,7 @@ function App({
       recentFilesRef,
       usageRef,
       activeAsstIdRef,
-      gatewayMetaRef,
+      responseMetaRef,
       kimiMdStaleNudgedRef,
       lspManagerRef,
       modeRef,
@@ -1277,7 +1098,7 @@ function App({
       loopResolveRef,
       supervisorRef,
     });
-  }, [cfg, busy, updateAssistant, updateTool, updateGatewayMeta]);
+  }, [cfg, busy, updateAssistant, updateTool, updateResponseMeta]);
 
   const handleThemePick = useCallback(
     (picked: Theme | null) => {
@@ -1338,290 +1159,9 @@ function App({
           text: `model: ${picked.id} · ${picked.contextWindow.toLocaleString()} ctx`,
         },
       ]);
-      // Route the rest of onboarding through the shared decision table.
-      const next = decideNextStep(cfg, picked);
-      if (next.kind === "ready") return;
-      if (next.kind === "needs-gateway") {
-        setEvents((e) => [
-          ...e,
-          {
-            kind: "info",
-            key: mkKey(),
-            text: `${picked.id} routes through Cloudflare AI Gateway, but no gateway is configured — run /gateway <id>`,
-          },
-        ]);
-        return;
-      }
-      if (next.kind === "billing-choice") {
-        setBillingChooserFor(picked);
-        return;
-      }
-      // needs-key
-      setKeyEntryFor(picked);
     },
-    [cfg, mkKey, setShowModelPicker, setBillingChooserFor, setKeyEntryFor],
+    [mkKey, setShowModelPicker],
   );
-
-  const handlePickBilling = useCallback(
-    (model: ModelEntry, choice: BillingChoice | null) => {
-      setBillingChooserFor(null);
-      if (!choice) {
-        setEvents((e) => [
-          ...e,
-          { kind: "info", key: mkKey(), text: "billing setup cancelled — pick again with /model" },
-        ]);
-        return;
-      }
-      if (choice === "byok") {
-        setKeyEntryFor(model);
-        return;
-      }
-      // choice === "unified" → kick off the probe
-      setUnifiedProbeFor(model);
-    },
-    [mkKey, setBillingChooserFor, setKeyEntryFor, setUnifiedProbeFor],
-  );
-
-  const handleUnifiedProbeResolve = useCallback(
-    (model: ModelEntry, r: "enabled" | "fallback-byok" | "cancelled") => {
-      setUnifiedProbeFor(null);
-      if (r === "enabled") {
-        setCfg((prev) => {
-          if (!prev) return prev;
-          const updated = { ...prev, unifiedBilling: true };
-          void saveConfig(updated).catch(() => {});
-          return updated;
-        });
-        setEvents((e) => [
-          ...e,
-          {
-            kind: "info",
-            key: mkKey(),
-            text: `✓ ${model.id} ready — billed via your Cloudflare credits.`,
-          },
-        ]);
-        return;
-      }
-      if (r === "fallback-byok") {
-        setKeyEntryFor(model);
-        return;
-      }
-      // cancelled
-      setEvents((e) => [
-        ...e,
-        { kind: "info", key: mkKey(), text: "unified billing setup cancelled" },
-      ]);
-    },
-    [mkKey, setUnifiedProbeFor, setKeyEntryFor],
-  );
-
-  const handleUpgrade = useCallback(async () => {
-    const token = cloudToken ?? initialCloudToken;
-    const did = cloudDeviceId ?? initialCloudDeviceId;
-    if (!token) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: "Cloud authentication required. Run `kimiflare auth cloud` first." },
-      ]);
-      return;
-    }
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Opening Stripe checkout…" }]);
-    try {
-      const { createCheckoutSession } = await import("./cloud/billing.js");
-      const session = await createCheckoutSession(token, did);
-      if (session?.url) {
-        const { openBrowser } = await import("./ui/app-helpers.js");
-        openBrowser(session.url);
-        setEvents((e) => [
-          ...e,
-          { kind: "info", key: mkKey(), text: "Complete payment in your browser. Your session will activate automatically." },
-        ]);
-        // Poll billing status until the subscription activates, then refresh the
-        // budget in place so the user is recognized as Pro without restarting.
-        void (async () => {
-          const { fetchBillingStatus } = await import("./cloud/billing.js");
-          const { fetchCloudUsage } = await import("./cloud/auth.js");
-          for (let i = 0; i < 40; i++) {
-            await new Promise((r) => setTimeout(r, 5000));
-            let status;
-            try {
-              status = await fetchBillingStatus(token, did);
-            } catch {
-              continue;
-            }
-            if (status && (status.status === "active" || status.status === "past_due")) {
-              try {
-                const usage = await fetchCloudUsage(token, did);
-                if (usage) setCloudBudget({ remaining: usage.remaining, limit: usage.input_token_limit });
-              } catch { /* ignore */ }
-              setEvents((e) => [
-                ...e,
-                { kind: "info", key: mkKey(), text: "✓ KimiFlare Pro is active — your token limit has been upgraded. Thank you!" },
-              ]);
-              return;
-            }
-          }
-        })();
-      } else {
-        setEvents((e) => [...e, { kind: "error", key: mkKey(), text: "Checkout unavailable. Please try again later." }]);
-      }
-    } catch (err) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: `Upgrade failed: ${err instanceof Error ? err.message : String(err)}` },
-      ]);
-    }
-  }, [cloudToken, cloudDeviceId, initialCloudToken, initialCloudDeviceId, mkKey, setEvents, setCloudBudget]);
-
-  const handleTopup = useCallback(async () => {
-    const token = cloudToken ?? initialCloudToken;
-    const did = cloudDeviceId ?? initialCloudDeviceId;
-    if (!token) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: "Cloud authentication required to buy a top-up." },
-      ]);
-      return;
-    }
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Opening top-up checkout…" }]);
-    try {
-      const { createTopupSession } = await import("./cloud/billing.js");
-      const session = await createTopupSession(token, did);
-      if (session?.url) {
-        const { openBrowser } = await import("./ui/app-helpers.js");
-        openBrowser(session.url);
-        setEvents((e) => [
-          ...e,
-          { kind: "info", key: mkKey(), text: "Complete the one-time payment in your browser — your tokens are added automatically." },
-        ]);
-        // Poll usage until the top-up lands (the limit jumps), then refresh in place.
-        const { fetchCloudUsage } = await import("./cloud/auth.js");
-        const baseline = cloudBudget?.limit ?? 0;
-        for (let i = 0; i < 40; i++) {
-          await new Promise((r) => setTimeout(r, 5000));
-          let usage;
-          try {
-            usage = await fetchCloudUsage(token, did);
-          } catch {
-            continue;
-          }
-          if (usage && usage.input_token_limit > baseline) {
-            setCloudBudget({ remaining: usage.remaining, limit: usage.input_token_limit });
-            setEvents((e) => [
-              ...e,
-              { kind: "info", key: mkKey(), text: "✓ Top-up applied — your token balance has been increased. Thank you!" },
-            ]);
-            return;
-          }
-        }
-      } else {
-        setEvents((e) => [...e, { kind: "error", key: mkKey(), text: "Top-up unavailable. Please try again later." }]);
-      }
-    } catch (err) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: `Top-up failed: ${err instanceof Error ? err.message : String(err)}` },
-      ]);
-    }
-  }, [cloudToken, cloudDeviceId, initialCloudToken, initialCloudDeviceId, cloudBudget, mkKey, setEvents, setCloudBudget]);
-
-  const handleManageMembership = useCallback(async () => {
-    const token = cloudToken ?? initialCloudToken;
-    const did = cloudDeviceId ?? initialCloudDeviceId;
-    if (!token) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: "Cloud authentication required to manage your membership." },
-      ]);
-      return;
-    }
-    if (cloudBudget) {
-      const used = cloudBudget.limit - cloudBudget.remaining;
-      const fmt = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
-      setEvents((e) => [
-        ...e,
-        { kind: "info", key: mkKey(), text: `Tokens this period: ${fmt(used)} used · ${fmt(cloudBudget.remaining)} left of ${fmt(cloudBudget.limit)}.` },
-      ]);
-    }
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Opening your billing portal…" }]);
-    try {
-      const { createCustomerPortalSession } = await import("./cloud/billing.js");
-      const session = await createCustomerPortalSession(token, did);
-      if (session?.url) {
-        const { openBrowser } = await import("./ui/app-helpers.js");
-        openBrowser(session.url);
-        setEvents((e) => [
-          ...e,
-          { kind: "info", key: mkKey(), text: "Manage your card, invoices, or cancel anytime in the browser tab that just opened." },
-        ]);
-      } else {
-        setEvents((e) => [
-          ...e,
-          { kind: "error", key: mkKey(), text: "Billing portal unavailable. You may not have an active subscription — run /upgrade to start one." },
-        ]);
-      }
-    } catch (err) {
-      setEvents((e) => [
-        ...e,
-        { kind: "error", key: mkKey(), text: `Couldn't open billing portal: ${err instanceof Error ? err.message : String(err)}` },
-      ]);
-    }
-  }, [cloudToken, cloudDeviceId, initialCloudToken, initialCloudDeviceId, cloudBudget, mkKey, setEvents]);
-
-  const handleSaveProviderKey = useCallback(
-    (model: ModelEntry, result: KeyResult) => {
-      setKeyEntryFor(null);
-      const provider = model.provider as "anthropic" | "openai" | "google" | "moonshotai" | "openai-compatible";
-      setCfg((prev) => {
-        if (!prev) return prev;
-        const updated = { ...prev };
-        if (result.kind === "alias") {
-          updated.providerKeyAliases = {
-            ...(prev.providerKeyAliases ?? {}),
-            [provider]: result.alias,
-          };
-          updated.secretsStoreId = result.secretsStoreId;
-          // If we previously stored a local key for this provider, drop it — the
-          // alias supersedes it and we don't want the secret hanging around.
-          if (prev.providerKeys?.[provider]) {
-            const { [provider]: _drop, ...rest } = prev.providerKeys;
-            updated.providerKeys = rest;
-          }
-        } else {
-          updated.providerKeys = {
-            ...(prev.providerKeys ?? {}),
-            [provider]: result.key,
-          };
-        }
-        void saveConfig(updated).catch(() => {});
-        return updated;
-      });
-      setEvents((e) => [
-        ...e,
-        {
-          kind: "info",
-          key: mkKey(),
-          text:
-            result.kind === "alias"
-              ? `✓ ${provider} key stored in Cloudflare Secrets Store — ${model.id} is ready to use.`
-              : `⚠ ${provider} key saved locally at ~/.config/kimiflare/config.json. Do not commit this file.`,
-        },
-      ]);
-    },
-    [mkKey, setKeyEntryFor],
-  );
-
-  const handleCancelKeyEntry = useCallback(() => {
-    setKeyEntryFor(null);
-    setEvents((e) => [
-      ...e,
-      {
-        kind: "info",
-        key: mkKey(),
-        text: "key entry cancelled — run /model to pick again, or set up your key later.",
-      },
-    ]);
-  }, [mkKey, setKeyEntryFor]);
 
   const buildSlashContext = useCallback((): SlashContext => ({
     exit,
@@ -1635,15 +1175,12 @@ function App({
     setShowReasoning: turn.setShowReasoning,
     setUsage,
     setSessionUsage,
-    setGatewayMeta,
+    setResponseMeta,
     setHasUpdate,
     setLatestVersion,
     setShowThemePicker,
     setShowModelPicker,
     setShowModePicker,
-    setKeyEntryFor,
-    setBillingChooserFor,
-    setUnifiedProbeFor,
     setShowInboxModal,
     setShowMultiAgentModal,
     setShowHooksDashboard: modals.setShowHooksDashboard,
@@ -1654,7 +1191,6 @@ function App({
     setCommandWizard,
     setCommandPicker,
     setShowMemoryPicker,
-    setShowGatewayPicker,
     setShowSkillsPicker,
     setShowShellPicker,
     setShowChangelogImagePicker,
@@ -1671,9 +1207,6 @@ function App({
     initMcp,
     initLsp,
     ensureSessionId,
-    upgrade: handleUpgrade,
-    topup: handleTopup,
-    manageMembership: handleManageMembership,
     lspManagerRef,
     mcpManagerRef,
     hooksManagerRef,
@@ -1685,7 +1218,7 @@ function App({
     pendingToolCallsRef,
     usageRef,
     turnCounterRef,
-    gatewayMetaRef,
+    responseMetaRef,
     executorRef,
     mcpToolsRef,
     mcpInitRef,
@@ -1704,10 +1237,10 @@ function App({
     sessionPlanRef,
   }), [
     exit, busy, cfg, mode, lspScope, lspProjectPath,
-    setCfg, setMode, setEvents, setUsage, setSessionUsage, setGatewayMeta,
-    setHasUpdate, setLatestVersion, setShowThemePicker, setShowModelPicker, setShowModePicker, setKeyEntryFor,
-    setBillingChooserFor, setUnifiedProbeFor, setShowInboxModal, setShowHelpMenu,
-    setShowMemoryPicker, setShowGatewayPicker, setShowSkillsPicker, setShowShellPicker,
+    setCfg, setMode, setEvents, setUsage, setSessionUsage, setResponseMeta,
+    setHasUpdate, setLatestVersion, setShowThemePicker, setShowModelPicker, setShowModePicker,
+    setShowInboxModal, setShowHelpMenu,
+    setShowMemoryPicker, setShowSkillsPicker, setShowShellPicker,
     setShowChangelogImagePicker, setChangelogImageRepo,
     setShowLspWizard, setShowRemoteDashboard, setShowCommandList,
     setCommandWizard, setCommandPicker,
@@ -2026,10 +1559,8 @@ function App({
               const summary = await generateContinuationSummary({
                 messages: messagesRef.current,
                 mode: modeRef.current,
-                accountId: cfg.accountId,
-                apiToken: cfg.apiToken,
-                model: cfg.plumbingModel ?? "@cf/moonshotai/kimi-k2.5",
-                gateway: gatewayFromConfig(cfg),
+                ...llmAuthFromConfig(cfg),
+                model: cfg.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
                 memoryManager: memoryManagerRef.current,
                 memoryEnabled: cfg.memoryEnabled,
               });
@@ -2059,8 +1590,8 @@ function App({
         }
       }
 
-      gatewayMetaRef.current = null;
-      setGatewayMeta(null);
+      responseMetaRef.current = null;
+      setResponseMeta(null);
 
       // Classification already computed above for the UserPromptSubmit
       // hook payload (M6.1). Reuse it here to avoid re-running.
@@ -2284,36 +1815,12 @@ function App({
           usageRef.current = u;
           setUsage(u);
         },
-        onUsageFinal: (u: Usage, meta?: GatewayMeta) => {
+        onUsageFinal: (u: Usage, meta?: ResponseMeta) => {
           const sid = ensureSessionId();
-          void recordUsage(sid, u, gatewayUsageLookupFromConfig(cfg, meta ?? gatewayMetaRef.current), cfg?.model);
+          void recordUsage(sid, u, costLookupFromConfig(cfg, meta ?? responseMetaRef.current), cfg?.model);
           void getCostReport(sid).then((report) => setSessionUsage(report.session));
-          // Refresh cloud budget so remaining tokens update in real time
-          if (cfg?.cloudMode && (cloudToken ?? initialCloudToken)) {
-            const token = cloudToken ?? initialCloudToken!;
-            const did = cloudDeviceId ?? initialCloudDeviceId;
-            void (async () => {
-              try {
-                const { fetchCloudUsage } = await import("./cloud/auth.js");
-                const usage = await fetchCloudUsage(token, did);
-                if (usage) {
-                  setCloudBudget({ remaining: usage.remaining, limit: usage.input_token_limit });
-                }
-              } catch (err) {
-                if (isKillSwitchError(err)) {
-                  setCloudToken(undefined);
-                  setCloudDeviceId(undefined);
-                  setEvents((es) => [
-                    ...es,
-                    { kind: "service_ended", key: mkKey(), endedAt: err.endedAt },
-                  ]);
-                }
-                // Other errors are non-fatal
-              }
-            })();
-          }
         },
-        onGatewayMeta: updateGatewayMeta,
+        onResponseMeta: updateResponseMeta,
         onTasks: (nextTasks: Task[]) => {
           const prevEmpty = tasksRef.current.length === 0;
           const prevAllDone =
@@ -2417,13 +1924,8 @@ function App({
 
       supervisorRef.current.startTurn(
         {
-          accountId: cfg.accountId,
-          apiToken: cfg.apiToken,
+          ...llmAuthFromConfig(cfg),
           model: overrideModel ?? cfg.model,
-          gateway: gatewayFromConfig(cfg),
-          cloudMode: cfg.cloudMode,
-          cloudToken: cloudToken ?? initialCloudToken,
-          cloudDeviceId: cloudDeviceId ?? initialCloudDeviceId,
           messages: messagesRef.current,
           tools: [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current],
           executor: executorRef.current,
@@ -2440,9 +1942,6 @@ function App({
           githubToken: cfg.githubOAuthToken,
           keepLastImageTurns: cfg.imageHistoryTurns ?? 2,
           codeMode: effectiveCodeMode,
-          providerKeys: cfg.providerKeys,
-          providerKeyAliases: cfg.providerKeyAliases,
-          unifiedBilling: cfg.unifiedBilling,
           allowDirectPush: cfg.allowDirectPush,
           preferPullRequests: cfg.preferPullRequests,
           onIterationEnd,
@@ -2450,13 +1949,7 @@ function App({
           sessionStartRecall: sessionStartRecallRef.current ?? undefined,
           skillsDb: getMemoryDb() ?? undefined,
           skillRoutingConfig: {
-            accountId: cfg.accountId,
-            apiToken: cfg.apiToken,
             embeddingModel: cfg.memoryEmbeddingModel,
-            gateway: gatewayFromConfig(cfg),
-            cloudMode: cfg.cloudMode,
-            cloudToken: cloudToken ?? initialCloudToken,
-            cloudDeviceId: cloudDeviceId ?? initialCloudDeviceId,
             maxSkillTokens: modelContextLimit - 10_000,
           },
           mode: modeRef.current,
@@ -2531,12 +2024,10 @@ function App({
                 } else {
                   try {
                     const result = await summarizeMessagesViaLlm({
-                      accountId: cfg.accountId,
-                      apiToken: cfg.apiToken,
+                      ...llmAuthFromConfig(cfg),
                       model: cfg.model,
                       messages: messagesRef.current,
                       signal: turnScope.signal,
-                      gateway: gatewayFromConfig(cfg),
                     });
                     if (result.replacedCount > 0) {
                       messagesRef.current = result.newMessages;
@@ -2633,13 +2124,11 @@ function App({
                 } else {
                   try {
                     const result = await summarizeMessagesViaLlm({
-                      accountId: cfg.accountId,
-                      apiToken: cfg.apiToken,
+                      ...llmAuthFromConfig(cfg),
                       model: cfg.model,
                       messages: messagesRef.current,
                       keepLastTurns: 1,
                       signal: turnScope.signal,
-                      gateway: gatewayFromConfig(cfg),
                     });
                     if (result.replacedCount > 0) {
                       messagesRef.current = result.newMessages;
@@ -2689,10 +2178,8 @@ function App({
                     const summary = await generateContinuationSummary({
                       messages: messagesRef.current,
                       mode: modeRef.current,
-                      accountId: cfg.accountId,
-                      apiToken: cfg.apiToken,
-                      model: cfg.plumbingModel ?? "@cf/moonshotai/kimi-k2.5",
-                      gateway: gatewayFromConfig(cfg),
+                      ...llmAuthFromConfig(cfg),
+                      model: cfg.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
                       memoryManager: memoryManagerRef.current,
                       memoryEnabled: cfg.memoryEnabled,
                     });
@@ -2760,44 +2247,11 @@ function App({
               setEvents((evts) =>
                 evts.map((e) => (e.kind === "tool" && e.status === "running" ? { ...e, status: "error" as const, result: "(stopped)" } : e)),
               );
-            } else if (isKillSwitchError(e)) {
-              setCloudToken(undefined);
-              setCloudDeviceId(undefined);
-              setEvents((es) => [
-                ...es,
-                { kind: "service_ended", key: mkKey(), endedAt: e.endedAt },
-              ]);
-            } else if (cfg?.cloudMode && isCloudQuotaExhaustedError(e)) {
-              const token = cloudToken ?? initialCloudToken;
-              const did = cloudDeviceId ?? initialCloudDeviceId;
-              let used = 0;
-              let limit = 0;
-              if (token) {
-                try {
-                  const { fetchCloudUsage } = await import("./cloud/auth.js");
-                  const usage = await fetchCloudUsage(token, did);
-                  if (usage) {
-                    used = usage.input_tokens_used;
-                    limit = usage.input_token_limit;
-                  }
-                } catch { /* ignore */ }
-              }
-              if (!limit) {
-                const m = (e as KimiApiError).message.match(/Used ([\d,]+)\s*\/\s*([\d,]+)/);
-                if (m && m[1] && m[2]) {
-                  used = parseInt(m[1].replace(/,/g, ""), 10);
-                  limit = parseInt(m[2].replace(/,/g, ""), 10);
-                }
-              }
-              setEvents((es) => [
-                ...es,
-                { kind: "cloud_quota_exhausted", key: mkKey(), used, limit },
-              ]);
             } else if (
               e instanceof KimiApiError &&
-              (e.httpStatus === 429 || e.code === 3040 || (e.httpStatus !== undefined && e.httpStatus >= 500))
+              (e.httpStatus === 429 || (e.httpStatus !== undefined && e.httpStatus >= 500))
             ) {
-              const err = { httpStatus: e.httpStatus, code: e.code, message: humanizeCloudflareError(e) };
+              const err = { httpStatus: e.httpStatus, code: e.code, message: humanizeApiError(e) };
               lastApiErrorRef.current = err;
               setEvents((es) => [
                 ...es,
@@ -2806,7 +2260,7 @@ function App({
             } else {
               const displayText =
                 e instanceof KimiApiError
-                  ? humanizeCloudflareError(e)
+                  ? humanizeApiError(e)
                   : e.message ?? String(e);
               setEvents((es) => [
                 ...es,
@@ -2818,7 +2272,7 @@ function App({
         },
       );
     },
-    [cfg, handleSlash, updateAssistant, updateTool, saveSessionSafe, updateGatewayMeta, setShowPlanCompletePicker],
+    [cfg, handleSlash, updateAssistant, updateTool, saveSessionSafe, updateResponseMeta, setShowPlanCompletePicker],
   );
 
   useEffect(() => {
@@ -2998,14 +2452,6 @@ function App({
           }
           setShowModePicker(false);
         }}
-        onSaveProviderKey={handleSaveProviderKey}
-        onCancelKeyEntry={handleCancelKeyEntry}
-        onPickBilling={handlePickBilling}
-        onUnifiedProbeResolve={handleUnifiedProbeResolve}
-        accountId={cfg?.accountId ?? ""}
-        apiToken={cfg?.apiToken ?? ""}
-        secretsStoreId={cfg?.secretsStoreId}
-        aiGatewayId={cfg?.aiGatewayId}
         selectedRemoteSession={selectedRemoteSession}
         onSelectRemoteSession={setSelectedRemoteSession}
         onCancelRemoteSession={handleRemoteCancel}
@@ -3041,7 +2487,6 @@ function App({
         cwd={process.cwd()}
         onHooksMutate={() => hooksManagerRef.current.reload()}
         costAttributionEnabled={cfg?.costAttribution ?? false}
-        cloudMode={cfg?.cloudMode}
         onRunCommand={(cmd) => {
           // Defer so the modal closes before the command runs
           setTimeout(() => handleSlash(cmd), 0);
@@ -3063,44 +2508,6 @@ function App({
           setTimeout(() => handleSlash(`/memory ${action}`), 0);
         }}
         onMemoryDone={() => setShowMemoryPicker(false)}
-        gatewayId={cfg?.aiGatewayId}
-        gatewaySkipCache={cfg?.aiGatewaySkipCache}
-        gatewayCollectLogs={cfg?.aiGatewayCollectLogPayload}
-        gatewayMetadataCount={Object.keys(cfg?.aiGatewayMetadata ?? {}).length}
-        onGatewayAction={(action) => {
-          setShowGatewayPicker(false);
-          if (action === "set_id") {
-            setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Type /gateway <id> to set the gateway ID." }]);
-            return;
-          }
-          if (action === "set_ttl") {
-            setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Type /gateway cache-ttl <seconds> to set the cache TTL." }]);
-            return;
-          }
-          if (action === "add_meta") {
-            setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "Type /gateway metadata KEY=VALUE to add metadata." }]);
-            return;
-          }
-          if (action === "toggle_skip") {
-            const next = !cfg?.aiGatewaySkipCache;
-            setTimeout(() => handleSlash(`/gateway skip-cache ${next}`), 0);
-            return;
-          }
-          if (action === "toggle_logs") {
-            const next = !cfg?.aiGatewayCollectLogPayload;
-            setTimeout(() => handleSlash(`/gateway collect-logs ${next}`), 0);
-            return;
-          }
-          if (action === "clear_meta") {
-            setTimeout(() => handleSlash("/gateway metadata clear"), 0);
-            return;
-          }
-          if (action === "off") {
-            setTimeout(() => handleSlash("/gateway off"), 0);
-            return;
-          }
-        }}
-        onGatewayDone={() => setShowGatewayPicker(false)}
         onSkillsAction={(action) => {
           setShowSkillsPicker(false);
           if (action === "list") {
@@ -3149,10 +2556,8 @@ function App({
                 const result = await changelogImageTool.run({ owner, repo, days }, {
                   cwd: process.cwd(),
                   githubToken: cfg?.githubOAuthToken,
-                  accountId: cfg?.accountId,
-                  apiToken: cfg?.apiToken,
+                  llmAuth: llmAuthFromConfig(cfg),
                   model: cfg?.model,
-                  gateway: gatewayFromConfig(cfg),
                 });
                 updateTask("fetch-prs", "completed");
                 updateTask("fetch-release", "completed");
@@ -3196,7 +2601,7 @@ function App({
         {!hasConversation && events.length === 0 ? (
           <Welcome />
         ) : (
-          <ChatView events={events} showReasoning={showReasoning} verbose={verbose} intentTier={intentTier ?? undefined} onUpgrade={handleUpgrade} />
+          <ChatView events={events} showReasoning={showReasoning} verbose={verbose} intentTier={intentTier ?? undefined} />
         )}
         {perm ? (
           <PermissionModal
@@ -3244,10 +2649,8 @@ function App({
               mode={mode}
               contextLimit={modelContextLimit}
               model={cfg.model}
-              gatewayMeta={gatewayMeta}
+              responseMeta={responseMeta}
               codeMode={codeMode}
-              cloudMode={cfg.cloudMode}
-              cloudBudget={cloudBudget}
               skillsActive={skillsActive}
               memoryRecalled={memoryRecalled}
               phase={turnPhase}
@@ -3336,8 +2739,6 @@ export async function renderApp(
   updateResult?: UpdateCheckResult,
   lspScope: "project" | "global" = "global",
   lspProjectPath: string | null = null,
-  cloudToken?: string,
-  cloudDeviceId?: string,
 ) {
   const instance = render(
     <App
@@ -3345,8 +2746,6 @@ export async function renderApp(
       initialUpdateResult={updateResult}
       initialLspScope={lspScope}
       initialLspProjectPath={lspProjectPath}
-      initialCloudToken={cloudToken}
-      initialCloudDeviceId={cloudDeviceId}
     />,
     {
       incrementalRendering: true,

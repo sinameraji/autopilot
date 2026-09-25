@@ -2,22 +2,17 @@
  * Custom OpenAI-compatible endpoint routing.
  *
  * When `KIMIFLARE_BASE_URL` is set (or `baseUrl` in config), every model call
- * is sent to `<baseUrl>/chat/completions` with
- * `Authorization: Bearer <KIMIFLARE_API_KEY>` — and every Cloudflare path is
- * bypassed: no account-id URLs, no cf-aig-* headers, no BYOK / Unified
- * Billing logic, no Cloudflare token, and no whoami-style preflights.
+ * — chat and embeddings — is sent to `<baseUrl>/chat/completions` (or
+ * `/embeddings`) with `Authorization: Bearer <KIMIFLARE_API_KEY>` instead of
+ * OpenRouter, and no OpenRouter key is needed.
  *
  * This is how a host application (e.g. an agents platform running kimiflare
  * inside a container) points the CLI at its own gateway/broker instead of
- * handing the process a raw Cloudflare token. The broker terminates the
- * bearer it issued and forwards to AI Gateway (or any OpenAI-compatible
- * upstream) with credentials that never enter this process.
+ * handing the process a raw provider key. The broker terminates the bearer it
+ * issued and forwards upstream with credentials that never enter this process.
  *
- * Precedence (per field): env var > config field. When a custom endpoint is
- * active it wins over cloud mode, the AI Gateway Universal Endpoint, the
- * cf-catalog path, and the direct Workers AI path. Model ids pass through to
- * the body unchanged — no `workers-ai/` prefixing, no Cloudflare id-shape
- * validation.
+ * Precedence (per field): env var > config field. Model ids pass through to
+ * the body unchanged — no OpenRouter id-shape validation.
  */
 
 export interface CustomEndpoint {

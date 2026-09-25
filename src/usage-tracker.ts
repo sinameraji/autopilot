@@ -4,24 +4,25 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { Usage } from "./agent/messages.js";
-import type { GatewayMeta } from "./agent/client.js";
-import { getUserAgent } from "./util/version.js";
+import type { ResponseMeta } from "./agent/client.js";
 import { calculateCost } from "./pricing.js";
+import { fetchWithNetworkRetry, openRouterHeaders, openRouterUrl } from "./models/openrouter.js";
 import { RETENTION } from "./storage-limits.js";
 
 const LOG_VERSION = 1;
 
 /** Emits "update" with the sessionId whenever a session's cost/turn state changes
- *  out-of-band (e.g. after a Gateway-log reconcile). The UI subscribes to refresh
- *  its displayed numbers without polling. */
+ *  out-of-band (e.g. after an OpenRouter generation-cost lookup lands). The UI
+ *  subscribes to refresh its displayed numbers without polling. */
 export const usageEvents = new EventEmitter();
 
 /** Maximum number of per-turn records kept per session. */
 const MAX_TURNS_PER_SESSION = 50;
 
-/** Reconciliation poll schedule in ms — total budget ~7.5s. Tuned for Gateway
- *  log eventual-consistency: the log is usually queryable within 1–2s. */
-const RECONCILE_DELAYS_MS = [500, 1000, 2000, 4000];
+/** Reconciliation poll schedule in ms — total budget ~15s. OpenRouter's
+ *  /generation record is usually queryable within a second or two of the
+ *  stream ending, occasionally longer under load (404 until then). */
+const RECONCILE_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
 export interface DailyUsage {
   date: string; // YYYY-MM-DD
@@ -29,23 +30,30 @@ export interface DailyUsage {
   completionTokens: number;
   cachedTokens: number;
   cost: number;
+  /**
+   * Provider-confirmed accounting. The `gateway*` key names date from the
+   * Cloudflare AI Gateway era and are kept so existing usage.json /
+   * history.jsonl files keep aggregating; today they count OpenRouter
+   * generations and the USD cost OpenRouter confirmed for them.
+   */
   gatewayRequests?: number;
+  /** Always 0 on OpenRouter (it has no response cache); kept for old records. */
   gatewayCachedRequests?: number;
   gatewayCost?: number;
   /** True iff this is a session-scoped DailyUsage with at least one turn whose
-   *  Gateway cost has not yet been confirmed. Always undefined for day/month/all-time. */
+   *  cost OpenRouter has not yet confirmed. Always undefined for day/month/all-time. */
   reconcilePending?: boolean;
-  /** Most recently confirmed turn duration in ms, sourced from the Gateway log.
-   *  Only set on the session-scoped DailyUsage when at least one turn has been
-   *  reconciled with a duration field. */
+  /** Most recently confirmed turn duration in ms, from OpenRouter's generation
+   *  record. Only set on the session-scoped DailyUsage. */
   lastTurnMs?: number;
 }
 
 /** A single agent turn's cost record. `estimatedCost` is the local-pricing
  *  number captured at recordUsage time; `confirmedCost` (if set) replaces it
- *  once the Gateway log API confirms the actual billed cost. */
+ *  once OpenRouter reports the actual billed cost. */
 export interface TurnCost {
   turnId: string;
+  /** OpenRouter generation id ("gen-…"). */
   logId?: string;
   estimatedCost: number;
   confirmedCost?: number;
@@ -65,7 +73,8 @@ export interface SessionUsage {
   gatewayRequests?: number;
   gatewayCachedRequests?: number;
   gatewayCost?: number;
-  gatewayLogs?: GatewayUsageSnapshot[];
+  /** Recent generation records (OpenRouter), for /cost. */
+  gatewayLogs?: GenerationSnapshot[];
   turns?: TurnCost[];
   /** Carried-over cost from a previous session (e.g. after /fresh). Hidden
    *  bookkeeping — added to the session display but NOT to daily aggregates. */
@@ -79,25 +88,30 @@ export interface SessionUsage {
   tags?: string[];
 }
 
-export interface GatewayUsageSnapshot {
+/** One generation as OpenRouter reported it. Persisted in usage.json. */
+export interface GenerationSnapshot {
+  /** OpenRouter generation id ("gen-…"). */
   logId?: string;
+  /** Legacy (AI Gateway) fields — present only on old records. */
   eventId?: string;
   cacheStatus?: string;
   cached?: boolean;
+  /** Generation latency in ms. */
   duration?: number;
   statusCode?: number;
   model?: string;
+  /** Upstream provider OpenRouter routed to, e.g. "Moonshot AI". */
   provider?: string;
   tokensIn?: number;
   tokensOut?: number;
   cost?: number;
 }
 
-export interface GatewayUsageLookup {
-  accountId: string;
-  apiToken: string;
-  gatewayId: string;
-  meta: GatewayMeta;
+/** What `recordUsage` needs to confirm a turn's real cost with OpenRouter. */
+export interface CostLookup {
+  /** OpenRouter key the generation was billed to (the /generation lookup is per-key). */
+  apiKey: string;
+  meta: ResponseMeta;
 }
 
 export interface UsageLog {
@@ -209,60 +223,34 @@ function getOrCreateSession(log: UsageLog, sessionId: string, date: string): Ses
   return session;
 }
 
-function gatewaySnapshotFromMeta(meta: GatewayMeta): GatewayUsageSnapshot | undefined {
-  if (!meta.logId && !meta.eventId && !meta.cacheStatus && !meta.model) return undefined;
+/**
+ * Look up one generation's authoritative cost/latency: GET /generation?id=….
+ * Returns undefined until OpenRouter has the record (it 404s for a moment
+ * after the stream ends) or on any failure — callers poll.
+ */
+export async function fetchGenerationSnapshot(
+  lookup: CostLookup,
+  fetchImpl: typeof fetch = fetch,
+): Promise<GenerationSnapshot | undefined> {
+  const id = lookup.meta.generationId;
+  if (!id) return undefined;
+  const res = await fetchWithNetworkRetry(fetchImpl, openRouterUrl(`generation?id=${encodeURIComponent(id)}`), {
+    headers: openRouterHeaders(lookup.apiKey),
+  }, 2);
+  if (!res.ok) return undefined;
+  const parsed = (await res.json()) as { data?: Record<string, unknown> };
+  const d = parsed.data;
+  if (!d || typeof d.total_cost !== "number") return undefined;
+  const num = (v: unknown) => (typeof v === "number" ? v : undefined);
   return {
-    logId: meta.logId,
-    eventId: meta.eventId,
-    cacheStatus: meta.cacheStatus,
-    cached: meta.cacheStatus ? meta.cacheStatus.toUpperCase() === "HIT" : undefined,
-    model: meta.model,
+    logId: id,
+    cost: d.total_cost,
+    duration: num(d.latency) ?? num(d.generation_time),
+    model: typeof d.model === "string" ? d.model : lookup.meta.model,
+    provider: typeof d.provider_name === "string" ? d.provider_name : lookup.meta.provider,
+    tokensIn: num(d.native_tokens_prompt) ?? num(d.tokens_prompt),
+    tokensOut: num(d.native_tokens_completion) ?? num(d.tokens_completion),
   };
-}
-
-function toGatewaySnapshot(entry: unknown, meta: GatewayMeta): GatewayUsageSnapshot | undefined {
-  if (!entry || typeof entry !== "object") return gatewaySnapshotFromMeta(meta);
-  const raw = entry as Record<string, unknown>;
-  const cacheStatus = typeof meta.cacheStatus === "string" ? meta.cacheStatus : undefined;
-  const cached = typeof raw.cached === "boolean" ? raw.cached : cacheStatus?.toUpperCase() === "HIT";
-  return {
-    logId: typeof raw.id === "string" ? raw.id : meta.logId,
-    eventId: meta.eventId,
-    cacheStatus,
-    cached,
-    duration: typeof raw.duration === "number" ? raw.duration : undefined,
-    statusCode: typeof raw.status_code === "number" ? raw.status_code : undefined,
-    model: typeof raw.model === "string" ? raw.model : meta.model,
-    provider: typeof raw.provider === "string" ? raw.provider : undefined,
-    tokensIn: typeof raw.tokens_in === "number" ? raw.tokens_in : undefined,
-    tokensOut: typeof raw.tokens_out === "number" ? raw.tokens_out : undefined,
-    cost: typeof raw.cost === "number" ? raw.cost : undefined,
-  };
-}
-
-export async function fetchGatewayUsageSnapshot(
-  lookup: GatewayUsageLookup,
-): Promise<GatewayUsageSnapshot | undefined> {
-  if (!lookup.meta.logId) return gatewaySnapshotFromMeta(lookup.meta);
-  const url = `https://api.cloudflare.com/client/v4/accounts/${lookup.accountId}/ai-gateway/gateways/${encodeURIComponent(
-    lookup.gatewayId,
-  )}/logs`;
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${lookup.apiToken}`, "User-Agent": getUserAgent() },
-  });
-  if (!res.ok) return gatewaySnapshotFromMeta(lookup.meta);
-  const parsed = (await res.json()) as { result?: unknown[] };
-  const match = Array.isArray(parsed.result)
-    ? parsed.result.find((entry) => {
-        return (
-          entry &&
-          typeof entry === "object" &&
-          (entry as Record<string, unknown>).id === lookup.meta.logId
-        );
-      })
-    : undefined;
-  return toGatewaySnapshot(match, lookup.meta);
 }
 
 /** Prune old day and session entries to enforce retention policy. */
@@ -283,7 +271,7 @@ export function pruneUsageLog(log: UsageLog): UsageLog {
 export async function recordUsage(
   sessionId: string,
   usage: Usage,
-  gateway?: GatewayUsageLookup,
+  lookup?: CostLookup,
   model?: string,
 ): Promise<void> {
   const cost = calculateCost(
@@ -295,7 +283,10 @@ export async function recordUsage(
   const estimatedCost = cost.total;
   const cachedTokens = usage.prompt_tokens_details?.cached_tokens ?? 0;
   const turnId = randomUUID();
-  const logId = gateway?.meta.logId;
+  const generationId = lookup?.meta.generationId;
+  // OpenRouter's usage accounting puts the billed cost right in the stream's
+  // final usage chunk — when present, the turn is confirmed on the spot.
+  const inlineCost = typeof usage.cost === "number" && Number.isFinite(usage.cost) ? usage.cost : undefined;
 
   await withLock(async () => {
     const log = pruneUsageLog(await loadLog());
@@ -313,93 +304,94 @@ export async function recordUsage(
     session.cachedTokens += cachedTokens;
     session.cost += estimatedCost;
 
-    const turn: TurnCost = {
-      turnId,
-      logId,
-      estimatedCost,
-      cacheStatus: gateway?.meta.cacheStatus,
-    };
+    const turn: TurnCost = { turnId, logId: generationId, estimatedCost };
     session.turns = [...(session.turns ?? []), turn].slice(-MAX_TURNS_PER_SESSION);
 
-    // Capture whatever Gateway metadata is immediately available from headers,
-    // so /cost has a stub to render before the reconcile lands.
-    if (gateway) {
-      const stub = gatewaySnapshotFromMeta(gateway.meta);
-      if (stub) {
-        session.gatewayRequests = (session.gatewayRequests ?? 0) + 1;
-        session.gatewayCachedRequests =
-          (session.gatewayCachedRequests ?? 0) + (stub.cached ? 1 : 0);
-        session.gatewayLogs = [...(session.gatewayLogs ?? []), stub].slice(-100);
-        day.gatewayRequests = (day.gatewayRequests ?? 0) + 1;
-        day.gatewayCachedRequests =
-          (day.gatewayCachedRequests ?? 0) + (stub.cached ? 1 : 0);
-      }
+    if (generationId || inlineCost !== undefined) {
+      session.gatewayRequests = (session.gatewayRequests ?? 0) + 1;
+      day.gatewayRequests = (day.gatewayRequests ?? 0) + 1;
+    }
+
+    if (inlineCost !== undefined) {
+      applyConfirmedCost(log, session, turn, {
+        logId: generationId,
+        cost: inlineCost,
+        model: lookup?.meta.model ?? model,
+        provider: lookup?.meta.provider,
+        tokensIn: usage.prompt_tokens,
+        tokensOut: usage.completion_tokens,
+      });
     }
 
     await saveLog(log);
-    await upsertHistoryDay(day);
+    await upsertHistoryDay(getOrCreateDay(log, date));
   });
 
   usageEvents.emit("update", sessionId);
 
-  // Fire-and-forget reconcile against the Gateway logs API. Eventual consistency
-  // means the log may not be queryable for ~1s after the request, so we poll.
-  if (gateway && logId) {
-    void reconcileTurnCost(sessionId, turnId, gateway).catch(() => undefined);
+  // No inline cost (older OpenRouter responses, or a provider that omits it):
+  // fall back to polling the /generation record in the background.
+  if (inlineCost === undefined && lookup?.apiKey && generationId) {
+    void reconcileTurnCost(sessionId, turnId, lookup).catch(() => undefined);
   }
 }
 
-/** Poll the AI Gateway logs API until this turn's log surfaces (or we exhaust
- *  the retry budget), then patch the turn record with the real cost/duration
- *  and adjust the session/day totals. Emits "update" so the UI re-renders. */
+/** Patch `turn` with a confirmed cost and move the session/day totals by the
+ *  delta from the estimate. Caller holds the lock and saves. */
+function applyConfirmedCost(
+  log: UsageLog,
+  session: SessionUsage,
+  turn: TurnCost,
+  snapshot: GenerationSnapshot & { cost: number },
+): void {
+  const delta = snapshot.cost - turn.estimatedCost;
+  turn.confirmedCost = snapshot.cost;
+  turn.durationMs = snapshot.duration ?? turn.durationMs;
+  turn.reconciledAt = Date.now();
+
+  session.cost += delta;
+  session.gatewayCost = (session.gatewayCost ?? 0) + snapshot.cost;
+
+  const day = getOrCreateDay(log, session.date);
+  day.cost += delta;
+  day.gatewayCost = (day.gatewayCost ?? 0) + snapshot.cost;
+
+  const logs = session.gatewayLogs ?? [];
+  const idx = snapshot.logId ? logs.findIndex((l) => l.logId === snapshot.logId) : -1;
+  if (idx >= 0) logs[idx] = snapshot;
+  else logs.push(snapshot);
+  session.gatewayLogs = logs.slice(-100);
+}
+
+/** Poll OpenRouter's /generation record until this turn's cost surfaces (or
+ *  we exhaust the retry budget), then patch the turn and adjust the
+ *  session/day totals. Emits "update" so the UI re-renders. */
 export async function reconcileTurnCost(
   sessionId: string,
   turnId: string,
-  gateway: GatewayUsageLookup,
+  lookup: CostLookup,
+  fetchImpl: typeof fetch = fetch,
+  delaysMs: readonly number[] = RECONCILE_DELAYS_MS,
 ): Promise<void> {
-  for (const delay of RECONCILE_DELAYS_MS) {
+  for (const delay of delaysMs) {
     await new Promise((r) => setTimeout(r, delay));
-    let snapshot: GatewayUsageSnapshot | undefined;
+    let snapshot: GenerationSnapshot | undefined;
     try {
-      snapshot = await fetchGatewayUsageSnapshot(gateway);
+      snapshot = await fetchGenerationSnapshot(lookup, fetchImpl);
     } catch {
       continue;
     }
-    // Require the matched log entry to carry an authoritative cost. The
-    // header-only fallback (no cost field) is not a successful reconcile.
     if (!snapshot || typeof snapshot.cost !== "number") continue;
+    const confirmed = snapshot as GenerationSnapshot & { cost: number };
 
     const patched = await withLock(async () => {
       const log = pruneUsageLog(await loadLog());
       const session = log.sessions.find((s) => s.id === sessionId);
       const turn = session?.turns?.find((t) => t.turnId === turnId);
       if (!session || !turn || turn.confirmedCost !== undefined) return false;
-
-      const delta = snapshot!.cost! - turn.estimatedCost;
-      turn.confirmedCost = snapshot!.cost;
-      turn.durationMs = snapshot!.duration;
-      turn.cacheStatus = snapshot!.cacheStatus ?? turn.cacheStatus;
-      turn.reconciledAt = Date.now();
-
-      session.cost += delta;
-      session.gatewayCost = (session.gatewayCost ?? 0) + snapshot!.cost!;
-
-      const day = getOrCreateDay(log, session.date);
-      day.cost += delta;
-      day.gatewayCost = (day.gatewayCost ?? 0) + snapshot!.cost!;
-
-      // Replace the latest gatewayLogs stub with the fully-populated snapshot
-      // when we can match by logId; otherwise append.
-      const logs = session.gatewayLogs ?? [];
-      const idx = snapshot!.logId
-        ? logs.findIndex((l) => l.logId === snapshot!.logId)
-        : -1;
-      if (idx >= 0) logs[idx] = snapshot!;
-      else logs.push(snapshot!);
-      session.gatewayLogs = logs.slice(-100);
-
+      applyConfirmedCost(log, session, turn, confirmed);
       await saveLog(log);
-      await upsertHistoryDay(day);
+      await upsertHistoryDay(getOrCreateDay(log, session.date));
       return true;
     });
 
@@ -541,8 +533,8 @@ function latestConfirmedDurationMs(session: SessionUsage): number | undefined {
   return undefined;
 }
 
-/** Fetch the GatewayUsageSnapshot array recorded against a session, for /cost rendering. */
-export async function getSessionGatewayLogs(sessionId: string): Promise<GatewayUsageSnapshot[]> {
+/** Fetch the generation records kept for a session, for /cost rendering. */
+export async function getSessionGenerations(sessionId: string): Promise<GenerationSnapshot[]> {
   const log = await loadLog();
   const session = log.sessions.find((s) => s.id === sessionId);
   return session?.gatewayLogs ?? [];
@@ -554,63 +546,26 @@ function fmtTokens(n: number): string {
   return String(n);
 }
 
-function fmtGateway(u: DailyUsage): string {
+function fmtConfirmed(u: DailyUsage): string {
   if (!u.gatewayRequests) return "";
-  const cached = u.gatewayCachedRequests ? `, ${u.gatewayCachedRequests} cached` : "";
-  const cost = u.gatewayCost ? `, gateway $${u.gatewayCost.toFixed(4)}` : "";
-  return `  gateway: ${u.gatewayRequests} req${cached}${cost}`;
+  const cost = u.gatewayCost ? `, OpenRouter-confirmed $${u.gatewayCost.toFixed(4)}` : "";
+  return `  ${u.gatewayRequests} req${cost}`;
 }
 
-/** Render the AI Gateway section of /cost — cache hit ratio, recent log IDs,
- *  and a dashboard link. Returns empty string when no Gateway activity. */
-export function formatGatewaySection(
-  report: CostReport,
-  accountId: string,
-  gatewayId: string,
-  recentLogs: GatewayUsageSnapshot[] = [],
-): string {
-  const session = report.session;
-  const today = report.today;
-  if (!session.gatewayRequests && !today.gatewayRequests) return "";
-  const lines: string[] = ["─── AI Gateway ───"];
-  const fmtRatio = (u: DailyUsage) => {
-    const req = u.gatewayRequests ?? 0;
-    if (!req) return "n/a";
-    const cached = u.gatewayCachedRequests ?? 0;
-    const pct = (cached / req) * 100;
-    return `${cached}/${req} (${pct.toFixed(1)}%)`;
-  };
-  lines.push(`  cache hit ratio  session: ${fmtRatio(session)}   today: ${fmtRatio(today)}`);
-  const logs = recentLogs.slice(-5).reverse();
-  if (logs.length > 0) {
-    lines.push("  recent requests:");
-    for (const log of logs) {
-      const id = log.logId ?? log.eventId ?? "?";
-      const cache = log.cacheStatus ? ` [${log.cacheStatus}]` : "";
-      lines.push(
-        `    ${id}${cache}  https://dash.cloudflare.com/${accountId}/ai/ai-gateway/gateways/${gatewayId}/logs/${id}`,
-      );
-    }
+/** Render the OpenRouter section of /cost: the session's most recent
+ *  generations with the upstream provider each one was routed to. Returns
+ *  empty string when the session has no generation records. */
+export function formatGenerationsSection(recent: GenerationSnapshot[] = []): string {
+  const logs = recent.filter((l) => l.logId?.startsWith("gen-") || l.provider).slice(-5).reverse();
+  if (logs.length === 0) return "";
+  const lines: string[] = ["─── OpenRouter ───", "  recent generations:"];
+  for (const log of logs) {
+    const provider = log.provider ? `  via ${log.provider}` : "";
+    const cost = typeof log.cost === "number" ? `  $${log.cost.toFixed(5)}` : "";
+    const ms = typeof log.duration === "number" ? `  ${(log.duration / 1000).toFixed(1)}s` : "";
+    lines.push(`    ${log.logId ?? "?"}${cost}${ms}${provider}`);
   }
-  lines.push(
-    `  dashboard:  https://dash.cloudflare.com/${accountId}/ai/ai-gateway/gateways/${gatewayId}`,
-  );
-  return lines.join("\n");
-}
-
-/** Render the per-feature cost breakdown — one row per metadata.feature tag
- *  observed in the Gateway logs. Skips trivial breakdowns (1 unknown row). */
-export function formatFeatureBreakdown(
-  breakdown: Array<{ feature: string; cost: number; requests: number }> | undefined,
-): string {
-  if (!breakdown || breakdown.length === 0) return "";
-  if (breakdown.length === 1 && breakdown[0]!.feature === "unknown") return "";
-  const lines = ["─── By feature (Gateway-confirmed) ───"];
-  for (const row of breakdown) {
-    lines.push(
-      `  ${row.feature.padEnd(20)} $${row.cost.toFixed(4)}  (${row.requests} req)`,
-    );
-  }
+  lines.push("  activity:  https://openrouter.ai/activity");
   return lines.join("\n");
 }
 
@@ -619,7 +574,7 @@ export function formatCostReport(report: CostReport): string {
   const add = (label: string, u: DailyUsage) => {
     const cached = u.cachedTokens > 0 ? ` (${fmtTokens(u.cachedTokens)} cached)` : "";
     lines.push(
-      `${label.padEnd(9)} $${u.cost.toFixed(4)}  (in: ${fmtTokens(u.promptTokens)}${cached}  out: ${fmtTokens(u.completionTokens)})${fmtGateway(u)}`,
+      `${label.padEnd(9)} $${u.cost.toFixed(4)}  (in: ${fmtTokens(u.promptTokens)}${cached}  out: ${fmtTokens(u.completionTokens)})${fmtConfirmed(u)}`,
     );
   };
   add("Session", report.session);

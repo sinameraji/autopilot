@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ToolSpec, ToolContext, ToolOutput, Task } from "./registry.js";
 import { Resvg } from "@resvg/resvg-js";
 import { runKimi } from "../agent/client.js";
+import { hasLlmAuth } from "../agent/llm-auth.js";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const TIMEOUT_MS = 20_000;
@@ -120,7 +121,7 @@ async function summarizeWithLlm(
   prs: MergedPr[],
   ctx: ToolContext,
 ): Promise<string> {
-  if (!ctx.accountId || !ctx.apiToken || !ctx.model) {
+  if (!ctx.llmAuth || !hasLlmAuth(ctx.llmAuth) || !ctx.model) {
     // Fallback: just list PR titles if no LLM credentials
     return prs.map((p) => `• ${p.title} [PR #${p.number}]`).join("\n");
   }
@@ -134,8 +135,7 @@ async function summarizeWithLlm(
 
   let summary = "";
   const events = runKimi({
-    accountId: ctx.accountId,
-    apiToken: ctx.apiToken,
+    ...ctx.llmAuth,
     model: ctx.model,
     messages: [
       { role: "system", content: CHANGELOG_SYSTEM_PROMPT },
@@ -147,7 +147,6 @@ async function summarizeWithLlm(
     signal: ctx.signal,
     temperature: 0.4,
     reasoningEffort: "low",
-    gateway: ctx.gateway,
     idleTimeoutMs: 60_000,
   });
 
