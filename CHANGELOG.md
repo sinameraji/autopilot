@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.0](https://github.com/sinameraji/autopilot/compare/v1.0.0...v1.1.0) (2026-09-25)
+
+
+### Features
+
+* **file-picker:** support parent and home navigation ([#650](https://github.com/sinameraji/autopilot/issues/650)) ([ebe133d](https://github.com/sinameraji/autopilot/commit/ebe133db33c5de7d71730b544e873423daf1bc50))
+* **jev:** add one-shot decisions command ([#649](https://github.com/sinameraji/autopilot/issues/649)) ([579a1d0](https://github.com/sinameraji/autopilot/commit/579a1d091866019f235f3aba6e345da9933eee3d))
+* sign in with OpenRouter (OAuth PKCE) — no API key to copy ([#645](https://github.com/sinameraji/autopilot/issues/645)) ([48ecc2e](https://github.com/sinameraji/autopilot/commit/48ecc2ee321433a54e6f10a7b045451637bc83cd))
+* **ui:** clarify model switch timing ([#648](https://github.com/sinameraji/autopilot/issues/648)) ([376bf3e](https://github.com/sinameraji/autopilot/commit/376bf3e7a46d2c59d63101748e4459a251647926))
+
 ## [1.0.0](https://github.com/sinameraji/autopilot/compare/v0.99.0...v1.0.0) (2026-09-25)
 
 
