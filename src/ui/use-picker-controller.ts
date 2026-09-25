@@ -125,7 +125,7 @@ export interface UsePickerControllerOptions {
   allSlashCommands: SlashItem[];
   modalActive: boolean;
   /** Lazy-load file list on first `@` trigger. Called at most once. */
-  loadFilePickerItems: () => Promise<FilePickerItem[]>;
+  loadFilePickerItems: (query?: string) => Promise<FilePickerItem[]>;
   /** Called when a file is picked so the caller can update its recents store. */
   onFileSelected?: (name: string) => void;
   /** Called with the new input value when a slash command is picked. */
@@ -187,6 +187,17 @@ export function usePickerController(opts: UsePickerControllerOptions): PickerCon
     return input.slice(activeAnchor + 1, cursorOffset);
   }, [input, cursorOffset, activeAnchor]);
 
+  const requestedPathRef = useRef("");
+  useEffect(() => {
+    if (activeKind !== "file" || !(query.startsWith(".") || query.startsWith("~") || query.startsWith("/"))) return;
+    const directoryQuery = query.endsWith("/") || query === "~" || query === "." || query === ".." || query.endsWith("/..")
+      ? query
+      : query.slice(0, query.lastIndexOf("/") + 1);
+    if (requestedPathRef.current === directoryQuery) return;
+    requestedPathRef.current = directoryQuery;
+    void loadFilePickerItemsRef.current(query).then(setFileItemsRaw).catch(() => setFileItemsRaw([]));
+  }, [activeKind, query]);
+
   const fileItems = useMemo(() => {
     if (activeKind !== "file") return [];
     const items = filterPickerItems(fileItemsRaw, query).slice();
@@ -227,10 +238,10 @@ export function usePickerController(opts: UsePickerControllerOptions): PickerCon
     }
     if (t.kind === "open") {
       setActive(t.picker);
-      if (t.loadFiles && !filesLoadedRef.current) {
+      if (t.loadFiles) {
         filesLoadedRef.current = true;
         void loadFilePickerItemsRef
-          .current()
+          .current(input.slice(t.picker.anchor + 1, cursorOffset))
           .then((items) => setFileItemsRaw(items))
           .catch(() => setFileItemsRaw([]));
       }
