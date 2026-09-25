@@ -1154,7 +1154,7 @@ function App({
     (picked: ModelEntry | null) => {
       setShowModelPicker(false);
       if (!picked) return;
-      // Persist the model selection first (cheap & expected even if onboarding is mid-flight).
+      const previousModel = cfg?.model ?? "the current model";
       setCfg((c) => {
         if (!c) return c;
         const updated = { ...c, model: picked.id };
@@ -1166,11 +1166,13 @@ function App({
         {
           kind: "info",
           key: mkKey(),
-          text: `model: ${picked.id} · ${picked.contextWindow.toLocaleString()} ctx`,
+          text: busy
+            ? `model selected: ${picked.id} · ${picked.contextWindow.toLocaleString()} ctx. The current turn continues with ${previousModel}; your next message will use ${picked.id}. Conversation history is kept.`
+            : `model switched: ${previousModel} → ${picked.id} · ${picked.contextWindow.toLocaleString()} ctx. Your next message will use this model; conversation history is kept.`,
         },
       ]);
     },
-    [mkKey, setShowModelPicker],
+    [busy, cfg?.model, mkKey, setShowModelPicker],
   );
 
   const buildSlashContext = useCallback((): SlashContext => ({
@@ -2453,6 +2455,7 @@ function App({
         currentUiEngine={cfg?.uiEngine === "ink" ? "ink" : "ink"}
         onPickUi={handleUiPick}
         currentModel={cfg?.model ?? ""}
+        modelSwitchBusy={busy}
         onPickModel={handleModelPick}
         currentMode={mode}
         onPickMode={(m) => {

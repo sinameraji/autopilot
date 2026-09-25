@@ -526,8 +526,12 @@ const handleModel: Handler = (ctx, rest, arg) => {
       kind: "info",
       key: mkKey(),
       text: known
-        ? `model: ${id} · ${entry.contextWindow.toLocaleString()} ctx${entry.supports.tools ? "" : " · ⚠ no tool calling — the agent can't edit files or run commands with this model"}`
-        : `model: ${id} · not in OpenRouter's catalog — check the id with /model list if requests fail`,
+        ? ctx.busy
+          ? `model selected: ${id}. The current turn continues with ${cfg?.model ?? "the current model"}; your next message will use ${id}. Conversation history is kept.${entry.supports.tools ? "" : " ⚠ no tool calling — the agent can't edit files or run commands with this model"}`
+          : `model switched: ${cfg?.model ? `${cfg.model} → ` : ""}${id}. Your next message will use this model; conversation history is kept.${entry.supports.tools ? "" : " ⚠ no tool calling — the agent can't edit files or run commands with this model"}`
+        : ctx.busy
+          ? `model selected: ${id} · not in OpenRouter's catalog — check the id with /model list if requests fail. The current turn continues with ${cfg?.model ?? "the current model"}; your next message will use ${id}. Conversation history is kept.`
+          : `model selected: ${id} · not in OpenRouter's catalog — check the id with /model list if requests fail. Your next message will use this model; conversation history is kept.`,
     },
   ]);
   return true;

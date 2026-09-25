@@ -64,6 +64,7 @@ export interface ModalHostProps {
   onPickUi: (choice: UiEngineChoice | null) => void;
   // Model picker
   currentModel: string;
+  modelSwitchBusy: boolean;
   onPickModel: (model: ModelEntry | null) => void;
   // Mode picker
   currentMode: import("../mode.js").Mode;
@@ -380,7 +381,11 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
     return (
       <ThemeProvider theme={theme}>
         <Box flexDirection="column">
-          <ModelPicker current={currentModel} onPick={onPickModel} />
+          <ModelPicker
+            current={currentModel}
+            turnInProgress={props.modelSwitchBusy}
+            onPick={onPickModel}
+          />
         </Box>
       </ThemeProvider>
     );
