@@ -16,7 +16,7 @@
 
 ## How it works
 
-KimiFlare sends every model call to **[OpenRouter](https://openrouter.ai)** using **your own OpenRouter API key** — bring-your-own-key, nothing proxied, nothing marked up. On first run you paste the key once (it's checked against OpenRouter before it's saved) and pick a model. That's the whole setup.
+autopilot sends every model call to **[OpenRouter](https://openrouter.ai)** using **your own OpenRouter API key** — bring-your-own-key, nothing proxied, nothing marked up. On first run you paste the key once (it's checked against OpenRouter before it's saved) and pick a model. That's the whole setup.
 
 - **Any model, one key.** The model picker is OpenRouter's live catalog — Claude, GPT, Gemini, Grok, Qwen, GLM, Kimi, DeepSeek, free models and more — opening on the best & latest by benchmark score, with fuzzy search over everything. Switch any time with `/model`.
 - **Real cost, per turn.** OpenRouter reports what each generation actually cost; the status bar shows it (a local estimate marked `≈$` only until the billed number arrives). `/cost` totals it by session, day, month and all time.
@@ -44,7 +44,7 @@ KimiFlare sends every model call to **[OpenRouter](https://openrouter.ai)** usin
 - **Smart permission modal with inline feedback** — Deny a tool and immediately tell the agent what to do instead. Keyboard-native navigation with `↑/↓`, `j/k`, `Alt+1/2/3`.
 - **True message queuing** — Enter queues messages while the agent is busy; Escape interrupts and auto-drains the queue.
 - **Hard-stop loop guardrail** — Stops token-burning cycles when all tools in a turn are blocked.
-- **Headless SDK** — Programmatic `createAgentSession` API and JSONL-over-stdio RPC mode for building on top of KimiFlare.
+- **Headless SDK** — Programmatic `createAgentSession` API and JSONL-over-stdio RPC mode for building on top of autopilot.
 
 See the full changelog at [github.com/sinameraji/autopilot/releases](https://github.com/sinameraji/autopilot/releases).
 
@@ -140,7 +140,7 @@ autopilot -p "..." --reasoning                      # include chain-of-thought i
 
 ### Headless SDK
 
-Use KimiFlare programmatically from your own application — no TUI required.
+Use autopilot programmatically from your own application — no TUI required.
 
 ```ts
 import { createAgentSession } from "autopilot-ai/sdk";
@@ -206,7 +206,7 @@ const { session } = await createAgentSession({
 
 #### RPC mode (subprocess)
 
-If you need process isolation or a non-Node consumer, run KimiFlare in JSONL-over-stdio RPC mode:
+If you need process isolation or a non-Node consumer, run autopilot in JSONL-over-stdio RPC mode:
 
 ```sh
 node bin/autopilot.mjs --mode rpc
@@ -287,7 +287,7 @@ autopilot
 
 ## Logs
 
-KimiFlare writes structured JSON logs of agent-side activity (tool calls,
+autopilot writes structured JSON logs of agent-side activity (tool calls,
 permission decisions, MCP/LSP lifecycle, session events, errors) to
 `~/.config/kimiflare/logs/<date>.jsonl`, one file per day, with 7-day
 retention pruned automatically at startup.
@@ -316,7 +316,7 @@ output — independent of the file sink.
 
 ### Shipping to an OpenTelemetry collector
 
-If you set `KIMIFLARE_OTEL_ENDPOINT`, KimiFlare also ships each log
+If you set `KIMIFLARE_OTEL_ENDPOINT`, autopilot also ships each log
 entry to that endpoint over [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/)
 so it lands in Datadog, Honeycomb, Grafana Loki, an internal collector,
 or any other backend that speaks OTel. Batched every 5 s (or every
@@ -341,7 +341,7 @@ on the resource.
 
 ## Hooks
 
-KimiFlare can fire shell commands at five points in an agent turn,
+autopilot can fire shell commands at five points in an agent turn,
 configured per-project (`.kimiflare/settings.json`) or globally
 (`~/.config/kimiflare/settings.json`):
 
