@@ -527,7 +527,11 @@ const handleJev: Handler = async (ctx, rest) => {
   }
 
   const eventKey = mkKey();
-  setEvents((events) => [...events, { kind: "info", key: eventKey, text: "Jev is evaluating…" }]);
+  setEvents((events) => [
+    ...events,
+    { kind: "user", key: mkKey(), text: question.prompt },
+    { kind: "info", key: eventKey, text: "Jev is evaluating…" },
+  ]);
   try {
     const context = await buildJevProjectContext(question.prompt);
     const answer = await askJev(apiKey, question, fetch, undefined, context);
