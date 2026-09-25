@@ -46,8 +46,11 @@ export function ResumePicker({ sessions, onPick }: Props) {
       setSelectedIndex(0);
       return;
     }
-    if (input.length === 1 && !key.ctrl && !key.meta && !key.return && !key.escape) {
-      setQuery((q) => q + input);
+    // Keystrokes typed while a render is in flight arrive together as one
+    // multi-char `input` — accept all printable characters, not just 1-char input.
+    const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+    if (printable.length > 0 && !key.ctrl && !key.meta && !key.return && !key.escape) {
+      setQuery((q) => q + printable);
       setPage(0);
       setSelectedIndex(0);
       return;

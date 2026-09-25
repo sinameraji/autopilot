@@ -248,8 +248,11 @@ export function ModelPicker({ current, onPick, models, title }: Props) {
       setSelectedIndex(0);
       return;
     }
-    if (input.length === 1 && !key.ctrl && !key.meta && !key.return && !key.escape) {
-      setQuery((q) => q + input);
+    // Keystrokes typed while a render is in flight arrive together as one
+    // multi-char `input` — accept all printable characters, not just 1-char input.
+    const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+    if (printable.length > 0 && !key.ctrl && !key.meta && !key.return && !key.escape) {
+      setQuery((q) => q + printable);
       setPage(0);
       setSelectedIndex(0);
       return;
@@ -270,12 +273,27 @@ export function ModelPicker({ current, onPick, models, title }: Props) {
       <Text color={theme.accent} bold>
         {title ?? `Pick a model${current ? `  ·  current: ${current}` : ""}`}
       </Text>
-      <Text color={theme.info.color}>
-        {query
-          ? `Search: ${query}▌  ·  ${modelRows.length} match${modelRows.length === 1 ? "" : "es"}`
-          : `Type to fuzzy-search all ${allModels.length} models…`}
-        {totalPages > 1 ? `  ·  Page ${safePage + 1} of ${totalPages}` : ""}
-      </Text>
+      {/* Search box: always live — typing anywhere in the picker goes here. */}
+      <Box borderStyle="round" borderColor={query ? theme.accent : theme.info.color} paddingX={1} marginTop={1}>
+        <Text color={theme.accent}>⌕ </Text>
+        {query ? (
+          <Text>
+            {query}
+            <Text color={theme.accent}>▌</Text>
+          </Text>
+        ) : (
+          <Text color={theme.info.color} dimColor>
+            <Text color={theme.accent}>▌</Text>
+            {`Search all ${allModels.length} models (fuzzy) — e.g. sonnet, gpt 6, gemini flash`}
+          </Text>
+        )}
+      </Box>
+      {query ? (
+        <Text color={theme.info.color}>
+          {`${modelRows.length} match${modelRows.length === 1 ? "" : "es"}`}
+          {totalPages > 1 ? `  ·  page ${safePage + 1} of ${totalPages}` : ""}
+        </Text>
+      ) : null}
       <Box marginTop={1}>
         <Text color={theme.muted?.color ?? theme.info.color} dimColor>
           {headerLine}
