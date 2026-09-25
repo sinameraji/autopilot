@@ -316,7 +316,7 @@ output — independent of the file sink.
 
 ### Shipping to an OpenTelemetry collector
 
-If you set `KIMIFLARE_OTEL_ENDPOINT`, KimiFlare also ships each log
+If you set `KIMIFLARE_OTEL_ENDPOINT`, autopilot also ships each log
 entry to that endpoint over [OTLP/HTTP](https://opentelemetry.io/docs/specs/otlp/)
 so it lands in Datadog, Honeycomb, Grafana Loki, an internal collector,
 or any other backend that speaks OTel. Batched every 5 s (or every
