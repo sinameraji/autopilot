@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/sinameraji/autopilot/compare/v1.1.0...v1.2.0) (2026-09-25)
+
+
+### Features
+
+* **docs:** redesign site for Autopilot ([#651](https://github.com/sinameraji/autopilot/issues/651)) ([62f7388](https://github.com/sinameraji/autopilot/commit/62f738837cf1974ca39ac1e60e715a72c7e0b754))
+* **jev:** provide scoped context and disclose request data ([#653](https://github.com/sinameraji/autopilot/issues/653)) ([b6cd366](https://github.com/sinameraji/autopilot/commit/b6cd3661b0d8c19dbd379e08bd654e7bea652ae6))
+
 ## [1.1.0](https://github.com/sinameraji/autopilot/compare/v1.0.0...v1.1.0) (2026-09-25)
 
 
