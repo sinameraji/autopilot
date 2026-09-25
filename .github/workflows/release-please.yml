@@ -3,6 +3,8 @@ name: release-please
 on:
   push:
     branches: [main]
+  # Manual re-run of the publish job (e.g. if a release's publish failed).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,12 +20,15 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
 
-  # Publishing happens only when release-please has just cut a release — i.e.
-  # when its release PR was merged. The package name comes from package.json
-  # (autopilot-ai); the GitHub release/tag is created by release-please itself.
+  # Publishing happens when release-please has just cut a release (its release
+  # PR was merged), or on a manual run. Auth is npm trusted publishing (OIDC):
+  # no npm token is stored anywhere — npm verifies this repo + this workflow
+  # file, configured on npmjs.com under the package's Settings → Trusted
+  # publishers. Provenance is attached automatically. The package name comes
+  # from package.json (autopilot-ai).
   publish:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -38,13 +43,22 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      # Trusted publishing needs npm >= 11.5.1 (Node 22 ships npm 10).
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Install
         run: npm ci
 
       - name: Build
         run: npm run build
 
-      - name: Publish to npm
-        run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (skips a version that's already published)
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm; nothing to publish."
+          else
+            npm publish --access public
+          fi
