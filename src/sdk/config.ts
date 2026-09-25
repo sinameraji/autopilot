@@ -15,10 +15,11 @@ export async function resolveSdkConfig(opts: CreateSessionOptions): Promise<Kimi
 
   // An OpenRouter key is required unless a custom OpenAI-compatible endpoint
   // is configured (KIMIFLARE_BASE_URL / config baseUrl) — with one, the
-  // host's gateway owns routing and auth.
-  if (!merged.openrouterApiKey && !resolveCustomEndpoint(merged)) {
+  // host's gateway owns routing and auth. A Requesty key also works.
+  if (!merged.openrouterApiKey && !merged.requestyApiKey && !resolveCustomEndpoint(merged)) {
     throw new Error(
       "kimiflare SDK: missing credentials. Set OPENROUTER_API_KEY (or config.openrouterApiKey), " +
+        "REQUESTY_API_KEY (or config.requestyApiKey), " +
         "or set KIMIFLARE_BASE_URL (+ KIMIFLARE_API_KEY) for a custom OpenAI-compatible endpoint.",
     );
   }

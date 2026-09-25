@@ -14,6 +14,7 @@ import {
 } from "../util/llm-dump.js";
 import { getModelOrInfer, vendorOf } from "../models/registry.js";
 import { openRouterHeaders, openRouterUrl, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
+import { requestyHeaders, requestyUrl, REQUESTY_KEYS_URL } from "../models/requesty.js";
 import { resolveCustomEndpoint, customChatCompletionsUrl, type CustomEndpoint } from "./custom-endpoint.js";
 
 export type KimiEvent =
@@ -34,6 +35,11 @@ export interface RunKimiOpts {
    * and `provider`) from config via `llmAuthFromConfig()`.
    */
   openrouterApiKey?: string;
+  /**
+   * The user's Requesty key. Used only when there is no OpenRouter key and no
+   * custom endpoint: the request then goes to Requesty's OpenAI-compatible API.
+   */
+  requestyApiKey?: string;
   /** Extra OpenRouter provider-routing preferences (config: openrouterProvider). */
   provider?: OpenRouterProviderPrefs;
   model: string;
@@ -106,8 +112,9 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
   // Custom endpoint wins over OpenRouter. The env fallback means side-call
   // paths (memory extraction, summarization, …) are rerouted too.
   const customEndpoint = opts.customEndpoint ?? resolveCustomEndpoint();
+  const requesty = !customEndpoint && !opts.openrouterApiKey && !!opts.requestyApiKey;
   const requestId = opts.requestId ?? crypto.randomUUID();
-  const { url, headers: targetHeaders } = buildKimiRequestTarget(opts, customEndpoint);
+  const { url, headers: targetHeaders } = buildKimiRequestTarget(opts, customEndpoint, requesty);
   // Per-model capability gates, from the OpenRouter catalog. OpenRouter drops
   // params a model doesn't support, but a few models reject a supported param
   // outright for non-default values (Kimi K3 only allows temperature=1).
@@ -122,8 +129,8 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
     messages: sanitizeMessagesForApi(opts.messages),
     stream: true,
   };
-  if (customEndpoint) {
-    // The host's gateway gets the plain OpenAI-shaped request.
+  if (customEndpoint || requesty) {
+    // The host's gateway (and Requesty) gets the plain OpenAI-shaped request.
     if (hasTools) Object.assign(body, { tools: opts.tools, tool_choice: "auto", parallel_tool_calls: true });
     if (supportsTemperature) body.temperature = opts.temperature ?? 0.2;
     body.max_completion_tokens = maxTokens;
@@ -262,7 +269,7 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
       const msg = err?.message ?? `HTTP ${res.status}: ${text.slice(0, 300)}`;
       const status = err?.status ?? res.status;
       const apiErr = new KimiApiError(
-        `kimiflare: ${describeHttpError(opts.model, status, msg, customEndpoint)}`,
+        `kimiflare: ${describeHttpError(opts.model, status, msg, customEndpoint, requesty)}`,
         err?.code,
         status,
       );
@@ -316,6 +323,7 @@ function describeHttpError(
   status: number,
   msg: string,
   customEndpoint: CustomEndpoint | null,
+  requesty = false,
 ): string {
   if (customEndpoint) {
     if (status === 401 || status === 403) {
@@ -327,6 +335,7 @@ function describeHttpError(
     }
     return msg;
   }
+  if (requesty) return describeRequestyHttpError(model, status, msg);
   if (status === 401) {
     return [
       `OpenRouter rejected your API key (HTTP 401): ${msg || "invalid key"}.`,
@@ -352,6 +361,32 @@ function describeHttpError(
   if (status === 404 && /model|endpoint/i.test(msg)) {
     return [
       `OpenRouter can't serve ${model} (HTTP 404): ${msg}.`,
+      ``,
+      `Pick another model with  /model .`,
+    ].join("\n");
+  }
+  return msg;
+}
+
+function describeRequestyHttpError(model: string, status: number, msg: string): string {
+  if (status === 401 || status === 403) {
+    return [
+      `Requesty refused the request (HTTP ${status}): ${msg || "invalid key"}.`,
+      ``,
+      `Check REQUESTY_API_KEY (or \`requestyApiKey\` in config); create a key at ${REQUESTY_KEYS_URL}.`,
+      `A 403 can also mean ${model} is not approved for your Requesty organization.`,
+    ].join("\n");
+  }
+  if (status === 402) {
+    return [
+      `Your Requesty balance is exhausted (HTTP 402): ${msg}.`,
+      ``,
+      `Add credits at https://app.requesty.ai, then retry.`,
+    ].join("\n");
+  }
+  if (status === 404) {
+    return [
+      `Requesty can't serve ${model} (HTTP 404): ${msg}.`,
       ``,
       `Pick another model with  /model .`,
     ].join("\n");
@@ -399,6 +434,7 @@ export function validateModelId(model: string): void {
 function buildKimiRequestTarget(
   opts: RunKimiOpts,
   customEndpoint: CustomEndpoint | null,
+  requesty: boolean,
 ): { url: string; headers: Record<string, string> } {
   // Custom OpenAI-compatible endpoint: the host app owns routing and auth.
   // The model id only rides in the JSON body on this path, so any non-empty
@@ -408,6 +444,16 @@ function buildKimiRequestTarget(
     return {
       url: customChatCompletionsUrl(customEndpoint.baseUrl),
       headers: customEndpoint.apiKey ? { Authorization: `Bearer ${customEndpoint.apiKey}` } : {},
+    };
+  }
+
+  // Requesty managed policy ids ("claude-sonnet-4-5") have no vendor
+  // prefix, so only the OpenRouter id shape is validated.
+  if (requesty && opts.requestyApiKey) {
+    if (!opts.model) throw new KimiApiError(`Invalid model ID: ${opts.model}`, 400);
+    return {
+      url: requestyUrl("chat/completions"),
+      headers: requestyHeaders(opts.requestyApiKey),
     };
   }
 

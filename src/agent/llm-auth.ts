@@ -16,18 +16,24 @@ import { resolveCustomEndpoint, type CustomEndpoint } from "./custom-endpoint.js
 export interface LlmAuth {
   /** The user's OpenRouter key. */
   openrouterApiKey?: string;
+  /** The user's Requesty key; used only when there is no OpenRouter key or custom endpoint. */
+  requestyApiKey?: string;
   /** Host-app broker endpoint; when set, used instead of OpenRouter. */
   customEndpoint?: CustomEndpoint;
   /** Extra OpenRouter provider-routing preferences. */
   provider?: OpenRouterProviderPrefs;
 }
 
-type AuthConfigFields = Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider">;
+type AuthConfigFields = Pick<
+  KimiConfig,
+  "openrouterApiKey" | "requestyApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"
+>;
 
 export function llmAuthFromConfig(cfg: Partial<AuthConfigFields> | null | undefined): LlmAuth {
   const customEndpoint = resolveCustomEndpoint(cfg ?? null);
   return {
     ...(cfg?.openrouterApiKey ? { openrouterApiKey: cfg.openrouterApiKey } : {}),
+    ...(cfg?.requestyApiKey ? { requestyApiKey: cfg.requestyApiKey } : {}),
     ...(customEndpoint ? { customEndpoint } : {}),
     ...(cfg?.openrouterProvider ? { provider: cfg.openrouterProvider } : {}),
   };
@@ -35,5 +41,10 @@ export function llmAuthFromConfig(cfg: Partial<AuthConfigFields> | null | undefi
 
 /** True when model calls can be made at all (a key, or a custom endpoint). */
 export function hasLlmAuth(auth: LlmAuth): boolean {
-  return !!auth.openrouterApiKey || !!auth.customEndpoint;
+  return !!auth.openrouterApiKey || !!auth.customEndpoint || !!auth.requestyApiKey;
+}
+
+/** True when model calls go to Requesty: a Requesty key, and no OpenRouter key or custom endpoint. */
+export function usesRequesty(auth: LlmAuth): boolean {
+  return !!auth.requestyApiKey && !auth.openrouterApiKey && !auth.customEndpoint;
 }

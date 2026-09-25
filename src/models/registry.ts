@@ -116,6 +116,11 @@ let userOverrides: Map<string, ModelEntry> = new Map();
 /** Live OpenRouter catalog, populated by `registerOpenRouterModels()` (see openrouter-catalog.ts).
  *  Empty until that's called; registry.ts itself does no network I/O. */
 let openRouterIndex: Map<string, ModelEntry> = new Map();
+/** Live Requesty catalog, populated by `registerRequestyModels()` (see requesty-catalog.ts).
+ *  Only loaded when Requesty is the configured gateway. */
+let requestyIndex: Map<string, ModelEntry> = new Map();
+/** Requesty managed policy ids, in catalog order: the picker's default list on Requesty. */
+let requestyFeatured: string[] = [];
 
 /** Register or replace entries from a user-supplied config (e.g. ~/.kimiflare/models.json). */
 export function registerUserModels(entries: ModelEntry[]): void {
@@ -137,6 +142,13 @@ export function registerOpenRouterModels(entries: ModelEntry[]): void {
   );
 }
 
+/** Register or replace the live Requesty catalog (see `loadRequestyCatalog()`).
+ *  `featured` lists the managed policy ids shown before any search. */
+export function registerRequestyModels(entries: ModelEntry[], featured: string[] = []): void {
+  requestyIndex = new Map(entries.map((m) => [m.id, m]));
+  requestyFeatured = featured.filter((id) => requestyIndex.has(id));
+}
+
 /** True once a live (or cached) OpenRouter catalog has been registered. */
 export function hasOpenRouterCatalog(): boolean {
   return openRouterIndex.size > 0;
@@ -144,7 +156,7 @@ export function hasOpenRouterCatalog(): boolean {
 
 /** Look up a model by id. Returns undefined for unknown models. */
 export function getModel(id: string): ModelEntry | undefined {
-  return userOverrides.get(id) ?? openRouterIndex.get(id) ?? seedIndex.get(id);
+  return userOverrides.get(id) ?? openRouterIndex.get(id) ?? requestyIndex.get(id) ?? seedIndex.get(id);
 }
 
 /** Look up a model, falling back to a generic entry for ids not in the catalog. */
@@ -163,8 +175,11 @@ export function getModelOrInfer(id: string): ModelEntry {
 }
 
 export function listModels(): ModelEntry[] {
-  const out = new Map(seedIndex);
+  // The seed ids are OpenRouter ids; a Requesty-only catalog can't serve them.
+  const requestyOnly = requestyIndex.size > 0 && openRouterIndex.size === 0;
+  const out = new Map(requestyOnly ? [] : seedIndex);
   for (const [k, v] of openRouterIndex) out.set(k, v);
+  for (const [k, v] of requestyIndex) out.set(k, v);
   for (const [k, v] of userOverrides) out.set(k, v);
   return [...out.values()];
 }
@@ -259,5 +274,11 @@ export function featuredModels(
     out.push(m);
     if (out.length >= limit) break;
   }
-  return out.length > 0 ? out : SEED.filter((s) => models.some((m) => m.id === s.id));
+  if (out.length > 0) return out;
+  // Requesty publishes no benchmark scores: show its managed policies instead.
+  if (requestyFeatured.length > 0) {
+    const tools = models.filter((m) => m.supports.tools && requestyFeatured.includes(m.id));
+    if (tools.length > 0) return tools.slice(0, limit);
+  }
+  return SEED.filter((s) => models.some((m) => m.id === s.id));
 }

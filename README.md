@@ -130,6 +130,27 @@ The same pair can be persisted in `~/.config/kimiflare/config.json` as `baseUrl`
 - Model ids pass through in the request body unchanged; your endpoint owns provider dispatch.
 - Cost is the local estimate only — your endpoint does its own metering.
 
+### Requesty (optional)
+
+[Requesty](https://requesty.ai) is another OpenAI-compatible gateway you can use with your own key
+instead of OpenRouter. It is opt-in: it is only used when no OpenRouter key and no custom endpoint
+are configured, so an existing setup never changes.
+
+```sh
+export REQUESTY_API_KEY="<your key>"   # from https://app.requesty.ai/api-keys
+autopilot                              # or: autopilot auth requesty (checks and saves the key)
+autopilot -p "..." -m openai/gpt-4o-mini
+```
+
+- The key can also live in `~/.config/kimiflare/config.json` as `requestyApiKey` (the env var wins).
+- `REQUESTY_BASE_URL` picks a region, e.g. `https://router.eu.requesty.ai/v1` for the EU.
+- `/model` lists Requesty's managed policies first (short ids such as `kimi-k2.6` or
+  `claude-sonnet-4-5`), then its full `vendor/model` catalog. Both kinds of id work.
+- Defaults on Requesty: `kimi-k2.6` for the main model, `deepseek-v4-flash` for side calls, and
+  `openai/text-embedding-3-small` for memory embeddings.
+- Cost per turn is the one Requesty reports inline. `/key` shows whether the key is valid; OpenRouter
+  only features (browser sign in, `/key set`, the billed cost lookup) are not available.
+
 ### One-shot mode
 
 ```sh
@@ -188,6 +209,9 @@ OpenRouter key is required. Resolved in this priority order:
 1. **Explicit `config` object** (`openrouterApiKey`) — recommended for apps
 2. **Environment variables**: `OPENROUTER_API_KEY` / `KIMIFLARE_OPENROUTER_KEY`
 3. **Config file**: `~/.config/kimiflare/config.json`
+
+A [Requesty](#requesty-optional) key (`requestyApiKey` in `config`, or `REQUESTY_API_KEY`) also works
+when no OpenRouter key is set; pass a Requesty model id such as `openai/gpt-4o-mini` as `model`.
 
 Pass `provider` in `createAgentSession` options to set OpenRouter provider-routing preferences for that session.
 

@@ -1,5 +1,5 @@
 import { Command, Option } from "commander";
-import { loadConfig, DEFAULT_MODEL } from "./config.js";
+import { loadConfig, DEFAULT_MODEL, type KimiConfig } from "./config.js";
 import { resolveLspConfig } from "./util/lsp-config.js";
 import { checkForUpdate } from "./util/update-check.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
@@ -162,6 +162,34 @@ program
       }),
   )
   .addCommand(
+    new Command("requesty")
+      .description(
+        "Save a Requesty API key (used when no OpenRouter key is configured). For headless setups, REQUESTY_API_KEY works too.",
+      )
+      .argument("[key]", "an existing Requesty key to save instead of pasting one")
+      .action(async (keyArg: string | undefined) => {
+        const { checkRequestyKey, REQUESTY_KEYS_URL } = await import("./models/requesty.js");
+        const { patchPersistedConfig } = await import("./config.js");
+        let key = keyArg?.trim();
+        if (!key) {
+          console.log(`Create a key at ${REQUESTY_KEYS_URL}, then paste it here.`);
+          key = (await promptHidden("Requesty API key: ")).trim();
+        }
+        if (!key) {
+          console.error("No key entered.");
+          process.exit(1);
+        }
+        const res = await checkRequestyKey(key);
+        if (!res.ok) {
+          console.error(res.reason === "invalid" ? "Requesty rejected this key." : `Couldn't verify the key: ${res.message}`);
+          process.exit(1);
+        }
+        const savedTo = await patchPersistedConfig({ requestyApiKey: key });
+        console.log("✓ Connected to Requesty");
+        console.log(`Saved to ${savedTo}. Run \`autopilot\` to start.`);
+      }),
+  )
+  .addCommand(
     new Command("github")
       .description("Authenticate with GitHub via OAuth device flow")
       .action(async () => {
@@ -189,8 +217,7 @@ program
       console.error("autopilot serve: no OpenRouter API key — set OPENROUTER_API_KEY or run `autopilot auth openrouter`.");
       process.exit(2);
     }
-    const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
-    await ensureOpenRouterCatalog();
+    await ensureModelCatalog(cfg);
     const { startServer } = await import("./server/index.js");
     await startServer({
       port: cmdOpts.port,
@@ -258,8 +285,8 @@ async function main() {
   // key needed) so context windows, pricing, capability gates and the model
   // picker reflect every model OpenRouter serves. Never blocks startup on a
   // network failure — the registry falls back to its seed list.
-  const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
-  await ensureOpenRouterCatalog();
+  // Requesty's catalog is loaded instead when Requesty is the gateway.
+  await ensureModelCatalog(cfg);
 
   if (opts.cloud) {
     console.error("autopilot: --cloud ignored — KimiFlare Cloud was retired; autopilot runs on your own OpenRouter key.");
@@ -310,7 +337,8 @@ async function main() {
           "Set OPENROUTER_API_KEY (create a key at https://openrouter.ai/keys), run\n" +
           "  autopilot auth openrouter\n" +
           "or write it to ~/.config/kimiflare/config.json (chmod 600):\n" +
-          `  { "openrouterApiKey": "sk-or-...", "model": "${DEFAULT_MODEL}" }`,
+          `  { "openrouterApiKey": "sk-or-...", "model": "${DEFAULT_MODEL}" }\n` +
+          "To use Requesty instead, set REQUESTY_API_KEY or run  autopilot auth requesty",
       );
       process.exit(2);
     }
@@ -395,6 +423,22 @@ async function main() {
 
 
 /** Read a line from the terminal without echoing it (for secrets). */
+/**
+ * Load the model catalog of the gateway in use (cache-first, 6h TTL; public
+ * endpoints, no key needed). Requesty's catalog only when Requesty is the
+ * configured gateway; OpenRouter's otherwise.
+ */
+async function ensureModelCatalog(cfg: KimiConfig | null): Promise<void> {
+  const { llmAuthFromConfig, usesRequesty } = await import("./agent/llm-auth.js");
+  if (cfg && usesRequesty(llmAuthFromConfig(cfg))) {
+    const { ensureRequestyCatalog } = await import("./models/requesty-catalog.js");
+    await ensureRequestyCatalog();
+    return;
+  }
+  const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
+  await ensureOpenRouterCatalog();
+}
+
 async function promptHidden(question: string): Promise<string> {
   const { createInterface } = await import("node:readline");
   const { Writable } = await import("node:stream");

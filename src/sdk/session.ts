@@ -16,8 +16,9 @@ import { saveSession, loadSession, makeSessionId, sessionsDir } from "../session
 import type { SessionFile } from "../sessions.js";
 import { recordUsage } from "../usage-tracker.js";
 import type { OpenRouterProviderPrefs } from "../agent/client.js";
-import { llmAuthFromConfig } from "../agent/llm-auth.js";
+import { llmAuthFromConfig, usesRequesty } from "../agent/llm-auth.js";
 import { ensureOpenRouterCatalog } from "../models/openrouter-catalog.js";
+import { ensureRequestyCatalog } from "../models/requesty-catalog.js";
 import { resolveCustomEndpoint } from "../agent/custom-endpoint.js";
 import { logger } from "../util/logger.js";
 import { resolveSdkConfig } from "./config.js";
@@ -31,7 +32,8 @@ export async function createAgentSession(
   const config = await resolveSdkConfig(opts);
   // Model capabilities/pricing come from OpenRouter's catalog (cached on disk,
   // refreshed every 6h; a failed fetch falls back to the cache or seed list).
-  if (!resolveCustomEndpoint(config)) await ensureOpenRouterCatalog();
+  if (usesRequesty(llmAuthFromConfig(config))) await ensureRequestyCatalog();
+  else if (!resolveCustomEndpoint(config)) await ensureOpenRouterCatalog();
   const cwd = resolve(opts.cwd ?? process.cwd());
   const tools = opts.tools ?? ALL_TOOLS;
   // M6.1: SDK consumers opt in to hooks via `opts.enableHooks` (default

@@ -11,6 +11,7 @@ export interface ContinuationSummaryOpts {
   messages: ChatMessage[];
   mode: Mode;
   openrouterApiKey?: string;
+  requestyApiKey?: string;
   customEndpoint?: CustomEndpoint;
   model: string;
   provider?: OpenRouterProviderPrefs;
@@ -125,6 +126,7 @@ async function gatherMemoryEvidence(
 
 async function runKimiText(opts: {
   openrouterApiKey?: string;
+  requestyApiKey?: string;
   customEndpoint?: CustomEndpoint;
   model: string;
   provider?: OpenRouterProviderPrefs;
@@ -134,6 +136,7 @@ async function runKimiText(opts: {
 }): Promise<string> {
   const events = runKimi({
     openrouterApiKey: opts.openrouterApiKey,
+    requestyApiKey: opts.requestyApiKey,
     customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: opts.messages,
@@ -190,6 +193,7 @@ export async function generateContinuationSummary(
 
   const summary = await runKimiText({
     openrouterApiKey: opts.openrouterApiKey,
+    requestyApiKey: opts.requestyApiKey,
     customEndpoint: opts.customEndpoint,
     model: opts.model,
     provider: opts.provider,
