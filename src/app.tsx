@@ -603,7 +603,7 @@ function App({
           {
             kind: "info",
             key: mkKey(),
-            text: "run:  npm update -g kimiflare  then restart",
+            text: "run:  npm i -g autopilot-ai@latest  then restart",
           },
         ]);
       }
@@ -628,7 +628,7 @@ function App({
           {
             kind: "info",
             key: mkKey(),
-            text: "run:  npm update -g kimiflare  then restart",
+            text: "run:  npm i -g autopilot-ai@latest  then restart",
           },
         ]);
       }
@@ -693,7 +693,7 @@ function App({
               {
                 kind: "info",
                 key: mkKey(),
-                text: "run:  npm update -g kimiflare  then restart",
+                text: "run:  npm i -g autopilot-ai@latest  then restart",
               },
             ]);
           }

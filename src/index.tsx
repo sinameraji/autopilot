@@ -11,7 +11,7 @@ import type { PrintFormat } from "./print-mode.js";
 
 const program = new Command();
 program
-  .name("kimiflare")
+  .name("autopilot")
   .description("Terminal coding agent. Runs any OpenRouter model with your own OpenRouter key.")
   .version(getAppVersion())
   .option("-p, --print <prompt>", "one-shot mode: send prompt, stream reply to stdout, exit")
@@ -34,7 +34,7 @@ program
   .option("--format <mode>", "output format for print mode: text (default), json, stream-json")
   .option("--dir <path>", "run in the specified directory instead of the current one (print mode only)")
   .option("--title <title>", "override the auto-generated session title (print mode only)")
-  .option("--attach <url>", "attach to a running kimiflare serve instance (print mode only)");
+  .option("--attach <url>", "attach to a running autopilot serve instance (print mode only)");
 
 program
   .command("cost")
@@ -52,7 +52,7 @@ program
     const cfg = await loadConfig();
     if (cmdOpts.verify) {
       if (!cfg?.openrouterApiKey) {
-        console.error("kimiflare cost --verify needs your OpenRouter key (OPENROUTER_API_KEY or `kimiflare auth openrouter`).");
+        console.error("autopilot cost --verify needs your OpenRouter key (OPENROUTER_API_KEY or `autopilot auth openrouter`).");
         process.exit(2);
       }
       const { pickSession, verifySession, formatVerifyReport } = await import("./cost-verify.js");
@@ -70,7 +70,7 @@ program
     if (!enabled) {
       console.error(
         "Cost attribution is disabled. Enable it with:\n" +
-          "  KIMI_COST_ATTRIBUTION=1 kimiflare cost\n" +
+          "  KIMI_COST_ATTRIBUTION=1 autopilot cost\n" +
           "Or add costAttribution: true to ~/.config/kimiflare/config.json",
       );
       process.exit(1);
@@ -88,7 +88,7 @@ const logsCmd = program
 
 logsCmd
   .command("path")
-  .description("Print today's log file path. Useful for tailing: tail -f $(kimiflare logs path) | jq")
+  .description("Print today's log file path. Useful for tailing: tail -f $(autopilot logs path) | jq")
   .action(async () => {
     const { logPathFor } = await import("./util/log-sink.js");
     console.log(logPathFor());
@@ -115,7 +115,7 @@ program
   .command("resume")
   .description("Resume is temporarily unavailable while Camouflage UI access is disabled.")
   .action(async () => {
-    console.error("kimiflare resume: temporarily unavailable. Camouflage UI access is disabled.");
+    console.error("autopilot resume: temporarily unavailable. Camouflage UI access is disabled.");
     process.exit(2);
   });
 
@@ -174,7 +174,7 @@ program
   .action(async (cmdOpts) => {
     const cfg = await loadConfig();
     if (!cfg) {
-      console.error("kimiflare serve: no OpenRouter API key — set OPENROUTER_API_KEY or run `kimiflare auth openrouter`.");
+      console.error("autopilot serve: no OpenRouter API key — set OPENROUTER_API_KEY or run `autopilot auth openrouter`.");
       process.exit(2);
     }
     const { ensureOpenRouterCatalog } = await import("./models/openrouter-catalog.js");
@@ -250,7 +250,7 @@ async function main() {
   await ensureOpenRouterCatalog();
 
   if (opts.cloud) {
-    console.error("kimiflare: --cloud ignored — KimiFlare Cloud was retired; kimiflare now runs on your own OpenRouter key.");
+    console.error("autopilot: --cloud ignored — KimiFlare Cloud was retired; autopilot runs on your own OpenRouter key.");
   }
 
   if (opts.mode === "rpc") {
@@ -267,13 +267,13 @@ async function main() {
   if (opts.emitEvents) {
     if (opts.print === undefined) {
       console.error(
-        "kimiflare: --emit-events requires -p \"<prompt>\" (one-shot mode).\n" +
+        "autopilot: --emit-events requires -p \"<prompt>\" (one-shot mode).\n" +
           "Multi-turn stdin-driven emit mode is not yet implemented.",
       );
       process.exit(2);
     }
     if (!cfg) {
-      console.error("kimiflare: --emit-events requires credentials.");
+      console.error("autopilot: --emit-events requires credentials.");
       process.exit(2);
     }
     const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
@@ -294,9 +294,9 @@ async function main() {
   if (opts.print !== undefined) {
     if (!cfg) {
       console.error(
-        "kimiflare: no OpenRouter API key configured.\n" +
+        "autopilot: no OpenRouter API key configured.\n" +
           "Set OPENROUTER_API_KEY (create a key at https://openrouter.ai/keys), run\n" +
-          "  kimiflare auth openrouter\n" +
+          "  autopilot auth openrouter\n" +
           "or write it to ~/.config/kimiflare/config.json (chmod 600):\n" +
           `  { "openrouterApiKey": "sk-or-...", "model": "${DEFAULT_MODEL}" }`,
       );
@@ -305,7 +305,7 @@ async function main() {
     const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
     const format = (opts.format ?? "text") as PrintFormat;
     if (format !== "text" && format !== "json" && format !== "stream-json") {
-      console.error(`kimiflare: invalid --format "${format}". Use: text, json, stream-json`);
+      console.error(`autopilot: invalid --format "${format}". Use: text, json, stream-json`);
       process.exit(2);
     }
 
@@ -347,7 +347,7 @@ async function main() {
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error(
-      "kimiflare: interactive mode requires a TTY. Use `kimiflare -p \"...\"` for non-TTY / piped usage.",
+      "autopilot: interactive mode requires a TTY. Use `autopilot -p \"...\"` for non-TTY / piped usage.",
     );
     process.exit(2);
   }

@@ -184,7 +184,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   if (opts.updateResult.hasUpdate) {
     process.stderr.write(
       `\x1b[33mkimiflare update available: ${opts.updateResult.localVersion} → ${opts.updateResult.latestVersion}\x1b[0m\n` +
-        `\x1b[33m  npm update -g kimiflare  then restart\x1b[0m\n\n`,
+        `\x1b[33m  npm i -g autopilot-ai@latest  then restart\x1b[0m\n\n`,
     );
   }
 
@@ -244,7 +244,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     }
   }
 
-  // Usage is recorded like the TUI does, so `kimiflare cost` and /cost see
+  // Usage is recorded like the TUI does, so `autopilot cost` and /cost see
   // headless runs too. Writes are awaited before exit.
   const usageWrites: Promise<void>[] = [];
   const auth = llmAuthFromConfig(opts);

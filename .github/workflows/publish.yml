@@ -30,8 +30,9 @@ jobs:
       - name: Check if publish is needed
         id: check
         run: |
+          NAME=$(node -p "require('./package.json').name")
           LOCAL=$(node -p "require('./package.json').version")
-          REMOTE=$(npm view kimiflare version 2>/dev/null || echo "0.0.0")
+          REMOTE=$(npm view "$NAME" version 2>/dev/null || echo "0.0.0")
           echo "local=$LOCAL"  >> "$GITHUB_OUTPUT"
           echo "remote=$REMOTE" >> "$GITHUB_OUTPUT"
           if [ "$LOCAL" != "$REMOTE" ]; then

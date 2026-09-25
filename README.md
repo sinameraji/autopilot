@@ -1,9 +1,9 @@
 <h1 align="center">autopilot <sub>(formerly kimiflare)</sub></h1>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/kimiflare"><img src="https://img.shields.io/npm/v/kimiflare?style=flat-square&color=cb3837" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/kimiflare"><img src="https://img.shields.io/npm/dm/kimiflare?style=flat-square&color=cb3837" alt="npm downloads"></a>
-  <a href="https://github.com/sinameraji/kimiflare/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sinameraji/kimiflare?style=flat-square&color=2ea44f" alt="license"></a>
+  <a href="https://www.npmjs.com/package/autopilot-ai"><img src="https://img.shields.io/npm/v/autopilot-ai?style=flat-square&color=cb3837" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/autopilot-ai"><img src="https://img.shields.io/npm/dm/autopilot-ai?style=flat-square&color=cb3837" alt="npm downloads"></a>
+  <a href="https://github.com/sinameraji/autopilot/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sinameraji/autopilot?style=flat-square&color=2ea44f" alt="license"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/typescript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
   <a href="https://openrouter.ai"><img src="https://img.shields.io/badge/runs%20on-OpenRouter-6566f1?style=flat-square" alt="Runs on OpenRouter"></a>
@@ -20,7 +20,7 @@ KimiFlare sends every model call to **[OpenRouter](https://openrouter.ai)** usin
 
 - **Any model, one key.** The model picker is OpenRouter's live catalog — Claude, GPT, Gemini, Grok, Qwen, GLM, Kimi, DeepSeek, free models and more — opening on the best & latest by benchmark score, with fuzzy search over everything. Switch any time with `/model`.
 - **Real cost, per turn.** OpenRouter reports what each generation actually cost; the status bar shows it (a local estimate marked `≈$` only until the billed number arrives). `/cost` totals it by session, day, month and all time.
-- **Reliable tool calling.** Requests only go to upstream providers that support every parameter kimiflare sends (tools above all), and OpenRouter routes tool-calling traffic to the providers with the best tool-call success rates. The status bar shows which provider served the last turn.
+- **Reliable tool calling.** Requests only go to upstream providers that support every parameter autopilot sends (tools above all), and OpenRouter routes tool-calling traffic to the providers with the best tool-call success rates. The status bar shows which provider served the last turn.
 - **Prompt caching that stays warm.** Each session pins to one upstream provider (OpenRouter sticky routing), so the long, stable prompt prefix keeps hitting the provider's cache across turns.
 
 ## What to remember
@@ -46,22 +46,24 @@ KimiFlare sends every model call to **[OpenRouter](https://openrouter.ai)** usin
 - **Hard-stop loop guardrail** — Stops token-burning cycles when all tools in a turn are blocked.
 - **Headless SDK** — Programmatic `createAgentSession` API and JSONL-over-stdio RPC mode for building on top of KimiFlare.
 
-See the full changelog at [github.com/sinameraji/kimiflare/releases](https://github.com/sinameraji/kimiflare/releases).
+See the full changelog at [github.com/sinameraji/autopilot/releases](https://github.com/sinameraji/autopilot/releases).
 
 ## Quick start
 
 ```sh
-npm install -g kimiflare
-kimiflare
+npm install -g autopilot-ai
+autopilot
 ```
 
-On first run kimiflare asks for your OpenRouter API key (create one at <https://openrouter.ai/keys>) and a model. That's it.
+On first run autopilot asks for your OpenRouter API key (create one at <https://openrouter.ai/keys>) and a model. That's it.
 
 Or run without installing:
 
 ```sh
-npx kimiflare
+npx autopilot-ai
 ```
+
+> **Coming from `kimiflare`?** The package was renamed. Run `npm uninstall -g kimiflare && npm install -g autopilot-ai` and use `autopilot` instead of `kimiflare`. Your settings, sessions, memory and cost history are kept (they stay in `~/.config/kimiflare` and `~/.local/share/kimiflare`), and `KIMIFLARE_*` environment variables still work.
 
 Requires Node.js ≥ 20.
 
@@ -70,7 +72,7 @@ Requires Node.js ≥ 20.
 Three ways to provide it — the first one found wins:
 
 1. **Environment:** `OPENROUTER_API_KEY` (or `KIMIFLARE_OPENROUTER_KEY`). With this set, the setup screen never appears — the way to run kimiflare headless (CI, a VM, a container).
-2. **Setup screen / CLI:** paste it on first run, or run `kimiflare auth openrouter` (prompts without echo, validates, saves). Inside the TUI, `/key set <key>` replaces it.
+2. **Setup screen / CLI:** paste it on first run, or run `autopilot auth openrouter` (prompts without echo, validates, saves). Inside the TUI, `/key set <key>` replaces it.
 3. **Config file:** `"openrouterApiKey": "sk-or-…"` in `~/.config/kimiflare/config.json` (created with mode 600).
 
 `/key` shows which key is in use, what it has spent and how much credit is left. Model calls — including memory embeddings and small internal side-calls (summaries, memory extraction) — are all billed to this key.
@@ -84,7 +86,7 @@ Earlier kimiflare versions ran on Cloudflare Workers AI / AI Gateway. On the fir
 - Your settings (theme, MCP/LSP servers, hooks, memory, sessions, cost history) carry over.
 - Model ids are migrated (`@cf/moonshotai/kimi-k2.6` → `moonshotai/kimi-k2.6`, and so on), and the retired Cloudflare fields (OAuth login, gateway, Unified Billing, provider keys) are removed from `config.json`.
 - Memory keeps working unchanged: embeddings use the same `bge-base-en-v1.5` model, now via OpenRouter.
-- `/gateway`, `kimiflare auth cloudflare`, `--cloud` and the Cloud-only commands are gone. `/multi-agent` (Commute) still deploys to your Cloudflare account and keeps using `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` for that.
+- `/gateway`, `autopilot auth cloudflare`, `--cloud` and the Cloud-only commands are gone. `/multi-agent` (Commute) still deploys to your Cloudflare account and keeps using `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` for that.
 
 ### Model
 
@@ -94,12 +96,12 @@ You pick the model on first run, and can switch any time with `/model`. The pick
 /model moonshotai/kimi-k3          # 1M context
 /model anthropic/claude-sonnet-5
 /model deepseek/deepseek-v4-flash
-kimiflare -m moonshotai/kimi-k2.7-code -p "..."
+autopilot -m moonshotai/kimi-k2.7-code -p "..."
 ```
 
 Any OpenRouter model id works, including variants like `:free` and `:nitro`. Models OpenRouter lists without tool calling are hidden from the picker — a coding agent needs tools.
 
-**Provider routing (optional).** OpenRouter serves most models through several upstream providers. kimiflare always requires providers that support every parameter it sends, and otherwise leaves routing to OpenRouter (price-weighted, uptime-aware, tool-calling quality first, sticky per session for caching). To steer it, add an `openrouterProvider` object to the config file — any of OpenRouter's [provider preferences](https://openrouter.ai/docs/guides/routing/provider-selection):
+**Provider routing (optional).** OpenRouter serves most models through several upstream providers. autopilot always requires providers that support every parameter it sends, and otherwise leaves routing to OpenRouter (price-weighted, uptime-aware, tool-calling quality first, sticky per session for caching). To steer it, add an `openrouterProvider` object to the config file — any of OpenRouter's [provider preferences](https://openrouter.ai/docs/guides/routing/provider-selection):
 
 ```json
 { "openrouterProvider": { "ignore": ["SomeProvider"], "data_collection": "deny" } }
@@ -111,12 +113,12 @@ Avoid `order` / `sort` unless you need them: they turn off sticky routing, which
 
 Point every model call at your own OpenAI-compatible endpoint instead of OpenRouter — useful when a
 host application (CI, an agents platform, a container) fronts model access with its own broker and
-doesn't want to hand kimiflare a raw provider key:
+doesn't want to hand autopilot a raw provider key:
 
 ```sh
 export KIMIFLARE_BASE_URL="https://your-broker.example.com/v1"  # /chat/completions is appended
 export KIMIFLARE_API_KEY="<bearer for that endpoint>"           # optional; header omitted if unset
-kimiflare -p "..."        # or --mode rpc — no OpenRouter key needed
+autopilot -p "..."        # or --mode rpc — no OpenRouter key needed
 ```
 
 The same pair can be persisted in `~/.config/kimiflare/config.json` as `baseUrl` / `apiKey`
@@ -131,9 +133,9 @@ The same pair can be persisted in `~/.config/kimiflare/config.json` as `baseUrl`
 ### One-shot mode
 
 ```sh
-kimiflare -p "summarize PLAN.md"                    # stream answer to stdout
-kimiflare -p "..." --dangerously-allow-all          # auto-approve mutating tools (for scripts)
-kimiflare -p "..." --reasoning                      # include chain-of-thought in stderr
+autopilot -p "summarize PLAN.md"                    # stream answer to stdout
+autopilot -p "..." --dangerously-allow-all          # auto-approve mutating tools (for scripts)
+autopilot -p "..." --reasoning                      # include chain-of-thought in stderr
 ```
 
 ### Headless SDK
@@ -141,7 +143,7 @@ kimiflare -p "..." --reasoning                      # include chain-of-thought i
 Use KimiFlare programmatically from your own application — no TUI required.
 
 ```ts
-import { createAgentSession } from "kimiflare/sdk";
+import { createAgentSession } from "autopilot-ai/sdk";
 
 const { session } = await createAgentSession({
   cwd: "/path/to/project",
@@ -192,9 +194,9 @@ Pass `provider` in `createAgentSession` options to set OpenRouter provider-routi
 **For Electron / desktop apps**, we recommend storing the key in the OS keychain (e.g. Electron `safeStorage` or `keytar`) and passing it explicitly:
 
 ```ts
-import { createAgentSession } from "kimiflare/sdk";
+import { createAgentSession } from "autopilot-ai/sdk";
 
-const openrouterApiKey = await keytar.getPassword("kimiflare", "openrouter");
+const openrouterApiKey = await keytar.getPassword("autopilot", "openrouter");
 
 const { session } = await createAgentSession({
   cwd: projectPath,
@@ -207,7 +209,7 @@ const { session } = await createAgentSession({
 If you need process isolation or a non-Node consumer, run KimiFlare in JSONL-over-stdio RPC mode:
 
 ```sh
-node bin/kimiflare.mjs --mode rpc
+node bin/autopilot.mjs --mode rpc
 ```
 
 Give the subprocess `OPENROUTER_API_KEY` — or a [custom gateway endpoint](#custom-gateway-endpoint)
@@ -216,7 +218,7 @@ Give the subprocess `OPENROUTER_API_KEY` — or a [custom gateway endpoint](#cus
 ```ts
 import { spawn } from "node:child_process";
 
-const proc = spawn("npx", ["kimiflare", "--mode", "rpc"], {
+const proc = spawn("npx", ["autopilot-ai", "--mode", "rpc"], {
   cwd: projectPath,
   stdio: ["pipe", "pipe", "pipe"],
 });
@@ -247,7 +249,7 @@ proc.stdin.write(JSON.stringify({ type: "new_session", sessionId: "sdk-session-�
 ### Image understanding
 
 ```sh
-kimiflare
+autopilot
 › fix the layout bug in this screenshot docs/bug.png
 › convert this mockup design.png to Tailwind HTML
 ```
@@ -296,16 +298,16 @@ request/response payloads locally for debugging, run with
 [OpenRouter activity log](https://openrouter.ai/activity).
 
 ```sh
-kimiflare logs path             # today's file
-kimiflare logs dir              # log directory
-kimiflare logs prune            # delete files older than 7 days
+autopilot logs path             # today's file
+autopilot logs dir              # log directory
+autopilot logs prune            # delete files older than 7 days
 
 # Tail this session's activity, formatted:
-tail -f $(kimiflare logs path) | jq
+tail -f $(autopilot logs path) | jq
 
 # Find the slowest tool calls in the last day:
 jq -r 'select(.event == "tool:end") | "\(.data.duration_ms)\t\(.data.tool)"' \
-  $(kimiflare logs path) | sort -rn | head
+  $(autopilot logs path) | sort -rn | head
 ```
 
 Disable the file sink entirely with `KIMIFLARE_LOG_SINK=off`. The
@@ -360,7 +362,7 @@ surfaces the hook's stdout as the rejection reason.
 
 ```text
 /hooks                            # list configured hooks
-/hooks recommended                # list starter hooks shipped with kimiflare
+/hooks recommended                # list starter hooks shipped with autopilot
 /hooks enable stop-bell           # enable one (writes to .kimiflare/settings.json)
 /hooks enable stop-bell global    # ...or the global file
 /hooks disable stop-bell
@@ -411,7 +413,7 @@ Per-hook fields:
 - `description` (optional) — shown by `/hooks list`.
 
 Hooks are always-on infrastructure: they fire whether the TUI is open
-or kimiflare is running in `--print` mode. They also fire for tool
+or autopilot is running in `--print` mode. They also fire for tool
 calls generated from inside the Code Mode sandbox (heavy-tier turns),
 because hook firing lives on the `ToolExecutor` itself — every call
 path uses the same plumbing.
@@ -428,8 +430,8 @@ not the TUI.
 ## Development
 
 ```sh
-git clone https://github.com/sinameraji/kimiflare
-cd kimiflare
+git clone https://github.com/sinameraji/autopilot
+cd autopilot
 npm install
 npm run build
 npm link
@@ -452,4 +454,4 @@ Scripts:
 
 ---
 
-Built by [Sina Meraji](https://github.com/sinameraji) and [contributors](https://github.com/sinameraji/kimiflare/graphs/contributors) · MIT License
+Built by [Sina Meraji](https://github.com/sinameraji) and [contributors](https://github.com/sinameraji/autopilot/graphs/contributors) · MIT License

@@ -21,7 +21,7 @@ export async function startRemoteSession(opts: StartRemoteSessionOpts): Promise<
 
   const githubToken = opts.cfg.githubOAuthToken;
   if (!githubToken) {
-    throw new Error("GitHub token not found. Run `kimiflare auth github` first.");
+    throw new Error("GitHub token not found. Run `autopilot auth github` first.");
   }
 
   const res = await fetch(`${workerUrl}/remote/start`, {

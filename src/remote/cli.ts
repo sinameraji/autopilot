@@ -27,7 +27,7 @@ export function createRemoteCommand(): Command {
       console.log(`  wrangler auth:   ${status.wranglerAuth ? "yes" : "no"}`);
       console.log(`  Docker:          ${status.docker ? "yes" : "no"}`);
       console.log(`  Worker URL:      ${status.workerUrl ?? "not deployed"}`);
-      console.log("\nRun `kimiflare remote deploy` to deploy.");
+      console.log("\nRun `autopilot remote deploy` to deploy.");
     });
 
   remote
