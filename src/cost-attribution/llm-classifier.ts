@@ -5,6 +5,7 @@
 
 import type { TaskCategory, TaskCategorization } from "./types.js";
 import { ALL_CATEGORIES } from "./types.js";
+import { DEFAULT_PLUMBING_MODEL } from "../config.js";
 
 interface LlmClassifierDeps {
   runLlm: (prompt: string, model: string) => Promise<string>;
@@ -30,7 +31,7 @@ export async function classifyWithLlm(
   input: ClassifyWithLlmInput,
   deps: LlmClassifierDeps,
 ): Promise<TaskCategorization> {
-  const model = deps.model ?? "@cf/moonshotai/kimi-k2.5";
+  const model = deps.model ?? DEFAULT_PLUMBING_MODEL;
 
   const toolSummary = Object.entries(input.toolCounts)
     .map(([k, v]) => `${k}=${v}`)

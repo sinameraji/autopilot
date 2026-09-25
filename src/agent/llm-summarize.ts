@@ -1,15 +1,16 @@
 import { runKimi } from "./client.js";
-import type { AiGatewayOptions } from "./client.js";
+import type { OpenRouterProviderPrefs } from "./client.js";
+import type { CustomEndpoint } from "./custom-endpoint.js";
 import type { ChatMessage } from "./messages.js";
 
 export interface CompactOpts {
-  accountId: string;
-  apiToken: string;
+  openrouterApiKey?: string;
+  customEndpoint?: CustomEndpoint;
   model: string;
   messages: ChatMessage[];
   keepLastTurns?: number;
   signal?: AbortSignal;
-  gateway?: AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
 }
 
 export interface CompactResult {
@@ -87,8 +88,8 @@ export async function summarizeMessagesViaLlm(opts: CompactOpts): Promise<Compac
 
   let summary = "";
   const events = runKimi({
-    accountId: opts.accountId,
-    apiToken: opts.apiToken,
+    openrouterApiKey: opts.openrouterApiKey,
+    customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: [
       { role: "system", content: SUMMARY_SYSTEM },
@@ -97,7 +98,7 @@ export async function summarizeMessagesViaLlm(opts: CompactOpts): Promise<Compac
     signal: opts.signal,
     temperature: 0.1,
     reasoningEffort: "low",
-    gateway: opts.gateway,
+    provider: opts.provider,
     idleTimeoutMs: 60_000,
   });
   for await (const ev of events) {

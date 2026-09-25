@@ -13,8 +13,9 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   // Ink is the only UI engine; handler remains for manual use.
   // { name: "ui", argHint: "ink", description: "Switch UI engine to React Ink (takes effect on next launch). Camouflage is temporarily unavailable.", source: "builtin" },
   { name: "memory", argHint: "[on|off|clear|search ...]", description: "Manage memory", source: "builtin" },
-  { name: "cost", argHint: "[on|off]", description: "Show cost report or toggle attribution", source: "builtin" },
-  { name: "gateway", argHint: "[status|off|<id>|cache-ttl|skip-cache|...]", description: "Manage AI Gateway", source: "builtin" },
+  { name: "cost", argHint: "[verify|on|off]", description: "Show cost report or toggle attribution", source: "builtin" },
+  { name: "settings", argHint: "[modes on|off]", description: "Show or change feature settings (e.g. plan/edit/auto modes)", source: "builtin" },
+  { name: "key", argHint: "[set <key>|clear]", description: "Show or replace your OpenRouter API key", source: "builtin" },
   { name: "mcp", argHint: "[list|reload]", description: "Manage MCP servers", source: "builtin" },
   { name: "lsp", argHint: "[config|list|reload|scope]", description: "Manage language servers", source: "builtin" },
   { name: "hooks", argHint: "[list|recommended|enable <id>|disable <id>|path|reload]", description: "Manage lifecycle hooks", source: "builtin" },
@@ -30,11 +31,10 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "remote", argHint: "<prompt>", description: "Run a remote session on Cloudflare", source: "builtin" },
   { name: "update", description: "Check for updates", source: "builtin" },
   { name: "hello", description: "Send a voice note to the creator", source: "builtin" },
-  { name: "report", argHint: "[send] [note]", description: "Report the last API error with diagnostic logs", source: "builtin" },
   { name: "shell", argHint: "[auto|bash|cmd|powershell|<path>]", description: "Show or set shell for bash tool", source: "builtin" },
   { name: "changelog-image", argHint: "[owner/repo] [days]", description: "Generate a changelog image from merged PRs", source: "builtin" },
   { name: "logout", description: "Clear stored credentials", source: "builtin" },
-  { name: "exit", description: "Exit kimiflare", source: "builtin" },
+  { name: "exit", description: "Exit autopilot (formerly kimiflare)", source: "builtin" },
 ];
 
 export const BUILTIN_COMMAND_NAMES = new Set(

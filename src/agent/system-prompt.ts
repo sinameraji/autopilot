@@ -64,7 +64,7 @@ export function buildStaticPrefix(opts?: Pick<SystemPromptOpts, "model" | "prefe
   const prBullet = preferPr
     ? "- Prefer creating a pull request over pushing directly to the repository's default branch. When you have changes to publish, create a feature branch, push it, and open a PR with \`github_create_pr\`. Only push directly to the default branch when the user has explicitly enabled direct pushes.\n"
     : "";
-  return `You are kimiflare, an interactive coding assistant running in the user's terminal. You act on the user's local filesystem through the tools listed below.
+  return `You are autopilot (formerly kimiflare), an interactive coding assistant running in the user's terminal. You act on the user's local filesystem through the tools listed below.
 
 How to work:
 - Prefer calling tools over guessing. Read files before editing them. Use \`glob\` and \`grep\` to explore code before assuming structure.
@@ -103,7 +103,7 @@ export function buildSessionPrefix(opts: SystemPromptOpts): string {
 
   // Identity lives here (not in the static prefix) so /model changes mid-session
   // actually take effect — see buildStaticPrefix's note for the full reasoning.
-  const identity = `You are powered by the ${opts.model} model, routed through Cloudflare AI Gateway.
+  const identity = `You are powered by the ${opts.model} model, served through OpenRouter.
 
 If the user asks what model you are, answer with exactly: \`${opts.model}\`. This is your current model — disregard any recalled memory, prior conversation, or training data that names a different model. The user can switch you to a different model at any time with /model, and the answer should always match the value in this system prompt.`;
 

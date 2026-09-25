@@ -18,7 +18,8 @@ import { ALL_TOOLS, type ToolExecutor, type PermissionAsker } from "../tools/exe
 import { buildSessionPrefix, buildSystemPrompt } from "../agent/system-prompt.js";
 import { sanitizeString } from "../agent/messages.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
-import type { GatewayMeta } from "../agent/client.js";
+import type { ResponseMeta } from "../agent/client.js";
+import { llmAuthFromConfig } from "../agent/llm-auth.js";
 import type { ToolSpec, ToolRender } from "../tools/registry.js";
 import type { Mode } from "../mode.js";
 import { classifyIntent } from "../intent/classify.js";
@@ -26,12 +27,7 @@ import type { ReasoningEffort } from "../config.js";
 import type { TurnPhase } from "../ui/status.js";
 import type { DailyUsage } from "../usage-tracker.js";
 import type { TurnSupervisor } from "../agent/supervisor.js";
-import {
-  KimiApiError,
-  humanizeCloudflareError,
-  isCloudQuotaExhaustedError,
-  isKillSwitchError,
-} from "../util/errors.js";
+import { KimiApiError, humanizeApiError } from "../util/errors.js";
 import { logger } from "../util/logger.js";
 import { recordUsage, getCostReport } from "../usage-tracker.js";
 import { buildInitPrompt } from "./context-generator.js";
@@ -42,7 +38,7 @@ import type { ChatEvent } from "../ui/chat.js";
 import type { Cfg } from "../app.js";
 import type { LoopDecision } from "../ui/limit-modal.js";
 import type { LoopModalState } from "../ui/use-modal-host.js";
-import { gatewayFromConfig, gatewayUsageLookupFromConfig, mkAssistantId, trackRecentFile } from "../ui/app-helpers.js";
+import { costLookupFromConfig, mkAssistantId, trackRecentFile } from "../ui/app-helpers.js";
 
 type SetEvents = React.Dispatch<React.SetStateAction<ChatEvent[]>>;
 
@@ -53,13 +49,6 @@ export interface RunInitDeps {
   mkKey: () => string;
   setEvents: SetEvents;
 
-  // Cloud auth (passed in because both `cfg.cloud*` and `initial*` props
-  // matter — caller knows which to prefer).
-  cloudToken: string | undefined;
-  initialCloudToken: string | undefined;
-  cloudDeviceId: string | undefined;
-  initialCloudDeviceId: string | undefined;
-
   // Turn-state setters
   setCodeMode: (v: boolean) => void;
   setTurnPhase: (v: TurnPhase) => void;
@@ -67,9 +56,6 @@ export interface RunInitDeps {
   setLastActivityAt: (v: number) => void;
   setUsage: React.Dispatch<React.SetStateAction<Usage | null>>;
   setSessionUsage: React.Dispatch<React.SetStateAction<DailyUsage | null>>;
-  setCloudBudget: (v: { remaining: number; limit: number } | null) => void;
-  setCloudToken: (v: string | undefined) => void;
-  setCloudDeviceId: (v: string | undefined) => void;
   setKimiMdStale: (v: boolean) => void;
   setLoopModal: (v: LoopModalState | null) => void;
 
@@ -80,7 +66,7 @@ export interface RunInitDeps {
   onIterationEnd: (messages: ChatMessage[], signal: AbortSignal) => Promise<ChatMessage[]>;
   updateAssistant: (id: number, patch: (e: { text: string; reasoning: string; streaming: boolean }) => Partial<{ text: string; reasoning: string; streaming: boolean }>) => void;
   updateTool: (id: string, patch: Partial<Extract<ChatEvent, { kind: "tool" }>>) => void;
-  updateGatewayMeta: (meta: GatewayMeta) => void;
+  updateResponseMeta: (meta: ResponseMeta) => void;
   askForPermission: (req: Parameters<PermissionAsker>[0], opts: { promptOnBlockedBash: boolean }) => ReturnType<PermissionAsker>;
   clearPermissionResolveRef: () => void;
 
@@ -97,7 +83,7 @@ export interface RunInitDeps {
   recentFilesRef: React.MutableRefObject<Map<string, number>>;
   usageRef: React.MutableRefObject<Usage | null>;
   activeAsstIdRef: React.MutableRefObject<number | null>;
-  gatewayMetaRef: React.MutableRefObject<GatewayMeta | null>;
+  responseMetaRef: React.MutableRefObject<ResponseMeta | null>;
   kimiMdStaleNudgedRef: React.MutableRefObject<boolean>;
   lspManagerRef: React.MutableRefObject<LspManager>;
   modeRef: React.MutableRefObject<Mode>;
@@ -111,17 +97,16 @@ export interface RunInitDeps {
 export async function runInit(deps: RunInitDeps): Promise<void> {
   const {
     cfg, busy, mkKey, setEvents,
-    cloudToken, initialCloudToken, cloudDeviceId, initialCloudDeviceId,
     setCodeMode, setTurnPhase, setCurrentToolName, setLastActivityAt,
-    setUsage, setSessionUsage, setCloudBudget, setCloudToken, setCloudDeviceId,
+    setUsage, setSessionUsage,
     setKimiMdStale, setLoopModal,
     beginTurn, endTurn, ensureSessionId, onIterationEnd,
-    updateAssistant, updateTool, updateGatewayMeta,
+    updateAssistant, updateTool, updateResponseMeta,
     askForPermission, clearPermissionResolveRef,
     messagesRef, sessionScopeRef, activeScopeRef,
     mcpToolsRef, lspToolsRef, executorRef, effortRef, memoryManagerRef,
     pendingToolCallsRef, recentFilesRef, usageRef, activeAsstIdRef,
-    gatewayMetaRef, kimiMdStaleNudgedRef, lspManagerRef, modeRef,
+    responseMetaRef, kimiMdStaleNudgedRef, lspManagerRef, modeRef,
     cacheStableRef, lastApiErrorRef, limitResolveRef, loopResolveRef,
     supervisorRef,
   } = deps;
@@ -154,13 +139,8 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
 
   try {
     await runAgentTurn({
-      accountId: cfg.accountId,
-      apiToken: cfg.apiToken,
+      ...llmAuthFromConfig(cfg),
       model: cfg.model,
-      gateway: gatewayFromConfig(cfg),
-      cloudMode: cfg.cloudMode,
-      cloudToken: cloudToken ?? initialCloudToken,
-      cloudDeviceId: cloudDeviceId ?? initialCloudDeviceId,
       messages: messagesRef.current,
       tools: [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current],
       executor: executorRef.current,
@@ -176,9 +156,6 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
       memoryManager: memoryManagerRef.current,
       githubToken: cfg.githubOAuthToken,
       codeMode: effectiveCodeMode,
-      providerKeys: cfg.providerKeys,
-      providerKeyAliases: cfg.providerKeyAliases,
-      unifiedBilling: cfg.unifiedBilling,
       shell: cfg.shell,
       allowDirectPush: cfg.allowDirectPush,
       preferPullRequests: cfg.preferPullRequests,
@@ -273,33 +250,10 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
         },
         onUsageFinal: (u, meta) => {
           const sid = ensureSessionId();
-          void recordUsage(sid, u, gatewayUsageLookupFromConfig(cfg, meta ?? gatewayMetaRef.current), cfg?.model);
+          void recordUsage(sid, u, costLookupFromConfig(cfg, meta ?? responseMetaRef.current), cfg?.model);
           void getCostReport(sid).then((report) => setSessionUsage(report.session));
-          if (cfg?.cloudMode && (cloudToken ?? initialCloudToken)) {
-            const token = cloudToken ?? initialCloudToken!;
-            const did = cloudDeviceId ?? initialCloudDeviceId;
-            void (async () => {
-              try {
-                const { fetchCloudUsage } = await import("../cloud/auth.js");
-                const usage = await fetchCloudUsage(token, did);
-                if (usage) {
-                  setCloudBudget({ remaining: usage.remaining, limit: usage.input_token_limit });
-                }
-              } catch (err) {
-                if (isKillSwitchError(err)) {
-                  setCloudToken(undefined);
-                  setCloudDeviceId(undefined);
-                  setEvents((es) => [
-                    ...es,
-                    { kind: "service_ended", key: mkKey(), endedAt: err.endedAt },
-                  ]);
-                }
-                // Other errors are non-fatal
-              }
-            })();
-          }
         },
-        onGatewayMeta: updateGatewayMeta,
+        onResponseMeta: updateResponseMeta,
         askPermission: (req) => askForPermission(req, { promptOnBlockedBash: true }),
         onLoopDetected: () =>
           new Promise<LoopDecision>((resolve) => {
@@ -383,53 +337,16 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
             "you can write KIMI.md manually or scope it by deleting noisy paths from your .gitignore-style ignore list.",
         },
       ]);
-    } else if (isKillSwitchError(e)) {
-      setCloudToken(undefined);
-      setCloudDeviceId(undefined);
-      setEvents((es) => [
-        ...es,
-        { kind: "service_ended", key: mkKey(), endedAt: e.endedAt },
-      ]);
-    } else if (cfg?.cloudMode && isCloudQuotaExhaustedError(e)) {
-      const token = cloudToken ?? initialCloudToken;
-      const did = cloudDeviceId ?? initialCloudDeviceId;
-      let used = 0;
-      let limit = 0;
-      let expiresAt = "";
-      if (token) {
-        try {
-          const { fetchCloudUsage } = await import("../cloud/auth.js");
-          const usage = await fetchCloudUsage(token, did);
-          if (usage) {
-            used = usage.input_tokens_used;
-            limit = usage.input_token_limit;
-            expiresAt = usage.expires_at;
-          }
-        } catch {
-          /* ignore */
-        }
-      }
-      if (!limit) {
-        const m = (e as KimiApiError).message.match(/Used ([\d,]+)\s*\/\s*([\d,]+)/);
-        if (m && m[1] && m[2]) {
-          used = parseInt(m[1].replace(/,/g, ""), 10);
-          limit = parseInt(m[2].replace(/,/g, ""), 10);
-        }
-      }
-      setEvents((es) => [
-        ...es,
-        { kind: "cloud_quota_exhausted", key: mkKey(), used, limit, expiresAt },
-      ]);
     } else if (
       e instanceof KimiApiError &&
-      (e.httpStatus === 429 || e.code === 3040 || (e.httpStatus !== undefined && e.httpStatus >= 500))
+      (e.httpStatus === 429 || (e.httpStatus !== undefined && e.httpStatus >= 500))
     ) {
-      const err = { httpStatus: e.httpStatus, code: e.code, message: humanizeCloudflareError(e) };
+      const err = { httpStatus: e.httpStatus, code: e.code, message: humanizeApiError(e) };
       lastApiErrorRef.current = err;
       setEvents((es) => [...es, { kind: "api_error", key: mkKey(), ...err }]);
     } else {
       const displayText =
-        e instanceof KimiApiError ? humanizeCloudflareError(e) : `init failed: ${(e as Error).message}`;
+        e instanceof KimiApiError ? humanizeApiError(e) : `init failed: ${(e as Error).message}`;
       setEvents((es) => [...es, { kind: "error", key: mkKey(), text: displayText }]);
     }
   } finally {

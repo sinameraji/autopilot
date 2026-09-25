@@ -85,17 +85,23 @@ export function renderTerminal(report: CostAttributionReport): string {
   const rec = report.reconciliation;
   switch (rec.status) {
     case "verified":
-      lines.push(`Verified against Cloudflare: ✓ (within ${rec.driftPct?.toFixed(1) ?? "0"}%)`);
+      lines.push(`Verified against OpenRouter: ✓ (within ${rec.driftPct?.toFixed(1) ?? "0"}%)`);
       break;
     case "drift":
-      lines.push(`Verified against Cloudflare: ✗ (drift ${rec.driftPct?.toFixed(1) ?? "?"}%)`);
+      lines.push(
+        `Verified against OpenRouter: ✗ (drift ${rec.driftPct?.toFixed(1) ?? "?"}%)` +
+          (rec.message ? ` — ${rec.message}` : ""),
+      );
       break;
     case "error":
-      lines.push(`Cloudflare reconciliation: ⚠ ${rec.message ?? "API error"}`);
+      lines.push(`OpenRouter reconciliation: ⚠ ${rec.message ?? "API error"}`);
       break;
     case "local-only":
-      lines.push("Local-only report (Cloudflare reconciliation skipped).");
+      lines.push(`Local-only report (OpenRouter reconciliation skipped${rec.message ? `: ${rec.message}` : ""}).`);
       break;
+  }
+  if (typeof rec.keyAllTimeSpend === "number") {
+    lines.push(`OpenRouter key spend (all time): ${fmtCost(rec.keyAllTimeSpend)}`);
   }
 
   return lines.join("\n");

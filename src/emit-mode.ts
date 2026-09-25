@@ -25,19 +25,19 @@
 import * as readline from "node:readline";
 import { execSync } from "node:child_process";
 import { runAgentTurn, BudgetExhaustedError, AgentLoopError } from "./agent/loop.js";
-import type { AiGatewayOptions } from "./agent/client.js";
+import { llmAuthFromConfig } from "./agent/llm-auth.js";
 import { buildSystemPrompt } from "./agent/system-prompt.js";
 import { ToolExecutor, ALL_TOOLS } from "./tools/executor.js";
 import type { ChatMessage } from "./agent/messages.js";
-import { KimiApiError, isKillSwitchError, humanizeCloudflareError } from "./util/errors.js";
+import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { classifyIntent } from "./intent/classify.js";
 import { TurnSupervisor } from "./agent/supervisor.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type KimiConfig, type ReasoningEffort } from "./config.js";
 
-export interface EmitModeOpts {
-  accountId: string;
-  apiToken: string;
+export interface EmitModeOpts
+  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"> {
   model: string;
+  reasoningEffort?: ReasoningEffort;
   prompt: string;
   allowAll: boolean;
   /** When true, after the initial turn keep reading stdin for follow-up
@@ -46,19 +46,10 @@ export interface EmitModeOpts {
   codeMode?: boolean;
   continueOnLimit?: boolean;
   maxInputTokens?: number;
-  aiGatewayId?: string;
   /** When false (default), the bash tool blocks `git push` to the default branch. */
   allowDirectPush?: boolean;
   /** When true (default), the system prompt instructs the model to prefer PRs over direct pushes. */
   preferPullRequests?: boolean;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
-}
-
-function gatewayFromOpts(opts: EmitModeOpts): AiGatewayOptions | undefined {
-  if (!opts.aiGatewayId) return undefined;
-  return { id: opts.aiGatewayId };
 }
 
 export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
@@ -289,10 +280,9 @@ export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
 
     try {
       await runAgentTurn({
-        accountId: opts.accountId,
-        apiToken: opts.apiToken,
+        ...llmAuthFromConfig(opts),
         model: opts.model,
-        gateway: gatewayFromOpts(opts),
+        reasoningEffort: opts.reasoningEffort,
         messages,
         tools: ALL_TOOLS,
         executor,
@@ -303,9 +293,6 @@ export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
         maxInputTokens: opts.maxInputTokens,
         allowDirectPush: opts.allowDirectPush,
         preferPullRequests: opts.preferPullRequests,
-        cloudMode: opts.cloudMode,
-        cloudToken: opts.cloudToken,
-        cloudDeviceId: opts.cloudDeviceId,
         callbacks: {
           onAssistantStart: () => {
             streamCounter += 1;
@@ -444,19 +431,10 @@ export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
         });
         exitCode = 43;
         aborted = true;
-      } else if (isKillSwitchError(err)) {
-        emit("RuntimeError", {
-          message: "KimiFlare Cloud has reached its maximum budget across all users. The free credits period has ended. Switch to BYOK mode to continue.",
-          source: "cloudflare",
-          kind: "api_error",
-          severity: "error",
-        });
-        exitCode = 0;
-        aborted = true;
       } else if (err instanceof KimiApiError) {
         emit("RuntimeError", {
-          message: humanizeCloudflareError(err),
-          source: "cloudflare",
+          message: humanizeApiError(err),
+          source: "openrouter",
           kind: "api_error",
           severity: "error",
         });

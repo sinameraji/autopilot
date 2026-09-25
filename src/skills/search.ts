@@ -1,17 +1,11 @@
 import type Database from "better-sqlite3";
-import type { AiGatewayOptions } from "../agent/client.js";
+import type { LlmAuth } from "../agent/llm-auth.js";
 import { fetchEmbeddings, cosineSimilarity } from "../memory/embeddings.js";
 import { hasAnySections, listAllSectionRows, rowToSectionResult } from "./db.js";
 import type { SectionResult } from "./types.js";
 
-export interface SearchOpts {
-  accountId: string;
-  apiToken: string;
+export interface SearchOpts extends LlmAuth {
   model?: string;
-  gateway?: AiGatewayOptions;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
 }
 
 /**
@@ -25,16 +19,7 @@ export async function searchSections(
 ): Promise<SectionResult[]> {
   if (!hasAnySections(db)) return [];
 
-  const embeddings = await fetchEmbeddings({
-    accountId: opts.accountId,
-    apiToken: opts.apiToken,
-    model: opts.model,
-    texts: [query],
-    gateway: opts.gateway,
-    cloudMode: opts.cloudMode,
-    cloudToken: opts.cloudToken,
-    cloudDeviceId: opts.cloudDeviceId,
-  });
+  const embeddings = await fetchEmbeddings({ ...opts, texts: [query] });
   const queryEmbedding = embeddings[0];
   if (!queryEmbedding) {
     throw new Error("Failed to embed query: no embedding returned");

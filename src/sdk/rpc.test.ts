@@ -144,19 +144,26 @@ async function withRpcServer(
 }
 
 describe("SDK RPC", () => {
-  let originalAccount: string | undefined;
-  let originalToken: string | undefined;
+  const ENV = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "XDG_CONFIG_HOME", "KIMIFLARE_BASE_URL"] as const;
+  const saved: Record<string, string | undefined> = {};
+  let configHome = "";
 
-  before(() => {
-    originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
-    originalToken = process.env.CLOUDFLARE_API_TOKEN;
-    process.env.CLOUDFLARE_ACCOUNT_ID = "test_account";
-    process.env.CLOUDFLARE_API_TOKEN = "test_token";
+  before(async () => {
+    for (const k of ENV) saved[k] = process.env[k];
+    delete process.env.KIMIFLARE_BASE_URL;
+    configHome = await mkdtemp(join(tmpdir(), "kimiflare-rpc-"));
+    process.env.XDG_CONFIG_HOME = configHome;
+    // Unreachable → the catalog load fails fast and uses the seed list.
+    process.env.OPENROUTER_BASE_URL = "http://127.0.0.1:9/api/v1";
+    process.env.OPENROUTER_API_KEY = "sk-or-test-rpc";
   });
 
-  after(() => {
-    process.env.CLOUDFLARE_ACCOUNT_ID = originalAccount;
-    process.env.CLOUDFLARE_API_TOKEN = originalToken;
+  after(async () => {
+    for (const k of ENV) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    await rm(configHome, { recursive: true, force: true });
   });
 
   it("responds to new_session command", async () => {
@@ -341,19 +348,16 @@ describe("SDK RPC", () => {
   });
 });
 
-describe("SDK RPC with a custom endpoint only (no Cloudflare credentials)", () => {
+describe("SDK RPC with a custom endpoint only (no OpenRouter key)", () => {
   // Acceptance path for host apps: a container gets KIMIFLARE_BASE_URL +
   // KIMIFLARE_API_KEY pointed at the host's gateway/broker and nothing else —
-  // no Cloudflare login, token, or account id. RPC mode must come up fully.
+  // no OpenRouter key. RPC mode must come up fully.
   // Uses the REAL createAgentSession factory so resolveSdkConfig/loadConfig
   // run for real; env + config file are isolated so a developer's own
-  // Cloudflare login can't satisfy the credential check.
+  // OpenRouter key can't satisfy the credential check.
   const ENV_KEYS = [
-    "CLOUDFLARE_ACCOUNT_ID",
-    "CF_ACCOUNT_ID",
-    "CLOUDFLARE_API_TOKEN",
-    "CF_API_TOKEN",
-    "KIMIFLARE_CLOUD",
+    "OPENROUTER_API_KEY",
+    "KIMIFLARE_OPENROUTER_KEY",
     "KIMIFLARE_BASE_URL",
     "KIMIFLARE_API_KEY",
     "XDG_CONFIG_HOME",

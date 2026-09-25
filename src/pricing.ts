@@ -1,13 +1,9 @@
 /**
- * Per-token pricing. Looked up from the model registry so we can bill any
- * provider routed through Cloudflare AI Gateway (Workers AI, Anthropic, OpenAI,
- * Google, OpenAI-compatible). Unknown models return zero cost — usage is still
- * tracked, but the dollar figure is suppressed rather than silently wrong.
- *
- * Workers AI bills in Neurons; the per-million-token rates in the registry are
- * the equivalent token prices. For Gateway-routed providers, Cloudflare may
- * report an authoritative per-request cost in the AI Gateway logs — see
- * usage-tracker.ts for the reconciliation path.
+ * Per-token pricing for the local cost *estimate*, looked up from the model
+ * registry (OpenRouter's live catalog). Unknown models return zero cost —
+ * usage is still tracked, but the dollar figure is suppressed rather than
+ * silently wrong. The authoritative number is what OpenRouter reports it
+ * billed; see usage-tracker.ts for how each turn is confirmed.
  */
 
 import { getModel, type ModelPricing } from "./models/registry.js";

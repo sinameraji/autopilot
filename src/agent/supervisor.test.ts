@@ -86,7 +86,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
     const s = new TurnSupervisor();
     const out = await s.synthesizeFindings(
       [result("w1", [finding("OAuth", "high")])],
-      { strategy: "heuristic", accountId: "a", apiToken: "t" },
+      { strategy: "heuristic", auth: { openrouterApiKey: "sk-or-test" } },
     );
     assert.ok(out.plan.includes("OAuth"));
   });
@@ -114,10 +114,10 @@ describe("TurnSupervisor.synthesizeFindings", () => {
 
     const out = await s.synthesizeFindings(
       [result("w1", [finding("OAuth", "high", "summary")], ["Use OAuth 2.0"])],
-      { strategy: "llm", accountId: "a", apiToken: "t", model: "@cf/moonshotai/kimi-k2.5" },
+      { strategy: "llm", auth: { openrouterApiKey: "sk-or-test" }, model: "moonshotai/kimi-k2.5" },
     );
     assert.strictEqual(runKimiCalls.length, 1);
-    assert.strictEqual(runKimiCalls[0]?.model, "@cf/moonshotai/kimi-k2.5");
+    assert.strictEqual(runKimiCalls[0]?.model, "moonshotai/kimi-k2.5");
     assert.strictEqual(runKimiCalls[0]?.temperature, 0.2);
     assert.ok(out.plan.includes("Unified Plan"));
     assert.deepStrictEqual(out.recommendations, ["Use OAuth 2.0"]);
@@ -132,7 +132,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
 
     const out = await s.synthesizeFindings(
       [result("w1", [finding("OAuth", "high")])],
-      { strategy: "hybrid", accountId: "a", apiToken: "t" },
+      { strategy: "hybrid", auth: { openrouterApiKey: "sk-or-test" } },
     );
     assert.ok(out.plan.includes("Synthesized Execution Plan"));
     assert.ok(out.plan.includes("OAuth"));
@@ -146,7 +146,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
 
     const out = await s.synthesizeFindings(
       [result("w1", [finding("OAuth", "high")])],
-      { strategy: "hybrid", accountId: "a", apiToken: "t" },
+      { strategy: "hybrid", auth: { openrouterApiKey: "sk-or-test" } },
     );
     assert.ok(out.plan.includes("OAuth"));
   });
@@ -160,7 +160,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
     await assert.rejects(
       s.synthesizeFindings(
         [result("w1", [finding("OAuth", "high")])],
-        { strategy: "llm", accountId: "a", apiToken: "t" },
+        { strategy: "llm", auth: { openrouterApiKey: "sk-or-test" } },
       ),
       /network error/,
     );
@@ -182,7 +182,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
 
     await s.synthesizeFindings(
       [result("w1", [finding("OAuth", "high")], ["Use OAuth"])],
-      { strategy: "llm", accountId: "a", apiToken: "t", prompt: "Implement auth" },
+      { strategy: "llm", auth: { openrouterApiKey: "sk-or-test" }, prompt: "Implement auth" },
     );
     assert.ok(capturedUserContent.includes("Worker w1"));
     assert.ok(capturedUserContent.includes("Implement auth"));
@@ -201,8 +201,7 @@ describe("TurnSupervisor.synthesizeFindings", () => {
       [result("w1", [finding("OAuth", "high")])],
       {
         strategy: "llm",
-        accountId: "a",
-        apiToken: "t",
+        auth: { openrouterApiKey: "sk-or-test" },
         onDelta: (d) => deltas.push(d),
       },
     );
@@ -213,16 +212,29 @@ describe("TurnSupervisor.synthesizeFindings", () => {
 
 describe("TurnSupervisor.spawnWorkers (regression: instance-field access)", () => {
   const realFetch = globalThis.fetch;
-  const realEndpoint = process.env.KIMIFLARE_WORKER_ENDPOINT;
+  // spawnWorkers loads the real config: isolate it from the developer's
+  // machine and give it the one credential it needs (an OpenRouter key).
+  const savedEnv = {
+    KIMIFLARE_WORKER_ENDPOINT: process.env.KIMIFLARE_WORKER_ENDPOINT,
+    OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+  };
+  let cfgDir = "";
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    cfgDir = await mkdtemp(join(tmpdir(), "kimiflare-supervisor-cfg-"));
+    process.env.XDG_CONFIG_HOME = cfgDir;
+    process.env.OPENROUTER_API_KEY = "sk-or-test-supervisor";
     process.env.KIMIFLARE_WORKER_ENDPOINT = "http://mock";
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = realFetch;
-    if (realEndpoint === undefined) delete process.env.KIMIFLARE_WORKER_ENDPOINT;
-    else process.env.KIMIFLARE_WORKER_ENDPOINT = realEndpoint;
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    await rm(cfgDir, { recursive: true, force: true });
   });
 
   // Earlier this threw "Cannot read properties of undefined (reading 'entries')"
@@ -340,6 +352,8 @@ describe("TurnSupervisor.spawnWorkers (regression: instance-field access)", () =
 
     const payload = JSON.parse(capturedBody);
     assert.ok(typeof payload.batchId === "string" && payload.batchId.startsWith("batch-"), "batchId should be a string starting with 'batch-'");
+    // Workers bill model calls to the user's own OpenRouter key.
+    assert.strictEqual(payload.userOpenRouterKey, "sk-or-test-supervisor");
     assert.strictEqual(payload.shallowClone, true, "shallowClone should default to true");
     assert.strictEqual(payload.repoCache, true, "repoCache should default to true");
   });
@@ -465,9 +479,8 @@ describe("decomposePrompt", () => {
     const workers = await decomposePrompt("analyze our auth system", "ctx", {
       cwd: process.cwd(),
       cfg: {
-        accountId: "test",
-        apiToken: "test",
-        model: "@cf/moonshotai/kimi-k2.6",
+        openrouterApiKey: "sk-or-test",
+        model: "moonshotai/kimi-k2.6",
         decompositionStrategy: "llm",
       },
     });
@@ -505,9 +518,8 @@ describe("decomposePrompt", () => {
     const workers = await decomposePrompt("analyze our auth system (invalid json case)", "ctx", {
       cwd: process.cwd(),
       cfg: {
-        accountId: "test",
-        apiToken: "test",
-        model: "@cf/moonshotai/kimi-k2.6",
+        openrouterApiKey: "sk-or-test",
+        model: "moonshotai/kimi-k2.6",
         decompositionStrategy: "llm",
       },
     });
@@ -524,9 +536,8 @@ describe("decomposePrompt", () => {
     const workers = await decomposePrompt("analyze our auth system", "ctx", {
       cwd: process.cwd(),
       cfg: {
-        accountId: "test",
-        apiToken: "test",
-        model: "@cf/moonshotai/kimi-k2.6",
+        openrouterApiKey: "sk-or-test",
+        model: "moonshotai/kimi-k2.6",
         decompositionStrategy: "regex",
       },
     });
@@ -560,9 +571,8 @@ describe("decomposePrompt", () => {
     }) as typeof fetch;
 
     const cfg = {
-      accountId: "test",
-      apiToken: "test",
-      model: "@cf/moonshotai/kimi-k2.6",
+      openrouterApiKey: "sk-or-test",
+      model: "moonshotai/kimi-k2.6",
       decompositionStrategy: "llm" as const,
     };
 

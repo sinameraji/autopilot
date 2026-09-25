@@ -9,42 +9,35 @@ import { readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { runAgentTurn, BudgetExhaustedError, AgentLoopError } from "./agent/loop.js";
 import type { AgentCallbacks } from "./agent/loop.js";
-import type { AiGatewayOptions } from "./agent/client.js";
+import { llmAuthFromConfig } from "./agent/llm-auth.js";
+import { recordUsage } from "./usage-tracker.js";
 import { buildSystemPrompt } from "./agent/system-prompt.js";
 import { ToolExecutor, ALL_TOOLS } from "./tools/executor.js";
 import type { ChatMessage, ContentPart } from "./agent/messages.js";
-import { KimiApiError, isKillSwitchError, humanizeCloudflareError } from "./util/errors.js";
+import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "./sessions.js";
 import { encodeImageFile, isImagePath } from "./util/image.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { glob } from "./util/glob.js";
 import { evaluatePermissionRules } from "./permissions-evaluator.js";
-import type { PermissionRules } from "./config.js";
+import type { KimiConfig, PermissionRules, ReasoningEffort } from "./config.js";
 
 export type PrintFormat = "text" | "json" | "stream-json";
 
-export interface PrintModeOpts {
-  accountId: string;
-  apiToken: string;
+export interface PrintModeOpts
+  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"> {
   model: string;
+  reasoningEffort?: ReasoningEffort;
   prompt: string;
   allowAll: boolean;
   showReasoning: boolean;
   coauthor?: boolean;
   coauthorName?: string;
   coauthorEmail?: string;
-  aiGatewayId?: string;
-  aiGatewayCacheTtl?: number;
-  aiGatewaySkipCache?: boolean;
-  aiGatewayCollectLogPayload?: boolean;
-  aiGatewayMetadata?: Record<string, string | number | boolean>;
   updateResult: UpdateCheckResult;
   codeMode?: boolean;
   continueOnLimit?: boolean;
   maxInputTokens?: number;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
   /** Session continuation */
   continueSession?: boolean;
   sessionId?: string;
@@ -84,17 +77,6 @@ interface JsonOutput {
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number };
   durationMs: number;
   sessionId: string;
-}
-
-function gatewayFromPrintOpts(opts: PrintModeOpts): AiGatewayOptions | undefined {
-  if (!opts.aiGatewayId) return undefined;
-  return {
-    id: opts.aiGatewayId,
-    cacheTtl: opts.aiGatewayCacheTtl,
-    skipCache: opts.aiGatewaySkipCache,
-    collectLogPayload: opts.aiGatewayCollectLogPayload,
-    metadata: opts.aiGatewayMetadata,
-  };
 }
 
 async function resolveSession(opts: PrintModeOpts): Promise<{ sessionFile: SessionFile; isNew: boolean }> {
@@ -197,9 +179,6 @@ async function buildUserMessage(prompt: string, files: string[], cwd: string): P
 }
 
 export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
-  if (opts.cloudMode) {
-    process.stderr.write("[cloud mode: api.kimiflare.com]\n");
-  }
   const startMs = Date.now();
 
   if (opts.updateResult.hasUpdate) {
@@ -265,7 +244,18 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     }
   }
 
+  // Usage is recorded like the TUI does, so `kimiflare cost` and /cost see
+  // headless runs too. Writes are awaited before exit.
+  const usageWrites: Promise<void>[] = [];
+  const auth = llmAuthFromConfig(opts);
   const callbacks: AgentCallbacks = {
+    onUsageFinal: (u, meta) => {
+      const lookup =
+        opts.openrouterApiKey && !auth.customEndpoint && meta?.generationId
+          ? { apiKey: opts.openrouterApiKey, meta }
+          : undefined;
+      usageWrites.push(recordUsage(sessionFile.id, u, lookup, opts.model).catch(() => undefined));
+    },
     onReasoningDelta: opts.showReasoning
       ? (delta) => {
           if (format === "text") {
@@ -375,10 +365,10 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
 
   try {
     await runAgentTurn({
-      accountId: opts.accountId,
-      apiToken: opts.apiToken,
+      ...auth,
       model: opts.model,
-      gateway: gatewayFromPrintOpts(opts),
+      reasoningEffort: opts.reasoningEffort,
+      sessionId: sessionFile.id,
       messages,
       tools: ALL_TOOLS,
       executor,
@@ -388,9 +378,6 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       codeMode: opts.codeMode,
       continueOnLimit: opts.continueOnLimit,
       maxInputTokens: opts.maxInputTokens,
-      cloudMode: opts.cloudMode,
-      cloudToken: opts.cloudToken,
-      cloudDeviceId: opts.cloudDeviceId,
       coauthor:
         opts.coauthor !== false
           ? { name: opts.coauthorName || "kimiflare", email: opts.coauthorEmail || "kimiflare@proton.me" }
@@ -414,31 +401,16 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       process.exitCode = 43;
       return;
     }
-    if (isKillSwitchError(err)) {
-      process.stderr.write(
-        "\n\x1b[31m" +
-          "╔══════════════════════════════════════════════════════════════╗\n" +
-          "║  KimiFlare Cloud has reached its maximum budget across       ║\n" +
-          "║  all users. The free credits period has ended.               ║\n" +
-          "║                                                              ║\n" +
-          "║  To continue using KimiFlare, switch to BYOK mode:           ║\n" +
-          "║  • kimiflare config set-key <your-cloudflare-api-key>        ║\n" +
-          "║  • kimiflare config set-account <your-account-id>            ║\n" +
-          "║  • Or re-run kimiflare and select BYOK                       ║\n" +
-          "╚══════════════════════════════════════════════════════════════╝\n" +
-          "\x1b[0m\n",
-      );
-      process.exitCode = 0;
-      return;
-    }
     if (err instanceof KimiApiError) {
-      const msg = `Error: ${humanizeCloudflareError(err)}`;
+      const msg = `Error: ${humanizeApiError(err)}`;
       if (format === "text") process.stderr.write(`\n\x1b[31m${msg}\x1b[0m\n`);
       else if (format === "stream-json") emitStreamJson("error", { message: msg, code: 1 });
       process.exitCode = 1;
       return;
     }
     throw err;
+  } finally {
+    await Promise.all(usageWrites);
   }
 
   // Save session

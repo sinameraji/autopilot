@@ -13,11 +13,7 @@ import { ModelPicker } from "./model-picker.js";
 import { ModePicker } from "./mode-picker.js";
 import { ShellPicker } from "./shell-picker.js";
 import { MemoryPicker } from "./memory-picker.js";
-import { GatewayPicker } from "./gateway-picker.js";
 import { SkillsPicker } from "./skills-picker.js";
-import { KeyEntryModal, type KeyResult } from "./key-entry-modal.js";
-import { BillingChooser, type BillingChoice } from "./billing-chooser.js";
-import { UnifiedBillingStatus } from "./unified-billing-status.js";
 import type { ModelEntry } from "../models/registry.js";
 import { RemoteDashboard, RemoteSessionDetail } from "./remote-dashboard.js";
 import { InboxModal } from "./inbox-modal.js";
@@ -72,18 +68,6 @@ export interface ModalHostProps {
   // Mode picker
   currentMode: import("../mode.js").Mode;
   onPickMode: (mode: import("../mode.js").Mode | null) => void;
-  // Key entry modal (opens after a byok model is picked without a stored key)
-  onSaveProviderKey: (model: ModelEntry, result: KeyResult) => void;
-  onCancelKeyEntry: () => void;
-  // Billing chooser (Unified Billing vs BYOK) for Unified-eligible providers
-  onPickBilling: (model: ModelEntry, choice: BillingChoice | null) => void;
-  // Unified Billing probe — result is one of "enabled" | "fallback-byok" | "cancelled"
-  onUnifiedProbeResolve: (model: ModelEntry, r: "enabled" | "fallback-byok" | "cancelled") => void;
-  // Cloudflare credentials needed by the key entry and probe flows
-  accountId: string;
-  apiToken: string;
-  secretsStoreId?: string;
-  aiGatewayId?: string;
   // Remote dashboard
   selectedRemoteSession: RemoteSession | null;
   onSelectRemoteSession: (s: RemoteSession | null) => void;
@@ -103,7 +87,6 @@ export interface ModalHostProps {
   onHooksMutate: () => void;
   // Help menu
   costAttributionEnabled: boolean;
-  cloudMode?: boolean;
   onRunCommand: (cmd: string) => void;
   // Shell picker
   currentShell: string | undefined;
@@ -113,13 +96,6 @@ export interface ModalHostProps {
   memoryManager: MemoryManager | null;
   onMemoryAction: (action: string) => void;
   onMemoryDone: () => void;
-  // Gateway picker
-  gatewayId: string | undefined;
-  gatewaySkipCache: boolean | undefined;
-  gatewayCollectLogs: boolean | undefined;
-  gatewayMetadataCount: number;
-  onGatewayAction: (action: string) => void;
-  onGatewayDone: () => void;
   // Skills picker
   onSkillsAction: (action: string) => void;
   onSkillsDone: () => void;
@@ -153,14 +129,6 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
     onPickUi,
     currentModel,
     onPickModel,
-    onSaveProviderKey,
-    onCancelKeyEntry,
-    onPickBilling,
-    onUnifiedProbeResolve,
-    accountId,
-    apiToken,
-    secretsStoreId,
-    aiGatewayId,
     selectedRemoteSession,
     onSelectRemoteSession,
     onCancelRemoteSession,
@@ -241,7 +209,6 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
           <HelpMenu
             customCommands={customCommands.map((c) => ({ name: c.name, description: c.description }))}
             costAttributionEnabled={props.costAttributionEnabled}
-            cloudMode={props.cloudMode}
             onDone={() => modals.setShowHelpMenu(false)}
             onCommand={(cmd) => {
               modals.setShowHelpMenu(false);
@@ -278,22 +245,6 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
     );
   }
 
-  if (modals.showGatewayPicker) {
-    return (
-      <ThemeProvider theme={theme}>
-        <Box flexDirection="column">
-          <GatewayPicker
-            gatewayId={props.gatewayId}
-            skipCache={props.gatewaySkipCache}
-            collectLogs={props.gatewayCollectLogs}
-            metadataCount={props.gatewayMetadataCount}
-            onAction={props.onGatewayAction}
-            onDone={props.onGatewayDone}
-          />
-        </Box>
-      </ThemeProvider>
-    );
-  }
 
   if (modals.showSkillsPicker) {
     return (
@@ -445,51 +396,8 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
     );
   }
 
-  if (modals.billingChooserFor) {
-    const model = modals.billingChooserFor;
-    return (
-      <ThemeProvider theme={theme}>
-        <Box flexDirection="column">
-          <BillingChooser model={model} onPick={(choice) => onPickBilling(model, choice)} />
-        </Box>
-      </ThemeProvider>
-    );
-  }
 
-  if (modals.unifiedProbeFor) {
-    const model = modals.unifiedProbeFor;
-    return (
-      <ThemeProvider theme={theme}>
-        <Box flexDirection="column">
-          <UnifiedBillingStatus
-            model={model}
-            accountId={accountId}
-            apiToken={apiToken}
-            gatewayId={aiGatewayId ?? ""}
-            onResolve={(r) => onUnifiedProbeResolve(model, r)}
-          />
-        </Box>
-      </ThemeProvider>
-    );
-  }
 
-  if (modals.keyEntryFor) {
-    const model = modals.keyEntryFor;
-    return (
-      <ThemeProvider theme={theme}>
-        <Box flexDirection="column">
-          <KeyEntryModal
-            model={model}
-            accountId={accountId}
-            apiToken={apiToken}
-            secretsStoreId={secretsStoreId}
-            onSave={(result) => onSaveProviderKey(model, result)}
-            onCancel={onCancelKeyEntry}
-          />
-        </Box>
-      </ThemeProvider>
-    );
-  }
 
   if (modals.showChangelogImagePicker && props.changelogImageRepo) {
     return (

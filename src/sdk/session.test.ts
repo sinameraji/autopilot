@@ -2,36 +2,41 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { mkdtemp } from "node:fs/promises";
 import { createAgentSession } from "./session.js";
 import type { KimiFlareSession, SessionEvent } from "./types.js";
 
-// We need credentials for createAgentSession to work, so we set env vars
-const TEST_ACCOUNT = "test_account";
-const TEST_TOKEN = "test_token";
-const TEST_MODEL = "@cf/moonshotai/kimi-k2.6";
+// createAgentSession needs an OpenRouter key; config + catalog are isolated
+// (temp XDG dir, unreachable OPENROUTER_BASE_URL so the catalog load fails
+// fast and falls back to the seed list instead of hitting the network).
+const TEST_KEY = "sk-or-test-session";
+const TEST_MODEL = "moonshotai/kimi-k2.6";
+const ENV_KEYS = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "KIMI_MODEL", "XDG_CONFIG_HOME", "KIMIFLARE_BASE_URL"] as const;
 
 describe("SDK Session", () => {
-  let originalAccount: string | undefined;
-  let originalToken: string | undefined;
-  let originalModel: string | undefined;
+  const saved: Record<string, string | undefined> = {};
+  let configHome = "";
   let session: KimiFlareSession | null = null;
   const testCwd = join(process.cwd(), ".test-sdk-session");
 
   before(async () => {
-    originalAccount = process.env.CLOUDFLARE_ACCOUNT_ID;
-    originalToken = process.env.CLOUDFLARE_API_TOKEN;
-    originalModel = process.env.KIMI_MODEL;
-    process.env.CLOUDFLARE_ACCOUNT_ID = TEST_ACCOUNT;
-    process.env.CLOUDFLARE_API_TOKEN = TEST_TOKEN;
+    for (const k of ENV_KEYS) saved[k] = process.env[k];
+    delete process.env.KIMIFLARE_BASE_URL;
+    configHome = await mkdtemp(join(tmpdir(), "kimiflare-sdk-session-"));
+    process.env.XDG_CONFIG_HOME = configHome;
+    process.env.OPENROUTER_BASE_URL = "http://127.0.0.1:9/api/v1";
+    process.env.OPENROUTER_API_KEY = TEST_KEY;
     process.env.KIMI_MODEL = TEST_MODEL;
     await mkdir(testCwd, { recursive: true });
   });
 
   after(async () => {
-    process.env.CLOUDFLARE_ACCOUNT_ID = originalAccount;
-    process.env.CLOUDFLARE_API_TOKEN = originalToken;
-    process.env.KIMI_MODEL = originalModel;
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    await rm(configHome, { recursive: true, force: true });
     session?.dispose();
     await rm(testCwd, { recursive: true, force: true });
   });

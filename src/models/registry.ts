@@ -1,49 +1,26 @@
 /**
- * Model registry: single source of truth for per-model capabilities, pricing,
- * and routing decisions.
+ * Model registry: single source of truth for per-model capabilities and
+ * pricing.
  *
- * KimiFlare is built around Kimi models served through Cloudflare. Most seeded
- * models are Workers AI models; AI Gateway is optional for those — they also
- * work via the direct api.cloudflare.com path. Kimi K3 (moonshotai/kimi-k3) is
- * a third-party model in Cloudflare's model catalog, paid from the account's
- * AI Gateway credits, and works out of the box with just a Cloudflare token.
+ * Every model is served through OpenRouter (https://openrouter.ai) with the
+ * user's own OpenRouter key — there is exactly one provider, so there is no
+ * routing decision to make here. What the user *does* choose is the model,
+ * and the list of models is not maintained by hand: the live OpenRouter
+ * catalog (see openrouter-catalog.ts) is registered at startup via
+ * `registerOpenRouterModels()`. The small SEED list below is only an offline
+ * fallback, so a first run with no network and no cached catalog still has
+ * accurate context windows/pricing for the default and plumbing models.
  *
- * Routing taxonomy (see `routeFor()`):
- *   - "workers-ai": Workers AI chat models go through EITHER:
- *     a) Direct path:  api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{model}
- *     b) Gateway path: gateway.ai.cloudflare.com/v1/{acct}/{gw}/compat/chat/completions
- *     The choice is made at runtime based on whether aiGatewayId is configured.
- *   - "cf-catalog": third-party models in Cloudflare's model catalog (e.g.
- *     moonshotai/kimi-k3) go through Cloudflare's unified REST API
- *     api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions with an
- *     optional `cf-aig-gateway-id` header. Cloudflare pays the provider from the
- *     account's AI Gateway credits (Unified Billing) — no provider key, and BYOK
- *     is not supported on this path.
- *   - "gateway": everything else (Anthropic, OpenAI, Google, OpenAI-compatible)
- *     goes through the AI Gateway Universal Endpoint with provider auth
- *     (Unified Billing where supported, else BYOK).
- *   - Embeddings use the Workers AI dual-path logic:
- *     a) Direct:  api.cloudflare.com/client/v4/accounts/{acct}/ai/run/{model}
- *     b) Gateway: gateway.ai.cloudflare.com/v1/{acct}/{gw}/workers-ai/{model}
- *   - User-registered models (via ~/.kimiflare/models.json) can be any provider,
- *     but "gateway"-routed ones require AI Gateway since only Workers AI has a
- *     direct path.
+ * Model ids are OpenRouter's own `vendor/model[:variant]` ids, e.g.
+ * "moonshotai/kimi-k2.6" or "deepseek/deepseek-r1:free". Ids from the
+ * Cloudflare era ("@cf/moonshotai/kimi-k2.6", …) are rewritten on config load
+ * by `migrateLegacyModelId()`.
  */
-
-export type ModelProvider =
-  | "workers-ai"
-  | "anthropic"
-  | "openai"
-  | "google"
-  | "moonshotai"
-  | "openai-compatible";
-
-export type BillingMode = "unified" | "byok";
 
 export interface ModelPricing {
   /** USD per million uncached input tokens. */
   inputPerMtok: number;
-  /** USD per million cached input tokens. Omit if provider does not bill cached input differently. */
+  /** USD per million cached input tokens. Omit if the model does not bill cached input differently. */
   cachedInputPerMtok?: number;
   /** USD per million output tokens. */
   outputPerMtok: number;
@@ -57,169 +34,230 @@ export interface ModelCapabilities {
   vision?: boolean;
   /**
    * Does this model accept the `temperature` field in the request body?
-   * Reasoning models from OpenAI (gpt-5 family) and Anthropic (opus-4-7)
-   * reject or deprecate it. Default: true.
+   * Some reasoning models (e.g. Kimi K3, gpt-5 family) reject any
+   * non-default value. Default: true.
    */
   temperature?: boolean;
 }
 
+/** Artificial Analysis scores OpenRouter publishes per model (0–100, higher is better). */
+export interface ModelQuality {
+  coding?: number;
+  agentic?: number;
+  intelligence?: number;
+}
+
 export interface ModelEntry {
-  /** Canonical model id, e.g. "@cf/moonshotai/kimi-k2.7-code". */
+  /** OpenRouter model id, e.g. "moonshotai/kimi-k2.6". */
   id: string;
-  provider: ModelProvider;
+  /** Human-readable name from the catalog, e.g. "MoonshotAI: Kimi K2.6". */
+  name?: string;
+  /** Release date, epoch seconds (from the catalog). */
+  created?: number;
+  /** Benchmark scores, when OpenRouter has them. Drives the "best & latest" list. */
+  quality?: ModelQuality;
+  /**
+   * Request parameters the model's OpenRouter endpoints accept (the catalog's
+   * `supported_parameters`). The client only sends parameters listed here —
+   * required because every request sets `provider.require_parameters`, which
+   * makes OpenRouter reject a request if no endpoint supports every parameter
+   * sent. Undefined when unknown (seed entries, ids not in the catalog).
+   */
+  parameters?: string[];
   contextWindow: number;
   maxOutputTokens: number;
   pricing: ModelPricing;
   supports: ModelCapabilities;
-  /**
-   * "unified" — Cloudflare's Unified Billing can pay this provider on the user's behalf.
-   * "byok"    — user must supply their own provider API key.
-   * Note: "unified" availability is provider/gateway-specific; "byok" always works.
-   */
-  billingMode: BillingMode;
 }
 
-/**
- * Providers Cloudflare AI Gateway supports paying for via Unified Billing
- * (CF credits, no upstream key). Workers AI is its own track and trivially
- * "ready" for any account that can reach AI Gateway at all.
- * Source: developers.cloudflare.com/ai-gateway/features/unified-billing/
- */
-const UNIFIED_BILLING_PROVIDERS: ReadonlySet<string> = new Set([
-  "anthropic",
-  "openai",
-  "google-ai-studio",
-  "groq",
-  "xai",
-]);
-
-export type ModelRoute = "workers-ai" | "cf-catalog" | "gateway";
-
-/**
- * Which transport a model uses. Moonshot models are only reachable through
- * Cloudflare's model catalog (unified REST API + Unified Billing) — there is
- * no provider-native Moonshot slug on AI Gateway.
- */
-export function routeFor(entry: ModelEntry): ModelRoute {
-  if (entry.provider === "workers-ai") return "workers-ai";
-  if (entry.provider === "moonshotai") return "cf-catalog";
-  return "gateway";
-}
-
-/** True when the user can pay for this model through Cloudflare credits rather than BYOK. */
-export function isUnifiedEligible(entry: ModelEntry): boolean {
-  if (entry.provider === "workers-ai") return false; // own billing track
-  if (routeFor(entry) === "cf-catalog") return true; // credits are the only option
-  // For openai-compatible upstreams we key off the model-id prefix
-  // (e.g. "groq/llama-3.3-70b-versatile" → "groq").
-  const slashIdx = entry.id.indexOf("/");
-  if (slashIdx < 0) return false;
-  const upstream = entry.id.slice(0, slashIdx).toLowerCase();
-  return UNIFIED_BILLING_PROVIDERS.has(upstream);
-}
-
+// Offline fallback only: accurate context/pricing for the default and
+// plumbing models before (or without) the live catalog. Not a recommendation —
+// the picker's featured list is ranked from live benchmark data (see
+// featuredModels). Verified against https://openrouter.ai/api/v1/models on
+// 2026-09-25; the live catalog replaces these numbers once it loads.
 const SEED: ModelEntry[] = [
-  // ── Kimi models (Cloudflare Workers AI, native to kimiflare) ──────────────
-  {
-    id: "@cf/moonshotai/kimi-k2.7-code",
-    provider: "workers-ai",
-    contextWindow: 262_144,
-    maxOutputTokens: 16_384,
-    pricing: { inputPerMtok: 0.95, cachedInputPerMtok: 0.19, outputPerMtok: 4.0 },
-    supports: { tools: true, reasoning: true, streaming: true, vision: true },
-    billingMode: "unified",
-  },
-  // ── Kimi K3 (Cloudflare model catalog, third-party, Unified Billing) ─────
-  // Verified live 2026-08-19 against
-  //   POST api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions
-  // with `cf-aig-gateway-id`: streaming, reasoning_content deltas, tool calls
-  // and usage all parse; Cloudflare pays Moonshot from AI Gateway credits.
-  // Pricing per Moonshot (platform.kimi.ai/docs/pricing/chat-k3): $3.00 in,
-  // $0.30 cached in, $15.00 out per 1M tokens; Cloudflare passes it through.
   {
     id: "moonshotai/kimi-k3",
-    provider: "moonshotai",
+    name: "MoonshotAI: Kimi K3",
     contextWindow: 1_048_576,
     maxOutputTokens: 131_072,
-    pricing: { inputPerMtok: 3.0, cachedInputPerMtok: 0.3, outputPerMtok: 15.0 },
-    // K3 fixes temperature=1.0 — sending any other value is a 400
-    // ("invalid temperature: only 1 is allowed for this model"), so we omit it.
-    // Reasoning is always on; `reasoning_effort` low/medium/high are accepted.
+    pricing: { inputPerMtok: 0.8845, cachedInputPerMtok: 0.33, outputPerMtok: 10.5346 },
+    // K3 fixes temperature=1.0 — sending any other value is a 400, so we omit it.
     supports: { tools: true, reasoning: true, streaming: true, vision: true, temperature: false },
-    billingMode: "unified",
   },
   {
-    id: "@cf/moonshotai/kimi-k2.6",
-    provider: "workers-ai",
+    id: "moonshotai/kimi-k2.7-code",
+    name: "MoonshotAI: Kimi K2.7 Code",
+    contextWindow: 262_144,
+    maxOutputTokens: 16_384,
+    pricing: { inputPerMtok: 0.6562, cachedInputPerMtok: 0.18, outputPerMtok: 3.3 },
+    supports: { tools: true, reasoning: true, streaming: true, vision: true },
+  },
+  {
+    id: "moonshotai/kimi-k2.6",
+    name: "MoonshotAI: Kimi K2.6",
     contextWindow: 262_144,
     maxOutputTokens: 16_384,
     pricing: { inputPerMtok: 0.95, cachedInputPerMtok: 0.16, outputPerMtok: 4.0 },
-    supports: { tools: true, reasoning: true, streaming: true },
-    billingMode: "unified",
+    supports: { tools: true, reasoning: true, streaming: true, vision: true },
   },
   {
-    id: "@cf/moonshotai/kimi-k2.5",
-    provider: "workers-ai",
+    id: "moonshotai/kimi-k2.5",
+    name: "MoonshotAI: Kimi K2.5",
     contextWindow: 262_144,
     maxOutputTokens: 16_384,
-    pricing: { inputPerMtok: 0.55, cachedInputPerMtok: 0.11, outputPerMtok: 2.19 },
-    supports: { tools: true, reasoning: true, streaming: true },
-    billingMode: "unified",
-  },
-  // ── GLM (Zhipu AI on Cloudflare Workers AI) ───────────────────────────────
-  {
-    id: "@cf/zai-org/glm-5.2",
-    provider: "workers-ai",
-    contextWindow: 262_144,
-    maxOutputTokens: 16_384,
-    pricing: { inputPerMtok: 1.4, cachedInputPerMtok: 0.26, outputPerMtok: 4.4 },
-    supports: { tools: true, reasoning: true, streaming: true },
-    billingMode: "unified",
+    pricing: { inputPerMtok: 0.45, cachedInputPerMtok: 0.07, outputPerMtok: 2.25 },
+    supports: { tools: true, reasoning: true, streaming: true, vision: true },
   },
 ];
 
 const seedIndex = new Map<string, ModelEntry>(SEED.map((m) => [m.id, m]));
 let userOverrides: Map<string, ModelEntry> = new Map();
+/** Live OpenRouter catalog, populated by `registerOpenRouterModels()` (see openrouter-catalog.ts).
+ *  Empty until that's called; registry.ts itself does no network I/O. */
+let openRouterIndex: Map<string, ModelEntry> = new Map();
 
 /** Register or replace entries from a user-supplied config (e.g. ~/.kimiflare/models.json). */
 export function registerUserModels(entries: ModelEntry[]): void {
   userOverrides = new Map(entries.map((m) => [m.id, m]));
 }
 
-/** Look up a model by id. Returns undefined for unknown models. */
-export function getModel(id: string): ModelEntry | undefined {
-  return userOverrides.get(id) ?? seedIndex.get(id);
+/** Register or replace the live OpenRouter catalog (see `loadOpenRouterCatalog()`). */
+export function registerOpenRouterModels(entries: ModelEntry[]): void {
+  openRouterIndex = new Map(
+    entries.map((m) => {
+      // The catalog can't express "accepts temperature, but only the default
+      // value" — keep the seed's hand-verified temperature=false (Kimi K3).
+      const seed = seedIndex.get(m.id);
+      if (seed?.supports.temperature === false) {
+        return [m.id, { ...m, supports: { ...m.supports, temperature: false } }];
+      }
+      return [m.id, m];
+    }),
+  );
 }
 
-/** Look up a model, falling back to a generic entry inferred from the id prefix. */
+/** True once a live (or cached) OpenRouter catalog has been registered. */
+export function hasOpenRouterCatalog(): boolean {
+  return openRouterIndex.size > 0;
+}
+
+/** Look up a model by id. Returns undefined for unknown models. */
+export function getModel(id: string): ModelEntry | undefined {
+  return userOverrides.get(id) ?? openRouterIndex.get(id) ?? seedIndex.get(id);
+}
+
+/** Look up a model, falling back to a generic entry for ids not in the catalog. */
 export function getModelOrInfer(id: string): ModelEntry {
   const hit = getModel(id);
   if (hit) return hit;
-  const provider = inferProvider(id);
   // Conservative defaults for unknown models — context/output kept small so
   // the harness errs on the side of compaction rather than wasted prompt tokens.
   return {
     id,
-    provider,
     contextWindow: 128_000,
     maxOutputTokens: 4_096,
     pricing: { inputPerMtok: 0, outputPerMtok: 0 },
     supports: { tools: true, reasoning: false, streaming: true },
-    billingMode: provider === "workers-ai" || provider === "moonshotai" ? "unified" : "byok",
   };
-}
-
-export function inferProvider(id: string): ModelProvider {
-  if (id.startsWith("@cf/")) return "workers-ai";
-  if (id.startsWith("anthropic/")) return "anthropic";
-  if (id.startsWith("openai/")) return "openai";
-  if (id.startsWith("google-ai-studio/") || id.startsWith("google/")) return "google";
-  if (id.startsWith("moonshotai/")) return "moonshotai";
-  return "openai-compatible";
 }
 
 export function listModels(): ModelEntry[] {
   const out = new Map(seedIndex);
+  for (const [k, v] of openRouterIndex) out.set(k, v);
   for (const [k, v] of userOverrides) out.set(k, v);
   return [...out.values()];
+}
+
+/** Vendor segment of an OpenRouter id: "moonshotai/kimi-k2.6" → "moonshotai". */
+export function vendorOf(id: string): string {
+  const slash = id.indexOf("/");
+  return slash < 0 ? id : id.slice(0, slash).replace(/^~/, "");
+}
+
+/**
+ * Free on OpenRouter: the catalog lists a zero input and output price
+ * (typically the `:free` variants). Ids missing from the catalog also carry
+ * zero pricing (see `getModelOrInfer`), but that means "unknown", not free.
+ */
+export function isFreeModel(entry: ModelEntry): boolean {
+  const zero = entry.pricing.inputPerMtok === 0 && entry.pricing.outputPerMtok === 0;
+  return zero && (entry.id.endsWith(":free") || getModel(entry.id) !== undefined);
+}
+
+/**
+ * Rewrite a model id from the Cloudflare era to its OpenRouter equivalent.
+ * Configs written before the OpenRouter switch persist Workers AI ids
+ * (`@cf/moonshotai/kimi-k2.6`) and AI Gateway ids (`google-ai-studio/…`).
+ * Anything already OpenRouter-shaped passes through unchanged.
+ */
+export function migrateLegacyModelId(id: string): string;
+export function migrateLegacyModelId(id: string | undefined): string | undefined;
+export function migrateLegacyModelId(id: string | undefined): string | undefined {
+  if (!id) return id;
+  const known = LEGACY_MODEL_IDS[id];
+  if (known) return known;
+  if (id.startsWith("@cf/")) {
+    // "@cf/<vendor>/<model>" → "<vendor>/<model>"; Workers AI's zai-org is z-ai on OpenRouter.
+    const rest = id.slice("@cf/".length);
+    return rest.replace(/^zai-org\//, "z-ai/");
+  }
+  if (id.startsWith("workers-ai/")) return migrateLegacyModelId(id.slice("workers-ai/".length));
+  if (id.startsWith("google-ai-studio/")) return `google/${id.slice("google-ai-studio/".length)}`;
+  return id;
+}
+
+const LEGACY_MODEL_IDS: Record<string, string> = {
+  "@cf/moonshotai/kimi-k2.7-code": "moonshotai/kimi-k2.7-code",
+  "@cf/moonshotai/kimi-k2.6": "moonshotai/kimi-k2.6",
+  "@cf/moonshotai/kimi-k2.5": "moonshotai/kimi-k2.5",
+  "@cf/zai-org/glm-5.2": "z-ai/glm-5.2",
+  "@cf/baai/bge-base-en-v1.5": "baai/bge-base-en-v1.5",
+};
+
+/** Variant / alias ids that duplicate a base model in listings. */
+function isListingDuplicate(id: string): boolean {
+  return id.startsWith("~") || /:(batch|free|nitro|floor|thinking|extended)$/.test(id);
+}
+
+/**
+ * The "best & latest" models to show when nothing is searched: recent
+ * (released within `maxAgeDays`), tool-capable models ranked by OpenRouter's
+ * published Artificial Analysis agentic + coding scores — the two that matter
+ * for a coding agent — with at most `perVendor` per vendor so no single lab
+ * crowds the list. Entirely data-driven: it changes as OpenRouter's catalog
+ * does, with no model names in code. Falls back to the seed list when the
+ * catalog carries no benchmark data (offline, first run without network).
+ */
+export function featuredModels(
+  models: ModelEntry[] = listModels(),
+  opts: { limit?: number; perVendor?: number; maxAgeDays?: number; now?: number } = {},
+): ModelEntry[] {
+  const limit = opts.limit ?? 12;
+  const perVendor = opts.perVendor ?? 2;
+  const maxAgeSec = (opts.maxAgeDays ?? 365) * 86_400;
+  const nowSec = (opts.now ?? Date.now()) / 1000;
+  const score = (m: ModelEntry) => (m.quality?.agentic ?? 0) + (m.quality?.coding ?? 0);
+
+  const ranked = models
+    .filter(
+      (m) =>
+        m.supports.tools &&
+        !isListingDuplicate(m.id) &&
+        score(m) > 0 &&
+        (m.created === undefined || nowSec - m.created <= maxAgeSec),
+    )
+    .sort((a, b) => score(b) - score(a) || (b.created ?? 0) - (a.created ?? 0));
+
+  const out: ModelEntry[] = [];
+  const perVendorCount = new Map<string, number>();
+  for (const m of ranked) {
+    const v = vendorOf(m.id);
+    const n = perVendorCount.get(v) ?? 0;
+    if (n >= perVendor) continue;
+    perVendorCount.set(v, n + 1);
+    out.push(m);
+    if (out.length >= limit) break;
+  }
+  return out.length > 0 ? out : SEED.filter((s) => models.some((m) => m.id === s.id));
 }

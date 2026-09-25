@@ -16,7 +16,8 @@ import {
   type SessionState,
 } from "../agent/session-state.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
-import type { GatewayMeta } from "../agent/client.js";
+import type { ResponseMeta } from "../agent/client.js";
+import { hasLlmAuth, llmAuthFromConfig } from "../agent/llm-auth.js";
 import type { MemoryManager } from "../memory/manager.js";
 import { injectRecalledMemoryOnce } from "../memory/recall-inject.js";
 import { getCostReport } from "../usage-tracker.js";
@@ -24,8 +25,9 @@ import type { DailyUsage } from "../usage-tracker.js";
 import type { ChatEvent } from "./chat.js";
 import { setLogSessionId } from "../util/log-sink.js";
 import type { Mode } from "../mode.js";
-import { DEFAULT_AUTO_FRESH_SUGGESTION_TURNS, gatewayFromConfig } from "./app-helpers.js";
+import { DEFAULT_AUTO_FRESH_SUGGESTION_TURNS } from "./app-helpers.js";
 import { generateContinuationSummary } from "../agent/continuation-summary.js";
+import { DEFAULT_PLUMBING_MODEL } from "../config.js";
 
 /**
  * Pull the first chunk of user text out of a message list — used to
@@ -67,14 +69,11 @@ export interface SessionManagerDeps {
   cfg: {
     model: string;
     autoFreshSuggestionTurns?: number;
-    accountId?: string;
-    apiToken?: string;
+    openrouterApiKey?: string;
+    baseUrl?: string;
+    apiKey?: string;
+    openrouterProvider?: import("../agent/client.js").OpenRouterProviderPrefs;
     plumbingModel?: string;
-    aiGatewayId?: string;
-    aiGatewayCacheTtl?: number;
-    aiGatewaySkipCache?: boolean;
-    aiGatewayCollectLogPayload?: boolean;
-    aiGatewayMetadata?: Record<string, string | number | boolean>;
     memoryEnabled?: boolean;
   } | null;
   /** Current agent mode. */
@@ -86,14 +85,14 @@ export interface SessionManagerDeps {
   sessionStateRef: React.MutableRefObject<SessionState>;
   artifactStoreRef: React.MutableRefObject<ArtifactStore>;
   compiledContextRef: React.MutableRefObject<boolean>;
-  gatewayMetaRef: React.MutableRefObject<GatewayMeta | null>;
+  responseMetaRef: React.MutableRefObject<ResponseMeta | null>;
   memoryManagerRef: React.MutableRefObject<MemoryManager | null>;
   // State setters the resume flow needs to reach into.
   setEvents: React.Dispatch<React.SetStateAction<ChatEvent[]>>;
   setHistory: (h: string[]) => void;
   setUsage: (u: Usage | null) => void;
   setSessionUsage: (s: DailyUsage | null) => void;
-  setGatewayMeta: (g: GatewayMeta | null) => void;
+  setResponseMeta: (m: ResponseMeta | null) => void;
   /** Stable key generator for event-list items. */
   mkKey: () => string;
 }
@@ -283,7 +282,7 @@ export function useSessionManager(deps: SessionManagerDeps): SessionManager {
           ]);
         }
 
-        if (d.cfg && d.cfg.accountId && d.cfg.apiToken) {
+        if (d.cfg && hasLlmAuth(llmAuthFromConfig(d.cfg))) {
           setResumeProgress(40);
           setResumeStage("Generating continuation summary…");
           // Smooth crawl from 40 % → 80 % over 12 s.  If tokens stream fast
@@ -293,10 +292,8 @@ export function useSessionManager(deps: SessionManagerDeps): SessionManager {
             const summary = await generateContinuationSummary({
               messages: d.messagesRef.current,
               mode: d.mode,
-              accountId: d.cfg.accountId,
-              apiToken: d.cfg.apiToken,
-              model: d.cfg.plumbingModel ?? "@cf/moonshotai/kimi-k2.5",
-              gateway: gatewayFromConfig(d.cfg as Parameters<typeof gatewayFromConfig>[0]),
+              ...llmAuthFromConfig(d.cfg),
+              model: d.cfg.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
               memoryManager: d.memoryManagerRef.current,
               memoryEnabled: d.cfg.memoryEnabled,
               onProgress: (charDelta) => {
@@ -358,8 +355,8 @@ export function useSessionManager(deps: SessionManagerDeps): SessionManager {
         if (userMsgs.length > 0) d.setHistory(userMsgs);
         d.setUsage(null);
         d.setSessionUsage(null);
-        d.gatewayMetaRef.current = null;
-        d.setGatewayMeta(null);
+        d.responseMetaRef.current = null;
+        d.setResponseMeta(null);
         void getCostReport(file.id).then((report) => d.setSessionUsage(report.session));
       } catch (e) {
         stopSmoothProgress();

@@ -15,11 +15,10 @@ describe("resolvePlanForFresh", () => {
     tmpDir = await mkdtemp(join(tmpdir(), "kimiflare-plan-resolver-test-"));
     manager = new MemoryManager({
       dbPath: join(tmpDir, "memory.db"),
-      accountId: "test-account",
-      apiToken: "test-token",
-      model: "@cf/moonshotai/kimi-k2.7-code",
-      plumbingModel: "@cf/moonshotai/kimi-k2.5",
-      embeddingModel: "@cf/baai/bge-base-en-v1.5",
+      openrouterApiKey: "sk-or-test",
+      model: "moonshotai/kimi-k2.7-code",
+      plumbingModel: "moonshotai/kimi-k2.5",
+      embeddingModel: "baai/bge-base-en-v1.5",
     });
     manager.open();
   });

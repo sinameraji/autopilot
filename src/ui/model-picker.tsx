@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "./theme-context.js";
-import { listModels, type ModelEntry, type ModelPricing, type ModelProvider } from "../models/registry.js";
+import { featuredModels, listModels, type ModelEntry, type ModelPricing } from "../models/registry.js";
 import { fuzzyFilter } from "../util/fuzzy.js";
 
 interface Props {
@@ -9,25 +9,9 @@ interface Props {
   onPick: (model: ModelEntry | null) => void;
   /** Optional whitelist of models. When provided, only these models are shown. */
   models?: ModelEntry[];
+  /** Heading override (onboarding uses its own wording). */
+  title?: string;
 }
-
-const PROVIDER_ORDER: ModelProvider[] = [
-  "workers-ai",
-  "moonshotai",
-  "anthropic",
-  "openai",
-  "google",
-  "openai-compatible",
-];
-
-const PROVIDER_LABEL: Record<ModelProvider, string> = {
-  "workers-ai": "Cloudflare Workers AI",
-  moonshotai: "Moonshot AI",
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-  google: "Google",
-  "openai-compatible": "Other (OpenAI-compatible)",
-};
 
 const PAGE_SIZE = 30;
 const MIN_ID_WIDTH = 18;
@@ -39,13 +23,17 @@ function formatContext(n: number): string {
 }
 
 function dollar(n: number): string {
-  return `$${n}`;
+  // Catalog prices are per-token decimals scaled to per-Mtok; trim float noise.
+  return `$${Number(n.toPrecision(4))}`;
 }
 
-function formatPrice(p: ModelPricing): string {
+/** "$0.95 / $4 / $0.16" (input / output / cached input, USD per Mtok), or "free". */
+export function formatModelPrice(p: ModelPricing): string {
+  if (p.inputPerMtok === 0 && p.outputPerMtok === 0) return "free";
   const head = `${dollar(p.inputPerMtok)} / ${dollar(p.outputPerMtok)}`;
   return p.cachedInputPerMtok !== undefined ? `${head} / ${dollar(p.cachedInputPerMtok)}` : head;
 }
+const formatPrice = formatModelPrice;
 
 /** Longest path-segment-aligned common prefix shared by every id. Empty if none. */
 function commonSlashPrefix(ids: string[]): string {
@@ -97,32 +85,35 @@ interface BuildOpts {
   ctxColWidth: number;
 }
 
-function buildRowsGrouped(opts: BuildOpts): Row[] {
+/**
+ * The default (unsearched) view: only the best & latest models (see
+ * featuredModels — ranked live from OpenRouter's benchmark data), plus the
+ * current model if it isn't among them. Everything else is one search away.
+ */
+function buildRowsFeatured(opts: BuildOpts): Row[] {
   const { models, current } = opts;
-  const byProvider = new Map<ModelProvider, ModelEntry[]>();
-  for (const m of models) {
-    const arr = byProvider.get(m.provider) ?? [];
-    arr.push(m);
-    byProvider.set(m.provider, arr);
-  }
+  const featured = featuredModels(models);
   const rows: Row[] = [];
-  for (const p of PROVIDER_ORDER) {
-    const list = byProvider.get(p);
-    if (!list || list.length === 0) continue;
-    rows.push({ kind: "header", label: PROVIDER_LABEL[p], key: `__hdr_${p}__` });
-    const prefix = commonSlashPrefix(list.map((m) => m.id));
-    for (const m of list) {
-      const stripped = prefix && m.id.startsWith(prefix) ? m.id.slice(prefix.length) : m.id;
-      rows.push({
-        kind: "model",
-        model: m,
-        displayId: stripped,
-        context: formatContext(m.contextWindow),
-        price: formatPrice(m.pricing),
-        isCurrent: m.id === current,
-      });
-    }
+  const push = (m: ModelEntry) =>
+    rows.push({
+      kind: "model",
+      model: m,
+      displayId: m.id,
+      context: formatContext(m.contextWindow),
+      price: formatPrice(m.pricing),
+      isCurrent: m.id === current,
+    });
+  const cur = current ? models.find((m) => m.id === current) : undefined;
+  if (cur && !featured.some((m) => m.id === cur.id)) {
+    rows.push({ kind: "header", label: "Current", key: "__hdr_current__" });
+    push(cur);
   }
+  rows.push({
+    kind: "header",
+    label: "Best & latest — ranked by agentic + coding benchmarks",
+    key: "__hdr_featured__",
+  });
+  for (const m of featured) push(m);
   return rows;
 }
 
@@ -143,17 +134,29 @@ function buildRowsFlat(opts: BuildOpts): Row[] {
   return rows;
 }
 
-export function ModelPicker({ current, onPick, models }: Props) {
+/**
+ * Fuzzy search over id + display name, best matches first (the shared
+ * fuzzyFilter). Equally good matches come newest-first, and `:batch`
+ * variants — a duplicate of almost every model, meant for offline batch
+ * jobs — are left out (still selectable with `/model <id>`).
+ */
+export function filterModels(models: ModelEntry[], query: string): ModelEntry[] {
+  const candidates = models
+    .filter((m) => !m.id.endsWith(":batch"))
+    .sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
+  return fuzzyFilter(candidates, query, (m) => `${m.id} ${m.name ?? ""}`);
+}
+
+export function ModelPicker({ current, onPick, models, title }: Props) {
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const allModels = useMemo(() => models ?? listModels(), [models]);
-  const filtered = useMemo(() => {
-    if (!query.trim()) return allModels;
-    return fuzzyFilter(allModels, query, (m) => `${m.id} ${m.provider}`);
-  }, [allModels, query]);
+  // A coding agent can't work without tool calling, so models OpenRouter
+  // lists without `tools` support are hidden (still selectable via /model <id>).
+  const allModels = useMemo(() => (models ?? listModels()).filter((m) => m.supports.tools), [models]);
+  const filtered = useMemo(() => filterModels(allModels, query), [allModels, query]);
 
   // Build rows first with placeholder widths, then measure & re-pad.
   const baseOpts: BuildOpts = {
@@ -163,7 +166,7 @@ export function ModelPicker({ current, onPick, models }: Props) {
     idColWidth: MIN_ID_WIDTH,
     ctxColWidth: 6,
   };
-  const rawRows: Row[] = query.trim() ? buildRowsFlat(baseOpts) : buildRowsGrouped(baseOpts);
+  const rawRows: Row[] = query.trim() ? buildRowsFlat(baseOpts) : buildRowsFeatured(baseOpts);
 
   // Measure column widths from visible model rows.
   const modelRows = rawRows.filter((r): r is Extract<Row, { kind: "model" }> => r.kind === "model");
@@ -245,8 +248,11 @@ export function ModelPicker({ current, onPick, models }: Props) {
       setSelectedIndex(0);
       return;
     }
-    if (input.length === 1 && !key.ctrl && !key.meta && !key.return && !key.escape) {
-      setQuery((q) => q + input);
+    // Keystrokes typed while a render is in flight arrive together as one
+    // multi-char `input` — accept all printable characters, not just 1-char input.
+    const printable = input.replace(/[\x00-\x1f\x7f]/g, "");
+    if (printable.length > 0 && !key.ctrl && !key.meta && !key.return && !key.escape) {
+      setQuery((q) => q + printable);
       setPage(0);
       setSelectedIndex(0);
       return;
@@ -265,13 +271,29 @@ export function ModelPicker({ current, onPick, models }: Props) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
       <Text color={theme.accent} bold>
-        Pick a model  ·  current: {current}
+        {title ?? `Pick a model${current ? `  ·  current: ${current}` : ""}`}
       </Text>
-      <Text color={theme.info.color}>
-        {query ? `Search: ${query}▌` : "Type to search…"}
-        {totalPages > 1 ? `  ·  Page ${safePage + 1} of ${totalPages}` : ""}
-        {`  ·  ${modelRows.length} model${modelRows.length === 1 ? "" : "s"}`}
-      </Text>
+      {/* Search box: always live — typing anywhere in the picker goes here. */}
+      <Box borderStyle="round" borderColor={query ? theme.accent : theme.info.color} paddingX={1} marginTop={1}>
+        <Text color={theme.accent}>⌕ </Text>
+        {query ? (
+          <Text>
+            {query}
+            <Text color={theme.accent}>▌</Text>
+          </Text>
+        ) : (
+          <Text color={theme.info.color} dimColor>
+            <Text color={theme.accent}>▌</Text>
+            {`Search all ${allModels.length} models (fuzzy) — e.g. sonnet, gpt 6, gemini flash`}
+          </Text>
+        )}
+      </Box>
+      {query ? (
+        <Text color={theme.info.color}>
+          {`${modelRows.length} match${modelRows.length === 1 ? "" : "es"}`}
+          {totalPages > 1 ? `  ·  page ${safePage + 1} of ${totalPages}` : ""}
+        </Text>
+      ) : null}
       <Box marginTop={1}>
         <Text color={theme.muted?.color ?? theme.info.color} dimColor>
           {headerLine}

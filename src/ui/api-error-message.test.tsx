@@ -28,8 +28,9 @@ describe("ApiErrorMessage", () => {
     assert.ok(out.includes("code: 3040"));
   });
 
-  it("shows the report hint", () => {
+  it("points at provider status and /model", () => {
     const out = render({ message: "Something went wrong" });
-    assert.ok(out.includes("Type /report to send diagnostic info"));
+    assert.ok(out.includes("status.openrouter.ai"));
+    assert.ok(out.includes("/model"));
   });
 });

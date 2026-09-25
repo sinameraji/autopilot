@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
-import type { AiGatewayOptions } from "../agent/client.js";
+import type { OpenRouterProviderPrefs } from "../agent/client.js";
+import type { CustomEndpoint } from "../agent/custom-endpoint.js";
 import { runKimi } from "../agent/client.js";
 import type { ChatMessage } from "../agent/messages.js";
 import type { Memory, MemoryInput, MemoryQuery, HybridResult, MemoryStats, MemoryCategory } from "./schema.js";
@@ -21,42 +22,41 @@ import {
   countHighSignalMemoriesSince,
 } from "./db.js";
 import { fetchEmbeddings } from "./embeddings.js";
-import { DEFAULT_MODEL, DEFAULT_CLOUD_MODEL } from "../config.js";
+import { DEFAULT_MODEL, DEFAULT_PLUMBING_MODEL } from "../config.js";
 import { retrieveMemories } from "./retrieval.js";
 import { runCleanup, shouldCleanup } from "./cleanup.js";
 
 export interface MemoryManagerOpts {
   dbPath: string;
-  accountId: string;
-  apiToken: string;
+  openrouterApiKey?: string;
+  customEndpoint?: CustomEndpoint;
   model?: string;
   plumbingModel?: string;
   extractionModel?: string;
   embeddingModel?: string;
-  gateway?: AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
   maxAgeDays?: number;
   maxEntries?: number;
   redactSecrets?: boolean;
-  cloudMode?: boolean;
 }
 
 interface LlmOpts {
-  accountId: string;
-  apiToken: string;
+  openrouterApiKey?: string;
+  customEndpoint?: CustomEndpoint;
   model: string;
-  gateway?: AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
   signal?: AbortSignal;
 }
 
 async function runKimiText(opts: LlmOpts & { messages: ChatMessage[]; temperature?: number }): Promise<string> {
   const events = runKimi({
-    accountId: opts.accountId,
-    apiToken: opts.apiToken,
+    openrouterApiKey: opts.openrouterApiKey,
+    customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: opts.messages,
     temperature: opts.temperature ?? 0.1,
     reasoningEffort: "low",
-    gateway: opts.gateway,
+    provider: opts.provider,
     signal: opts.signal,
   });
   let text = "";
@@ -161,28 +161,28 @@ export class MemoryManager {
 
   private get llmOpts(): LlmOpts {
     return {
-      accountId: this.opts.accountId,
-      apiToken: this.opts.apiToken,
-      model: this.opts.model ?? (this.opts.cloudMode ? DEFAULT_CLOUD_MODEL : DEFAULT_MODEL),
-      gateway: this.opts.gateway,
+      openrouterApiKey: this.opts.openrouterApiKey,
+      customEndpoint: this.opts.customEndpoint,
+      model: this.opts.model ?? DEFAULT_MODEL,
+      provider: this.opts.provider,
     };
   }
 
   private get plumbingLlmOpts(): LlmOpts {
     return {
-      accountId: this.opts.accountId,
-      apiToken: this.opts.apiToken,
-      model: this.opts.plumbingModel ?? "@cf/moonshotai/kimi-k2.5",
-      gateway: this.opts.gateway,
+      openrouterApiKey: this.opts.openrouterApiKey,
+      customEndpoint: this.opts.customEndpoint,
+      model: this.opts.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
+      provider: this.opts.provider,
     };
   }
 
   private get extractionLlmOpts(): LlmOpts {
     return {
-      accountId: this.opts.accountId,
-      apiToken: this.opts.apiToken,
-      model: this.opts.extractionModel ?? "@cf/moonshotai/kimi-k2.5",
-      gateway: this.opts.gateway,
+      openrouterApiKey: this.opts.openrouterApiKey,
+      customEndpoint: this.opts.customEndpoint,
+      model: this.opts.extractionModel ?? DEFAULT_PLUMBING_MODEL,
+      provider: this.opts.provider,
     };
   }
 
@@ -247,11 +247,11 @@ export class MemoryManager {
 
     // 6. Embed and store
     const embeddings = await fetchEmbeddings({
-      accountId: this.opts.accountId,
-      apiToken: this.opts.apiToken,
+      openrouterApiKey: this.opts.openrouterApiKey,
+      customEndpoint: this.opts.customEndpoint,
       model: this.opts.embeddingModel,
       texts: [embedText],
-      gateway: this.opts.gateway,
+      provider: this.opts.provider,
     });
 
     const input: MemoryInput = {
@@ -390,11 +390,11 @@ export class MemoryManager {
     if (!query.embedding && query.text) {
       try {
         const embeddings = await fetchEmbeddings({
-          accountId: this.opts.accountId,
-          apiToken: this.opts.apiToken,
+          openrouterApiKey: this.opts.openrouterApiKey,
+          customEndpoint: this.opts.customEndpoint,
           model: this.opts.embeddingModel,
           texts: [query.text],
-          gateway: this.opts.gateway,
+          provider: this.opts.provider,
         });
         query.embedding = embeddings[0];
       } catch {
@@ -470,11 +470,11 @@ export class MemoryManager {
     for (const mem of unvectorized) {
       try {
         const embeddings = await fetchEmbeddings({
-          accountId: this.opts.accountId,
-          apiToken: this.opts.apiToken,
+          openrouterApiKey: this.opts.openrouterApiKey,
+          customEndpoint: this.opts.customEndpoint,
           model: this.opts.embeddingModel,
           texts: [mem.content],
-          gateway: this.opts.gateway,
+          provider: this.opts.provider,
         });
         updateMemoryEmbedding(this.db, mem.id, embeddings[0]!);
         fixed++;

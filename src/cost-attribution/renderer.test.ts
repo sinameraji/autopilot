@@ -23,7 +23,7 @@ describe("renderTerminal", () => {
     topSessions: [
       { sessionId: "abc", date: "2026-04-28", cost: 5.2, category: "editing-source-code", summary: "cache fix" },
     ],
-    reconciliation: { status: "verified", localCost: 40.3, cloudflareCost: 40.5, driftPct: 0.5 },
+    reconciliation: { status: "verified", localCost: 40.3, providerCost: 40.5, driftPct: 0.5 },
   };
 
   it("renders category rows", () => {
@@ -49,13 +49,13 @@ describe("renderTerminal", () => {
 
   it("renders reconciliation verified", () => {
     const out = renderTerminal(baseReport);
-    assert.ok(out.includes("Verified against Cloudflare: ✓"));
+    assert.ok(out.includes("Verified against OpenRouter: ✓"));
   });
 
   it("renders reconciliation drift", () => {
     const report: CostAttributionReport = {
       ...baseReport,
-      reconciliation: { status: "drift", localCost: 40.3, cloudflareCost: 41.0, driftPct: 1.7 },
+      reconciliation: { status: "drift", localCost: 40.3, providerCost: 41.0, driftPct: 1.7 },
     };
     const out = renderTerminal(report);
     assert.ok(out.includes("✗"));

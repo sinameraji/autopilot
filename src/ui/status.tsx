@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
 import Spinner from "ink-spinner";
 import type { Usage } from "../agent/messages.js";
-import type { GatewayMeta } from "../agent/client.js";
+import type { ResponseMeta } from "../agent/client.js";
 import { useTheme } from "./theme-context.js";
 import type { Theme } from "./theme.js";
 import type { Mode } from "../mode.js";
@@ -18,13 +18,13 @@ interface Props {
   thinking: boolean;
   turnStartedAt: number | null;
   mode: Mode;
+  /** Plan/edit/auto modes feature flag; when off the mode badge and tip are hidden. */
+  modesEnabled?: boolean;
   contextLimit: number;
   /** Active model id (shown in status bar). */
   model?: string;
-  gatewayMeta?: GatewayMeta | null;
+  responseMeta?: ResponseMeta | null;
   codeMode?: boolean;
-  cloudMode?: boolean;
-  cloudBudget?: { remaining: number; limit: number } | null;
   /** Number of skills active this turn */
   skillsActive?: number;
   /** Whether memory was recalled this turn */
@@ -37,7 +37,7 @@ interface Props {
   intentTier?: IntentTier;
 }
 
-export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, contextLimit, model, gatewayMeta, codeMode, cloudMode, cloudBudget, skillsActive, memoryRecalled, phase, currentTool, lastActivityAt, kimiMdStale, gitBranch, intentTier }: Props) {
+export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, modesEnabled = true, contextLimit, model, responseMeta, codeMode, skillsActive, memoryRecalled, phase, currentTool, lastActivityAt, kimiMdStale, gitBranch, intentTier }: Props) {
   const theme = useTheme();
   const [now, setNow] = useState(Date.now());
   const modeColor =
@@ -54,9 +54,7 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
 
   const idleParts: string[] = [];
   if (gitBranch) idleParts.push(gitBranch);
-  // In cloud mode the model is managed by KimiFlare Cloud and hidden from the user.
-  if (model && !cloudMode) idleParts.push(shortenModelId(model));
-  if (cloudMode) idleParts.push("CLOUD");
+  if (model) idleParts.push(shortenModelId(model));
   if (codeMode) idleParts.push("CODE");
 
   const metaParts: string[] = [];
@@ -111,10 +109,14 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
   return (
     <Box flexDirection="column">
       <Box>
-        <Text color={modeColor} bold>
-          [{mode}]
-        </Text>
-        <Text> </Text>
+        {modesEnabled ? (
+          <>
+            <Text color={modeColor} bold>
+              [{mode}]
+            </Text>
+            <Text> </Text>
+          </>
+        ) : null}
         {thinking ? (
           <Text color={theme.spinner}>
             <Spinner type="dots2" />{" "}
@@ -129,7 +131,7 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
       {usage && (
         <Box>
           <Text color={theme.info.color} >
-            {buildRightParts(usage, contextLimit, sessionUsage, gatewayMeta, cloudMode, cloudBudget, model).join("  ·  ")}
+            {buildRightParts(usage, contextLimit, sessionUsage, responseMeta, model).join("  ·  ")}
           </Text>
           {sessionUsage?.reconcilePending ? (
             <Text color={theme.muted?.color ?? theme.info.color} dimColor={theme.muted?.dim ?? true}>
@@ -149,7 +151,7 @@ export function StatusBar({ usage, sessionUsage, thinking, turnStartedAt, mode, 
           ) : null}
         </Box>
       )}
-      {!thinking && (
+      {!thinking && modesEnabled && (
         <Box>
           <Text color={theme.muted?.color ?? theme.info.color} dimColor={theme.muted?.dim}>
             tip: shift+tab cycles mode
@@ -164,66 +166,64 @@ export function buildRightParts(
   usage: Usage,
   contextLimit: number,
   sessionUsage?: DailyUsage | null,
-  gatewayMeta?: GatewayMeta | null,
-  cloudMode?: boolean,
-  cloudBudget?: { remaining: number; limit: number } | null,
+  responseMeta?: ResponseMeta | null,
   model?: string,
 ): string[] {
   const pct = Math.round((usage.prompt_tokens / contextLimit) * 100);
   const parts: string[] = [];
   if (sessionUsage) {
+    // Session totals: every request in the session, including each tool round
+    // (which re-sends the context) — the same tokens OpenRouter bills.
     const cached = sessionUsage.cachedTokens;
-    parts.push(`in ${sessionUsage.promptTokens}${cached ? ` (${cached} cached)` : ""}`);
+    parts.push(`in ${fmtCount(sessionUsage.promptTokens)}${cached ? ` (${fmtCount(cached)} cached)` : ""}`);
+    parts.push(`out ${fmtCount(sessionUsage.completionTokens)}`);
     parts.push(`ctx ${pct}%`);
-    // ≈ prefix signals the cost is still the local estimate; once Gateway
-    // reconciles the turn, the prefix and accompanying spinner go away.
-    const prefix = sessionUsage.reconcilePending ? "≈$" : "$";
-    if (cloudMode) {
-      parts.push(`\x1b[9m${prefix}${sessionUsage.cost.toFixed(2)}\x1b[29m`);
-    } else {
-      parts.push(`${prefix}${sessionUsage.cost.toFixed(2)}`);
-    }
+    // ≈ prefix signals the cost is still the local estimate; once OpenRouter
+    // confirms the turn's billed cost, the prefix and spinner go away.
+    parts.push(`${sessionUsage.reconcilePending ? "≈" : ""}${formatUsd(sessionUsage.cost)}`);
     if (typeof sessionUsage.lastTurnMs === "number") {
       parts.push(formatDuration(sessionUsage.lastTurnMs));
     }
   } else {
     const cached = usage.prompt_tokens_details?.cached_tokens ?? 0;
-    // Pass the current model so pricing.ts uses that provider's rates instead
-    // of falling back to Kimi K2.6's hardcoded constants — otherwise an Opus
-    // turn (\$15 in / \$75 out per Mtok) shows up as if it cost Kimi rates.
-    const cost = calculateCost(usage.prompt_tokens, usage.completion_tokens, cached, model);
-    parts.push(`in ${usage.prompt_tokens}${cached ? ` (${cached} cached)` : ""}`);
+    // OpenRouter reports the billed cost inline; fall back to the price table.
+    const cost =
+      typeof usage.cost === "number"
+        ? usage.cost
+        : calculateCost(usage.prompt_tokens, usage.completion_tokens, cached, model).total;
+    parts.push(`in ${fmtCount(usage.prompt_tokens)}${cached ? ` (${fmtCount(cached)} cached)` : ""}`);
+    parts.push(`out ${fmtCount(usage.completion_tokens)}`);
     parts.push(`ctx ${pct}%`);
-    if (cloudMode) {
-      parts.push(`\x1b[9m${cost.total.toFixed(2)}\x1b[29m`);
-    } else {
-      parts.push(`${cost.total.toFixed(2)}`);
-    }
+    parts.push(formatUsd(cost));
   }
-  if (cloudMode && cloudBudget) {
-    parts.push(`${formatTokens(cloudBudget.remaining)}/${formatTokens(cloudBudget.limit)} tokens`);
-  }
-  const gatewayCache = formatGatewayCacheStatus(gatewayMeta);
-  if (gatewayCache) parts.push(gatewayCache);
+  const provider = formatProviderTag(responseMeta);
+  if (provider) parts.push(provider);
   return parts;
 }
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
+/** Token count with thousands separators: 8417 → "8,417". */
+function fmtCount(n: number): string {
+  return n.toLocaleString("en-US");
 }
 
-export function formatGatewayCacheStatus(gatewayMeta?: GatewayMeta | null): string | null {
-  const status = gatewayMeta?.cacheStatus?.trim();
-  if (!status) return null;
-  // Suppress "miss" — the gateway returns MISS on every uncached request,
-  // including when caching isn't configured at all, so it'd otherwise read
-  // like a constant failure. Hits (and other non-miss statuses like
-  // REVALIDATED / BYPASS) are still surfaced — those are the useful signals.
-  if (status.toUpperCase() === "MISS") return null;
-  return `AI Gateway · cache ${status.toLowerCase()}`;
+/**
+ * USD with enough precision to be meaningful: small per-session costs are
+ * usually fractions of a cent, which `toFixed(2)` rounds to "$0.00".
+ * 0 → "$0", 0.00214 → "$0.0021", 0.1234 → "$0.123", 12.5 → "$12.50".
+ */
+export function formatUsd(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "$0";
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 0.1) return `$${n.toFixed(3)}`;
+  return `$${n.toPrecision(2).replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+
+/** "via <upstream>" — OpenRouter picks the upstream provider per request
+ *  (price, uptime, tool-calling quality), so which one served the last turn
+ *  is worth seeing when latency or behaviour changes. */
+export function formatProviderTag(meta?: ResponseMeta | null): string | null {
+  const provider = meta?.provider?.trim();
+  return provider ? `via ${provider}` : null;
 }
 
 function formatDuration(ms: number): string {
@@ -231,8 +231,8 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-/** Shorten a model id for the status bar: drop the provider prefix and keep
- *  the recognizable tail. "@cf/moonshotai/kimi-k2.7-code" → "kimi-k2.7-code",
+/** Shorten a model id for the status bar: drop the vendor prefix and keep
+ *  the recognizable tail. "moonshotai/kimi-k2.7-code" → "kimi-k2.7-code",
  *  "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6". */
 export function shortenModelId(id: string): string {
   if (id.startsWith("@")) {

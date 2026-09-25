@@ -1,164 +1,85 @@
 /**
- * Cloudflare AI Gateway reconciliation: bulk-fetch /ai-gateway logs in the
- * given date range and treat the gateway's cost as ground truth.
+ * OpenRouter reconciliation for `kimiflare cost`.
+ *
+ * Every turn is confirmed individually as it happens (the stream's usage
+ * accounting, or the /generation lookup — see usage-tracker.ts), so the
+ * confirmed numbers are already in usage.json. Reconciling a date range means
+ * comparing those confirmed costs with the local price-table estimates for
+ * the same turns, and reporting any turns OpenRouter never confirmed.
+ * Optionally, the key's all-time spend from GET /key is attached as an
+ * independent cross-check.
  */
 
+import type { SessionUsage } from "../usage-tracker.js";
 import type { ReconciliationResult } from "./types.js";
-import { getUserAgent } from "../util/version.js";
+import { checkOpenRouterKey } from "../models/openrouter.js";
 
 export interface ReconcileOptions {
   localCost: number;
-  accountId?: string;
-  apiToken?: string;
-  gatewayId?: string;
-  startDate: string; // YYYY-MM-DD inclusive
-  endDate: string;   // YYYY-MM-DD inclusive
+  sessions: SessionUsage[];
+  /** When set, GET /key is queried for the key's all-time spend. */
+  apiKey?: string;
+  fetchImpl?: typeof fetch;
 }
 
-// In-memory cache for 1 hour
-const cache = new Map<string, { result: ReconciliationResult; expires: number }>();
-
-function cacheKey(opts: ReconcileOptions): string {
-  return `${opts.gatewayId ?? "none"}:${opts.startDate}:${opts.endDate}`;
-}
-
-interface GatewayLog {
-  id?: string;
-  cost?: number;
-  cached?: boolean;
-  metadata?: Record<string, unknown> | string | null;
-  created_at?: string;
-}
-
-function toIsoStartOfDay(date: string): string {
-  return `${date}T00:00:00Z`;
-}
-
-function toIsoEndOfDay(date: string): string {
-  return `${date}T23:59:59Z`;
-}
-
-export async function fetchGatewayLogs(
-  accountId: string,
-  apiToken: string,
-  gatewayId: string,
-  startDate: string,
-  endDate: string,
-  pageLimit = 10,
-): Promise<GatewayLog[]> {
-  const base = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai-gateway/gateways/${encodeURIComponent(gatewayId)}/logs`;
-  const headers = {
-    Authorization: `Bearer ${apiToken}`,
-    "User-Agent": getUserAgent(),
-  };
-  const out: GatewayLog[] = [];
-  let cursor: string | undefined;
-  for (let i = 0; i < pageLimit; i++) {
-    const params = new URLSearchParams({
-      per_page: "500",
-      start_date: toIsoStartOfDay(startDate),
-      end_date: toIsoEndOfDay(endDate),
-      order_by: "created_at",
-      order_by_direction: "desc",
-    });
-    if (cursor) params.set("cursor", cursor);
-    const res = await fetch(`${base}?${params.toString()}`, { headers });
-    if (!res.ok) {
-      throw new Error(`gateway logs HTTP ${res.status}`);
-    }
-    const json = (await res.json()) as {
-      result?: GatewayLog[];
-      result_info?: { cursor?: string; total_pages?: number };
-    };
-    const page = Array.isArray(json.result) ? json.result : [];
-    out.push(...page);
-    cursor = json.result_info?.cursor;
-    if (!cursor || page.length === 0) break;
-  }
-  return out;
-}
-
-export interface FeatureBreakdown {
-  feature: string;
-  cost: number;
-  requests: number;
-}
-
-export function aggregateByFeature(logs: GatewayLog[]): FeatureBreakdown[] {
-  const map = new Map<string, FeatureBreakdown>();
-  for (const log of logs) {
-    let feature = "unknown";
-    const m = log.metadata;
-    if (m && typeof m === "object" && !Array.isArray(m)) {
-      const f = (m as Record<string, unknown>).feature;
-      if (typeof f === "string") feature = f;
-    } else if (typeof m === "string") {
-      try {
-        const parsed = JSON.parse(m) as Record<string, unknown>;
-        if (typeof parsed.feature === "string") feature = parsed.feature;
-      } catch {
-        /* ignore */
+/** Sum confirmed vs. estimated cost over the turns in `sessions`. Pure. */
+export function summarizeConfirmation(sessions: SessionUsage[]): {
+  turns: number;
+  confirmedTurns: number;
+  confirmedCost: number;
+  estimateForConfirmed: number;
+} {
+  let turns = 0;
+  let confirmedTurns = 0;
+  let confirmedCost = 0;
+  let estimateForConfirmed = 0;
+  for (const s of sessions) {
+    for (const t of s.turns ?? []) {
+      turns++;
+      if (typeof t.confirmedCost === "number") {
+        confirmedTurns++;
+        confirmedCost += t.confirmedCost;
+        estimateForConfirmed += t.estimatedCost;
       }
     }
-    const entry = map.get(feature) ?? { feature, cost: 0, requests: 0 };
-    entry.cost += typeof log.cost === "number" ? log.cost : 0;
-    entry.requests += 1;
-    map.set(feature, entry);
   }
-  return Array.from(map.values()).sort((a, b) => b.cost - a.cost);
+  return { turns, confirmedTurns, confirmedCost, estimateForConfirmed };
 }
 
-export async function reconcileWithCloudflare(opts: ReconcileOptions): Promise<ReconciliationResult> {
-  if (!opts.accountId || !opts.apiToken) {
+export async function reconcileWithOpenRouter(opts: ReconcileOptions): Promise<ReconciliationResult> {
+  const sum = summarizeConfirmation(opts.sessions);
+  if (sum.turns === 0) {
+    return { status: "local-only", localCost: opts.localCost, message: "No recorded turns in this range" };
+  }
+  if (sum.confirmedTurns === 0) {
     return {
       status: "local-only",
       localCost: opts.localCost,
-      message: "Missing Cloudflare credentials",
-    };
-  }
-  if (!opts.gatewayId) {
-    return {
-      status: "local-only",
-      localCost: opts.localCost,
-      message: "No AI Gateway configured",
+      message: "No turns in this range were confirmed by OpenRouter",
     };
   }
 
-  const key = cacheKey(opts);
-  const cached = cache.get(key);
-  if (cached && cached.expires > Date.now()) {
-    return { ...cached.result, localCost: opts.localCost };
-  }
+  // Drift = how far the local price-table estimate was from what OpenRouter
+  // actually billed, over the turns we can compare.
+  const driftPct =
+    sum.confirmedCost > 0 ? Math.abs(sum.estimateForConfirmed - sum.confirmedCost) / sum.confirmedCost : 0;
+  const unconfirmed = sum.turns - sum.confirmedTurns;
+  const result: ReconciliationResult = {
+    status: unconfirmed === 0 && driftPct < 0.02 ? "verified" : "drift",
+    localCost: opts.localCost,
+    providerCost: sum.confirmedCost,
+    driftPct: Math.round(driftPct * 1000) / 10,
+    message:
+      unconfirmed === 0
+        ? `All ${sum.turns} turns confirmed by OpenRouter`
+        : `${sum.confirmedTurns} of ${sum.turns} turns confirmed by OpenRouter`,
+  };
 
-  try {
-    const logs = await fetchGatewayLogs(
-      opts.accountId,
-      opts.apiToken,
-      opts.gatewayId,
-      opts.startDate,
-      opts.endDate,
-    );
-    const cloudflareCost = logs.reduce(
-      (sum, log) => sum + (typeof log.cost === "number" ? log.cost : 0),
-      0,
-    );
-    const driftPct =
-      cloudflareCost > 0
-        ? Math.abs(opts.localCost - cloudflareCost) / cloudflareCost
-        : 0;
-    const status: ReconciliationResult["status"] = driftPct < 0.02 ? "verified" : "drift";
-    const result: ReconciliationResult = {
-      status,
-      localCost: opts.localCost,
-      cloudflareCost,
-      driftPct: Math.round(driftPct * 1000) / 10,
-      message: `Reconciled ${logs.length} Gateway log entries`,
-      featureBreakdown: aggregateByFeature(logs),
-    };
-    cache.set(key, { result, expires: Date.now() + 60 * 60 * 1000 });
-    return result;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    return { status: "error", localCost: opts.localCost, message };
+  if (opts.apiKey) {
+    const key = await checkOpenRouterKey(opts.apiKey, opts.fetchImpl).catch(() => null);
+    if (key?.ok && typeof key.info.usage === "number") {
+      result.keyAllTimeSpend = key.info.usage;
+    }
   }
+  return result;
 }

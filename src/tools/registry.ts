@@ -24,14 +24,10 @@ export interface ToolContext {
    * and SDK consumers may not have a tier.
    */
   intentTier?: "light" | "medium" | "heavy";
-  /** Cloudflare account id for tools that need to call an LLM. */
-  accountId?: string;
-  /** Cloudflare API token for tools that need to call an LLM. */
-  apiToken?: string;
+  /** Credentials for tools that need to call an LLM (see llm-auth.ts). */
+  llmAuth?: import("../agent/llm-auth.js").LlmAuth;
   /** Model id for tools that need to call an LLM. */
   model?: string;
-  /** AI Gateway options for tools that need to call an LLM. */
-  gateway?: import("../agent/client.js").AiGatewayOptions;
   /** When false (default), the bash tool blocks `git push` to the repository's
    *  default branch and directs the model to open a PR instead. */
   allowDirectPush?: boolean;

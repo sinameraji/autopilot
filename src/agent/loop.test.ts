@@ -59,15 +59,13 @@ describe("runAgentTurn", () => {
     await assert.rejects(
       async () => {
         await runAgentTurn({
-          accountId: "test",
-          apiToken: "token",
-          model: "@cf/test/model",
+          openrouterApiKey: "sk-or-test",
+          model: "test/model",
           messages,
           tools: [],
           executor,
           cwd: "/tmp",
           signal: controller.signal,
-          gateway: { id: "my-gw" },
           callbacks: {
             askPermission: async () => "allow",
           },
@@ -122,15 +120,13 @@ describe("runAgentTurn", () => {
     await assert.rejects(
       async () => {
         await runAgentTurn({
-          accountId: "test",
-          apiToken: "token",
-          model: "@cf/test/model",
+          openrouterApiKey: "sk-or-test",
+          model: "test/model",
           messages,
           tools: [],
           executor,
           cwd: "/tmp",
           signal: controller.signal,
-          gateway: { id: "my-gw" },
           callbacks: {
             // Abort as soon as the assistant message is finalized (after streaming,
             // before tool execution starts).

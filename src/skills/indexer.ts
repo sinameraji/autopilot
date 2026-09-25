@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { AiGatewayOptions } from "../agent/client.js";
+import type { LlmAuth } from "../agent/llm-auth.js";
 import { fetchEmbeddings } from "../memory/embeddings.js";
 import { discoverSkills, readSkillFile } from "./discovery.js";
 import { parseSkillFile, parseAgentsMd } from "./parser.js";
@@ -12,16 +12,10 @@ import {
   getSkillByPath,
 } from "./db.js";
 
-export interface IndexerOpts {
+export interface IndexerOpts extends LlmAuth {
   cwd: string;
   db: Database.Database;
-  accountId: string;
-  apiToken: string;
-  gateway?: AiGatewayOptions;
   embeddingModel?: string;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
 }
 
 /**
@@ -92,14 +86,10 @@ export async function indexSkills(opts: IndexerOpts): Promise<{
       const inputs = skill.sections.map((section) => buildEmbeddingInput(skill, section));
       try {
         const embeddings = await fetchEmbeddings({
-          accountId: opts.accountId,
-          apiToken: opts.apiToken,
+          openrouterApiKey: opts.openrouterApiKey,
+          customEndpoint: opts.customEndpoint,
           model: opts.embeddingModel,
           texts: inputs,
-          gateway: opts.gateway,
-          cloudMode: opts.cloudMode,
-          cloudToken: opts.cloudToken,
-          cloudDeviceId: opts.cloudDeviceId,
         });
         insertSections(opts.db, skillId, skill.sections, embeddings);
       } catch (err) {

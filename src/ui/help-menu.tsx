@@ -12,7 +12,6 @@ interface CustomCommandSummary {
 interface Props {
   customCommands?: CustomCommandSummary[];
   costAttributionEnabled?: boolean;
-  cloudMode?: boolean;
   onDone: () => void;
   onCommand: (command: string) => void;
 }
@@ -26,7 +25,6 @@ type Page =
   | "cost"
   | "mcp"
   | "lsp"
-  | "gateway"
   | "info"
   | "config"
   | "commands"
@@ -49,6 +47,8 @@ const CATEGORIES: Category[] = [
     key: "mode",
     label: "Mode",
     commands: [
+      { command: "/settings modes on", description: "turn plan/edit/auto modes on (off by default: always auto)" },
+      { command: "/settings modes off", description: "turn modes off (always auto)" },
       { command: "/mode edit", description: "switch to edit mode" },
       { command: "/mode plan", description: "switch to plan mode" },
       { command: "/mode auto", description: "switch to auto mode" },
@@ -115,22 +115,6 @@ const CATEGORIES: Category[] = [
     ],
   },
   {
-    key: "gateway",
-    label: "Gateway",
-    commands: [
-      { command: "/gateway", description: "show gateway status" },
-      { command: "/gateway off", description: "disable AI Gateway (direct Workers AI)" },
-      { command: "/gateway skip-cache true", description: "enable skip-cache" },
-      { command: "/gateway skip-cache false", description: "disable skip-cache" },
-      { command: "/gateway collect-logs true", description: "enable log collection" },
-      { command: "/gateway collect-logs false", description: "disable log collection" },
-      { command: "/gateway metadata clear", description: "remove all metadata" },
-      { command: "/gateway <id>", description: "enable AI Gateway", selectable: false },
-      { command: "/gateway cache-ttl <seconds>", description: "set cache TTL", selectable: false },
-      { command: "/gateway metadata <key>=<value>", description: "add metadata", selectable: false },
-    ],
-  },
-  {
     key: "info",
     label: "Info",
     commands: [
@@ -155,8 +139,10 @@ const CATEGORIES: Category[] = [
     label: "Config",
     commands: [
       { command: "/init", description: "scan this repo and write a KIMI.md" },
+      { command: "/settings", description: "show feature settings" },
+      { command: "/key", description: "show your OpenRouter key status and credit" },
+      { command: "/key set <key>", description: "replace your OpenRouter key", selectable: false },
       { command: "/logout", description: "clear credentials" },
-      { command: "/upgrade", description: "upgrade to KimiFlare Pro (cloud mode)" },
       { command: "/shell", description: "show current shell" },
       { command: "/shell auto", description: "auto-detect shell (default)" },
       { command: "/shell bash", description: "force bash" },
@@ -170,10 +156,10 @@ const CATEGORIES: Category[] = [
 const SINGLE_COMMANDS: CommandItem[] = [
   { command: "/reasoning", description: "toggle show/hide model reasoning" },
   { command: "/help", description: "show this menu" },
-  { command: "/exit", description: "exit kimiflare" },
+  { command: "/exit", description: "exit autopilot (formerly kimiflare)" },
 ];
 
-export function HelpMenu({ customCommands, costAttributionEnabled, cloudMode, onDone, onCommand }: Props) {
+export function HelpMenu({ customCommands, costAttributionEnabled, onDone, onCommand }: Props) {
   const theme = useTheme();
   const [page, setPage] = useState<Page>("main");
   const customs = customCommands ?? [];
@@ -193,7 +179,7 @@ export function HelpMenu({ customCommands, costAttributionEnabled, cloudMode, on
     onDone();
   };
 
-  const categories = cloudMode ? CATEGORIES.filter((c) => c.key !== "gateway") : CATEGORIES;
+  const categories = CATEGORIES;
 
   if (page === "main") {
     const items: { label: string; value: string; key: string }[] = categories.map((cat) => ({

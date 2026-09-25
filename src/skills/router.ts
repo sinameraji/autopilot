@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { AiGatewayOptions } from "../agent/client.js";
+import type { LlmAuth } from "../agent/llm-auth.js";
 import type { SemanticSkillRoutingResult, SectionResult } from "./types.js";
 import { searchSections } from "./search.js";
 import { buildSkillContext } from "./format.js";
@@ -13,15 +13,9 @@ export interface RouterOptions {
   maxSkillTokens?: number;
 }
 
-export interface RouterDeps {
+export interface RouterDeps extends LlmAuth {
   db: Database.Database;
-  accountId: string;
-  apiToken: string;
   embeddingModel?: string;
-  gateway?: AiGatewayOptions;
-  cloudMode?: boolean;
-  cloudToken?: string;
-  cloudDeviceId?: string;
 }
 
 /**
@@ -32,15 +26,8 @@ export async function selectSkills(
   opts: RouterOptions,
   deps: RouterDeps
 ): Promise<SemanticSkillRoutingResult> {
-  const sections = await searchSections(opts.prompt, deps.db, {
-    accountId: deps.accountId,
-    apiToken: deps.apiToken,
-    model: deps.embeddingModel,
-    gateway: deps.gateway,
-    cloudMode: deps.cloudMode,
-    cloudToken: deps.cloudToken,
-    cloudDeviceId: deps.cloudDeviceId,
-  });
+  const { db, embeddingModel, ...auth } = deps;
+  const sections = await searchSections(opts.prompt, db, { ...auth, model: embeddingModel });
 
   return buildSkillContext(sections, opts.tier, opts.maxSkillTokens);
 }

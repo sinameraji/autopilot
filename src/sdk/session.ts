@@ -15,7 +15,9 @@ import { makeLspTools } from "../tools/lsp.js";
 import { saveSession, loadSession, makeSessionId, sessionsDir } from "../sessions.js";
 import type { SessionFile } from "../sessions.js";
 import { recordUsage } from "../usage-tracker.js";
-import type { GatewayMeta } from "../agent/client.js";
+import type { OpenRouterProviderPrefs } from "../agent/client.js";
+import { llmAuthFromConfig } from "../agent/llm-auth.js";
+import { ensureOpenRouterCatalog } from "../models/openrouter-catalog.js";
 import { resolveCustomEndpoint } from "../agent/custom-endpoint.js";
 import { logger } from "../util/logger.js";
 import { resolveSdkConfig } from "./config.js";
@@ -27,6 +29,9 @@ export async function createAgentSession(
   opts: CreateSessionOptions,
 ): Promise<{ session: KimiFlareSession }> {
   const config = await resolveSdkConfig(opts);
+  // Model capabilities/pricing come from OpenRouter's catalog (cached on disk,
+  // refreshed every 6h; a failed fetch falls back to the cache or seed list).
+  if (!resolveCustomEndpoint(config)) await ensureOpenRouterCatalog();
   const cwd = resolve(opts.cwd ?? process.cwd());
   const tools = opts.tools ?? ALL_TOOLS;
   // M6.1: SDK consumers opt in to hooks via `opts.enableHooks` (default
@@ -47,15 +52,13 @@ export async function createAgentSession(
       config.memoryDbPath ?? join(homedir(), ".local", "share", "kimiflare", "memory.db");
     memoryManager = new MemoryManager({
       dbPath,
-      accountId: config.accountId,
-      apiToken: config.apiToken,
+      ...llmAuthFromConfig(config),
       model: config.model,
       plumbingModel: config.plumbingModel,
       extractionModel: config.memoryExtractionModel,
       embeddingModel: config.memoryEmbeddingModel,
       maxAgeDays: config.memoryMaxAgeDays,
       maxEntries: config.memoryMaxEntries,
-      cloudMode: config.cloudMode,
     });
     memoryManager.open();
   }
@@ -130,7 +133,7 @@ export async function createAgentSession(
     permissionHandler: opts.permissionHandler,
     onKimiMdStale: opts.onKimiMdStale,
     hooks,
-    gateway: opts.gateway,
+    provider: opts.provider,
   });
 
   return { session };
@@ -148,7 +151,7 @@ interface InternalSessionOpts {
   allTools: ToolSpec[];
   permissionHandler?: import("./types.js").PermissionHandler;
   onKimiMdStale?: () => void;
-  gateway?: import("../agent/client.js").AiGatewayOptions;
+  provider?: OpenRouterProviderPrefs;
   /** M6.1: optional. When provided, the loop fires Stop at end-of-turn.
    *  PreToolUse / PostToolUse fire via the executor regardless. */
   hooks?: import("../hooks/manager.js").HooksManager;
@@ -168,7 +171,7 @@ class InternalSession implements KimiFlareSession {
   private allTools: ToolSpec[];
   private permissionHandler: import("./types.js").PermissionHandler;
   private onKimiMdStale?: () => void;
-  private gateway?: import("../agent/client.js").AiGatewayOptions;
+  private provider?: OpenRouterProviderPrefs;
   private hooks?: import("../hooks/manager.js").HooksManager;
 
   private listeners = new Set<(event: SessionEvent) => void>();
@@ -203,7 +206,7 @@ class InternalSession implements KimiFlareSession {
     this.model = opts.config.model;
     this.reasoningEffort = opts.config.reasoningEffort ?? "medium";
     this.onKimiMdStale = opts.onKimiMdStale;
-    this.gateway = opts.gateway;
+    this.provider = opts.provider;
     this.hooks = opts.hooks;
 
     this.permissionHandler =
@@ -464,7 +467,7 @@ class InternalSession implements KimiFlareSession {
         this.usage.totalInputTokens += usage.prompt_tokens;
         this.usage.totalOutputTokens += usage.completion_tokens;
         this.usage.turnCount += 1;
-        void recordUsage(this.sessionId, usage, gatewayMeta ? gatewayUsageLookup(this.config, gatewayMeta) : undefined);
+        void recordUsage(this.sessionId, usage, costLookup(this.config, gatewayMeta), this.model);
       },
       onTasks: (tasks) => {
         this.emit({ type: "tasks.update", tasks });
@@ -524,11 +527,10 @@ class InternalSession implements KimiFlareSession {
     };
 
     await runAgentTurn({
-      accountId: this.config.accountId,
-      apiToken: this.config.apiToken,
-      // Custom OpenAI-compatible endpoint (config baseUrl/apiKey or
-      // KIMIFLARE_BASE_URL/KIMIFLARE_API_KEY): overrides all Cloudflare routing.
-      customEndpoint: resolveCustomEndpoint(this.config) ?? undefined,
+      ...llmAuthFromConfig(this.config),
+      ...(this.provider
+        ? { provider: { ...(this.config.openrouterProvider ?? {}), ...this.provider } }
+        : {}),
       model: this.model,
       messages: this.messages,
       tools: this.allTools,
@@ -542,7 +544,6 @@ class InternalSession implements KimiFlareSession {
       coauthor,
       sessionId: this.sessionId,
       memoryManager: this.memoryManager,
-      gateway: this.gateway,
       allowDirectPush: this.config.allowDirectPush,
       preferPullRequests: this.config.preferPullRequests,
       onIterationEnd: async (messages, _signal) => {
@@ -584,17 +585,11 @@ class InternalSession implements KimiFlareSession {
   }
 }
 
-function gatewayUsageLookup(
+function costLookup(
   config: InternalSessionOpts["config"],
-  meta: import("../agent/client.js").GatewayMeta,
-): import("../usage-tracker.js").GatewayUsageLookup | undefined {
-  if (!config.aiGatewayId) return undefined;
-  // Custom endpoint active: no Cloudflare account to reconcile against.
-  if (resolveCustomEndpoint(config)) return undefined;
-  return {
-    accountId: config.accountId,
-    apiToken: config.apiToken,
-    gatewayId: config.aiGatewayId,
-    meta,
-  };
+  meta: import("../agent/client.js").ResponseMeta | undefined,
+): import("../usage-tracker.js").CostLookup | undefined {
+  // Custom endpoint active: the host's gateway does its own metering.
+  if (!config.openrouterApiKey || !meta?.generationId || resolveCustomEndpoint(config)) return undefined;
+  return { apiKey: config.openrouterApiKey, meta };
 }
