@@ -131,6 +131,33 @@ function mostLikely(probabilities: Record<string, number>): [string, number] | u
   );
 }
 
+export interface JevAnswerPresentation {
+  text: string;
+  probability?: string;
+  tone: "yes" | "no" | "neutral";
+}
+
+export function presentJevAnswer(question: JevQuestion, answer: JevAnswer): JevAnswerPresentation {
+  if (question.kind === "yes" && answer.type === "noul" && answer.noul !== undefined) {
+    const isYes = answer.noul >= 0.5;
+    return {
+      text: isYes ? "Yes" : "No",
+      probability: percent(isYes ? answer.noul : 1 - answer.noul),
+      tone: isYes ? "yes" : "no",
+    };
+  }
+  if (question.kind === "choose" && answer.type === "choice" && answer.probabilities) {
+    const best = mostLikely(answer.probabilities);
+    if (best) return { text: best[0], probability: percent(best[1]), tone: "neutral" };
+  }
+  if (question.kind === "score" && answer.type === "score" && answer.score !== undefined) {
+    const best = answer.probabilities ? mostLikely(answer.probabilities) : undefined;
+    const label = best ? answer.legend?.[best[0]] ?? best[0] : undefined;
+    return { text: `Score ${answer.score.toFixed(2)}${label ? ` · ${label}` : ""}`, tone: "neutral" };
+  }
+  throw new Error("Jev returned an answer that does not match the requested question type.");
+}
+
 /** Format Jev's typed values without inventing free-form reasoning. */
 export function formatJevAnswer(question: JevQuestion, answer: JevAnswer): string {
   if (question.kind === "yes" && answer.type === "noul" && answer.noul !== undefined) {

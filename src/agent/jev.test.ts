@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { askJev, formatJevAnswer, type JevQuestion } from "./jev.js";
+import { askJev, formatJevAnswer, presentJevAnswer, type JevQuestion } from "./jev.js";
 
 const originalBase = process.env.OPENROUTER_BASE_URL;
 afterEach(() => {
@@ -81,6 +81,13 @@ describe("askJev", () => {
     assert.strictEqual(
       formatJevAnswer(score, { type: "score", score: 0.85, probabilities: { low: 0.1, high: 0.9 }, legend: { high: "Blocking" } }),
       "Score 0.85 · Blocking",
+    );
+  });
+
+  it("formats a compact colored yes/no result for the TUI", () => {
+    assert.deepStrictEqual(
+      presentJevAnswer({ kind: "yes", prompt: "Question?" }, { type: "noul", noul: 0.43 }),
+      { text: "No", probability: "57%", tone: "no" },
     );
   });
 
