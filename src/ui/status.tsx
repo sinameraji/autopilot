@@ -172,13 +172,15 @@ export function buildRightParts(
   const pct = Math.round((usage.prompt_tokens / contextLimit) * 100);
   const parts: string[] = [];
   if (sessionUsage) {
+    // Session totals: every request in the session, including each tool round
+    // (which re-sends the context) — the same tokens OpenRouter bills.
     const cached = sessionUsage.cachedTokens;
-    parts.push(`in ${sessionUsage.promptTokens}${cached ? ` (${cached} cached)` : ""}`);
+    parts.push(`in ${fmtCount(sessionUsage.promptTokens)}${cached ? ` (${fmtCount(cached)} cached)` : ""}`);
+    parts.push(`out ${fmtCount(sessionUsage.completionTokens)}`);
     parts.push(`ctx ${pct}%`);
     // ≈ prefix signals the cost is still the local estimate; once OpenRouter
     // confirms the turn's billed cost, the prefix and spinner go away.
-    const prefix = sessionUsage.reconcilePending ? "≈$" : "$";
-    parts.push(`${prefix}${sessionUsage.cost.toFixed(2)}`);
+    parts.push(`${sessionUsage.reconcilePending ? "≈" : ""}${formatUsd(sessionUsage.cost)}`);
     if (typeof sessionUsage.lastTurnMs === "number") {
       parts.push(formatDuration(sessionUsage.lastTurnMs));
     }
@@ -189,13 +191,31 @@ export function buildRightParts(
       typeof usage.cost === "number"
         ? usage.cost
         : calculateCost(usage.prompt_tokens, usage.completion_tokens, cached, model).total;
-    parts.push(`in ${usage.prompt_tokens}${cached ? ` (${cached} cached)` : ""}`);
+    parts.push(`in ${fmtCount(usage.prompt_tokens)}${cached ? ` (${fmtCount(cached)} cached)` : ""}`);
+    parts.push(`out ${fmtCount(usage.completion_tokens)}`);
     parts.push(`ctx ${pct}%`);
-    parts.push(`$${cost.toFixed(2)}`);
+    parts.push(formatUsd(cost));
   }
   const provider = formatProviderTag(responseMeta);
   if (provider) parts.push(provider);
   return parts;
+}
+
+/** Token count with thousands separators: 8417 → "8,417". */
+function fmtCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/**
+ * USD with enough precision to be meaningful: small per-session costs are
+ * usually fractions of a cent, which `toFixed(2)` rounds to "$0.00".
+ * 0 → "$0", 0.00214 → "$0.0021", 0.1234 → "$0.123", 12.5 → "$12.50".
+ */
+export function formatUsd(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "$0";
+  if (n >= 1) return `$${n.toFixed(2)}`;
+  if (n >= 0.1) return `$${n.toFixed(3)}`;
+  return `$${n.toPrecision(2).replace(/0+$/, "").replace(/\.$/, "")}`;
 }
 
 /** "via <upstream>" — OpenRouter picks the upstream provider per request

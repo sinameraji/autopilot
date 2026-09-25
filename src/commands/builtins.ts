@@ -13,7 +13,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   // Ink is the only UI engine; handler remains for manual use.
   // { name: "ui", argHint: "ink", description: "Switch UI engine to React Ink (takes effect on next launch). Camouflage is temporarily unavailable.", source: "builtin" },
   { name: "memory", argHint: "[on|off|clear|search ...]", description: "Manage memory", source: "builtin" },
-  { name: "cost", argHint: "[on|off]", description: "Show cost report or toggle attribution", source: "builtin" },
+  { name: "cost", argHint: "[verify|on|off]", description: "Show cost report or toggle attribution", source: "builtin" },
   { name: "settings", argHint: "[modes on|off]", description: "Show or change feature settings (e.g. plan/edit/auto modes)", source: "builtin" },
   { name: "key", argHint: "[set <key>|clear]", description: "Show or replace your OpenRouter API key", source: "builtin" },
   { name: "mcp", argHint: "[list|reload]", description: "Manage MCP servers", source: "builtin" },

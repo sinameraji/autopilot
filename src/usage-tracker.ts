@@ -55,6 +55,13 @@ export interface TurnCost {
   turnId: string;
   /** OpenRouter generation id ("gen-…"). */
   logId?: string;
+  /** Model the request went to, and the token counts the stream reported —
+   *  kept per turn so `kimiflare cost --verify` can check them against
+   *  OpenRouter's own record of the generation. */
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedTokens?: number;
   estimatedCost: number;
   confirmedCost?: number;
   durationMs?: number;
@@ -104,6 +111,7 @@ export interface GenerationSnapshot {
   provider?: string;
   tokensIn?: number;
   tokensOut?: number;
+  tokensCached?: number;
   cost?: number;
 }
 
@@ -250,6 +258,7 @@ export async function fetchGenerationSnapshot(
     provider: typeof d.provider_name === "string" ? d.provider_name : lookup.meta.provider,
     tokensIn: num(d.native_tokens_prompt) ?? num(d.tokens_prompt),
     tokensOut: num(d.native_tokens_completion) ?? num(d.tokens_completion),
+    tokensCached: num(d.native_tokens_cached),
   };
 }
 
@@ -304,7 +313,15 @@ export async function recordUsage(
     session.cachedTokens += cachedTokens;
     session.cost += estimatedCost;
 
-    const turn: TurnCost = { turnId, logId: generationId, estimatedCost };
+    const turn: TurnCost = {
+      turnId,
+      logId: generationId,
+      ...(model ? { model } : {}),
+      promptTokens: usage.prompt_tokens,
+      completionTokens: usage.completion_tokens,
+      cachedTokens,
+      estimatedCost,
+    };
     session.turns = [...(session.turns ?? []), turn].slice(-MAX_TURNS_PER_SESSION);
 
     if (generationId || inlineCost !== undefined) {

@@ -84,9 +84,9 @@ describe("OpenRouter cost confirmation", () => {
 
   it("maps a /generation record into a snapshot", async () => {
     const fetchImpl = (async () =>
-      new Response(JSON.stringify({ data: { total_cost: 0.5, generation_time: 1200, model: "moonshotai/kimi-k2.6", provider_name: "Fireworks", tokens_prompt: 10, tokens_completion: 5 } }), { status: 200 })) as unknown as typeof fetch;
+      new Response(JSON.stringify({ data: { total_cost: 0.5, generation_time: 1200, model: "moonshotai/kimi-k2.6", provider_name: "Fireworks", tokens_prompt: 10, tokens_completion: 5, native_tokens_cached: 3 } }), { status: 200 })) as unknown as typeof fetch;
     const snap = await fetchGenerationSnapshot({ apiKey: "k", meta: { generationId: "gen-4" } }, fetchImpl);
-    assert.deepStrictEqual(snap, { logId: "gen-4", cost: 0.5, duration: 1200, model: "moonshotai/kimi-k2.6", provider: "Fireworks", tokensIn: 10, tokensOut: 5 });
+    assert.deepStrictEqual(snap, { logId: "gen-4", cost: 0.5, duration: 1200, model: "moonshotai/kimi-k2.6", provider: "Fireworks", tokensIn: 10, tokensOut: 5, tokensCached: 3 });
   });
 
   it("emits an update event so the status bar refreshes", async () => {

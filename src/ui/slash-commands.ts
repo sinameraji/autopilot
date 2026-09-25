@@ -374,6 +374,26 @@ const handleCost: Handler = (ctx, _rest, arg) => {
     setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "cost attribution enabled" }]);
     return true;
   }
+  if (arg === "verify") {
+    const key = cfg.openrouterApiKey;
+    if (!key) {
+      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "cost verify needs an OpenRouter key — run /key set <key>" }]);
+      return true;
+    }
+    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "checking this session's numbers against OpenRouter's generation records…" }]);
+    void import("../cost-verify.js")
+      .then(async ({ pickSession, verifySession, formatVerifyReport }) => {
+        const session = await pickSession(sessionIdRef.current ?? undefined);
+        const text = session
+          ? formatVerifyReport(await verifySession(session, key))
+          : "No OpenRouter generations recorded for this session yet.";
+        setEvents((e) => [...e, { kind: "info", key: mkKey(), text }]);
+      })
+      .catch((err) => {
+        setEvents((e) => [...e, { kind: "error", key: mkKey(), text: `cost verify failed: ${(err as Error).message}` }]);
+      });
+    return true;
+  }
   if (arg === "off") {
     const next = { ...cfg, costAttribution: false };
     setCfg(next);

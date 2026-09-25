@@ -47,8 +47,25 @@ program
   .option("--json", "machine-readable output")
   .option("--reclassify", "re-run classification on all sessions")
   .option("--local-only", "skip OpenRouter reconciliation (no network)")
+  .option("--verify", "check recorded tokens and cost against OpenRouter's generation records (latest session, or -s <id>)")
   .action(async (cmdOpts) => {
     const cfg = await loadConfig();
+    if (cmdOpts.verify) {
+      if (!cfg?.openrouterApiKey) {
+        console.error("kimiflare cost --verify needs your OpenRouter key (OPENROUTER_API_KEY or `kimiflare auth openrouter`).");
+        process.exit(2);
+      }
+      const { pickSession, verifySession, formatVerifyReport } = await import("./cost-verify.js");
+      const session = await pickSession(cmdOpts.session);
+      if (!session) {
+        console.error(cmdOpts.session ? `Session ${cmdOpts.session} not found.` : "No sessions with OpenRouter generations yet.");
+        process.exit(1);
+      }
+      const result = await verifySession(session, cfg.openrouterApiKey);
+      console.log(formatVerifyReport(result));
+      const bad = result.rows.some((r) => !r.missing && r.fields.some((f) => !f.ok));
+      process.exit(bad ? 1 : 0);
+    }
     const enabled = cfg?.costAttribution ?? false;
     if (!enabled) {
       console.error(
