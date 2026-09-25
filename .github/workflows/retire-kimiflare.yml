@@ -1,9 +1,14 @@
 name: Retire kimiflare (one-off)
 
-# Publishes the final forwarding kimiflare release (deprecated/kimiflare) and
-# marks the kimiflare package deprecated in favour of autopilot-ai. Run
-# manually once, after autopilot-ai is on npm. Idempotent: skips the publish
-# if that kimiflare version is already out; re-deprecating is harmless.
+# Publishes the final forwarding kimiflare release (deprecated/kimiflare). Run
+# manually once, after autopilot-ai is on npm. Auth is npm trusted publishing
+# (OIDC) — configure it on npmjs.com under kimiflare → Settings → Trusted
+# publishers with this workflow file (retire-kimiflare.yml). Idempotent: skips
+# if that kimiflare version is already out.
+#
+# Deprecating kimiflare is not something OIDC can do; do it once on npmjs.com
+# (kimiflare → Settings → Deprecate package) with the message:
+#   kimiflare has been renamed to autopilot. Install: npm i -g autopilot-ai (command: autopilot)
 
 on:
   workflow_dispatch:
@@ -24,22 +29,19 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      # Trusted publishing needs npm >= 11.5.1 (Node 22 ships npm 10).
+      - name: Update npm
+        run: npm install -g npm@latest
+
       - name: Require autopilot-ai on npm first
         run: npm view autopilot-ai version
 
       - name: Publish final kimiflare (forwards to autopilot-ai)
         working-directory: deprecated/kimiflare
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           LOCAL=$(node -p "require('./package.json').version")
           if npm view "kimiflare@$LOCAL" version >/dev/null 2>&1; then
             echo "kimiflare@$LOCAL already on npm; skipping publish."
           else
-            npm publish --access public --provenance
+            npm publish --access public
           fi
-
-      - name: Deprecate kimiflare
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm deprecate kimiflare "kimiflare has been renamed to autopilot. Install: npm i -g autopilot-ai (command: autopilot)"
