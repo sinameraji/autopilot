@@ -55,7 +55,7 @@ npm install -g autopilot-ai
 autopilot
 ```
 
-On first run autopilot asks for your OpenRouter API key (create one at <https://openrouter.ai/keys>) and a model. That's it.
+On first run, **Sign in with OpenRouter**: approve autopilot in your browser and a key is created for you (or paste one from <https://openrouter.ai/keys>). Then pick a model. That's it.
 
 Or run without installing:
 
@@ -72,7 +72,7 @@ Requires Node.js ≥ 20.
 Three ways to provide it — the first one found wins:
 
 1. **Environment:** `OPENROUTER_API_KEY` (or `KIMIFLARE_OPENROUTER_KEY`). With this set, the setup screen never appears — the way to run kimiflare headless (CI, a VM, a container).
-2. **Setup screen / CLI:** paste it on first run, or run `autopilot auth openrouter` (prompts without echo, validates, saves). Inside the TUI, `/key set <key>` replaces it.
+2. **Sign in / setup screen / CLI:** "Sign in with OpenRouter" on first run, or `autopilot auth openrouter` — approve in the browser and a key is created and saved (OpenRouter's OAuth PKCE flow). Over SSH or in a container it shows a link to open on any device and asks for the code OpenRouter displays (force this with `--code`). `--paste` prompts for an existing key instead, and `autopilot auth openrouter <key>` saves one directly. Inside the TUI, `/key set <key>` replaces it.
 3. **Config file:** `"openrouterApiKey": "sk-or-…"` in `~/.config/kimiflare/config.json` (created with mode 600).
 
 `/key` shows which key is in use, what it has spent and how much credit is left. Model calls — including memory embeddings and small internal side-calls (summaries, memory extraction) — are all billed to this key.

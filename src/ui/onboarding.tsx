@@ -1,5 +1,5 @@
 /**
- * First-run setup: paste an OpenRouter key, pick a model, done.
+ * First-run setup: sign in with OpenRouter (or paste a key), pick a model, done.
  *
  * Skipped entirely when a key is already configured (OPENROUTER_API_KEY /
  * KIMIFLARE_OPENROUTER_KEY in the env, or `openrouterApiKey` in the config
@@ -16,6 +16,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { CustomTextInput } from "./text-input.js";
 import { ModelPicker } from "./model-picker.js";
+import { OpenRouterSignIn } from "./openrouter-signin.js";
 import { useTheme } from "./theme-context.js";
 import { openBrowser } from "./app-helpers.js";
 import {
@@ -37,11 +38,19 @@ interface Props {
   onCancel?: () => void;
 }
 
-type Step = "key" | "checking" | "model" | "saving";
+type Step = "method" | "signin" | "key" | "checking" | "model" | "saving";
+
+const METHODS = [
+  { label: "Sign in with OpenRouter", hint: "recommended — approve in your browser, no key to copy" },
+  { label: "Paste an API key", hint: "create one at https://openrouter.ai/keys" },
+] as const;
 
 export function Onboarding({ onDone, onCancel }: Props) {
   const theme = useTheme();
-  const [step, setStep] = useState<Step>("key");
+  const [step, setStep] = useState<Step>("method");
+  const [methodIdx, setMethodIdx] = useState(0);
+  /** Where "back" from the key check goes: the paste field or the sign-in panel. */
+  const [keySource, setKeySource] = useState<"key" | "signin">("key");
   const [key, setKey] = useState("");
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyInfo, setKeyInfo] = useState<OpenRouterKeyInfo | null>(null);
@@ -62,6 +71,12 @@ export function Onboarding({ onDone, onCancel }: Props) {
       setKeyError("That doesn't look like an OpenRouter key — they start with sk-or-.");
       return;
     }
+    await acceptKey(candidate, "key");
+  };
+
+  /** Validate a key (pasted or minted by sign-in) and move on to the model step. */
+  const acceptKey = async (candidate: string, source: "key" | "signin") => {
+    setKeySource(source);
     setKeyError(null);
     setStep("checking");
     const res = await checkOpenRouterKey(candidate);
@@ -77,7 +92,7 @@ export function Onboarding({ onDone, onCancel }: Props) {
         ? "OpenRouter rejected this key. Check it was copied in full, or create a new one."
         : `Couldn't reach OpenRouter to check the key (${res.message}). Check your connection and try again.`,
     );
-    setStep("key");
+    setStep(source === "signin" ? "method" : "key");
   };
 
   const finish = async (model: ModelEntry) => {
@@ -95,13 +110,25 @@ export function Onboarding({ onDone, onCancel }: Props) {
 
   useInput(
     (input, k) => {
-      if (k.escape) onCancel?.();
+      if (k.escape) setStep("method");
       if (k.ctrl && input === "o") openBrowser(OPENROUTER_KEYS_URL);
     },
     { isActive: step === "key" },
   );
 
-  const stepNo = step === "key" || step === "checking" ? 1 : 2;
+  useInput(
+    (_input, k) => {
+      if (k.escape) onCancel?.();
+      else if (k.upArrow || k.downArrow) setMethodIdx((i) => (i + 1) % METHODS.length);
+      else if (k.return) {
+        setKeyError(null);
+        setStep(methodIdx === 0 ? "signin" : "key");
+      }
+    },
+    { isActive: step === "method" },
+  );
+
+  const stepNo = step === "model" || step === "saving" ? 2 : 1;
 
   return (
     // No header here: the startup banner (ui/logo.ts) names the app just above.
@@ -118,7 +145,51 @@ export function Onboarding({ onDone, onCancel }: Props) {
 
       <Text color={theme.info.color}>Step {stepNo} of 2</Text>
 
-      {(step === "key" || step === "checking") && (
+      {step === "method" && (
+        <Box marginTop={1} flexDirection="column">
+          <Text>Connect your OpenRouter account</Text>
+          <Text color={theme.info.color} dimColor>
+            Model calls are billed to your own OpenRouter account. ↑/↓ to choose, Enter to continue.
+          </Text>
+          <Box marginTop={1} flexDirection="column">
+            {METHODS.map((m, i) => (
+              <Text key={m.label} color={i === methodIdx ? theme.palette.primary : undefined}>
+                {i === methodIdx ? "› " : "  "}
+                {m.label}
+                <Text color={theme.info.color} dimColor>{`  ${m.hint}`}</Text>
+              </Text>
+            ))}
+          </Box>
+          {keyError && (
+            <Box marginTop={1}>
+              <Text color={theme.error}>{keyError}</Text>
+            </Box>
+          )}
+          <Box marginTop={1}>
+            <Text color={theme.info.color} dimColor>
+              Esc to quit · tip: set OPENROUTER_API_KEY to skip this screen
+            </Text>
+          </Box>
+        </Box>
+      )}
+
+      {step === "signin" && (
+        <OpenRouterSignIn
+          onBack={() => setStep("method")}
+          onKey={(minted) => {
+            setKey(minted);
+            void acceptKey(minted, "signin");
+          }}
+        />
+      )}
+
+      {step === "checking" && keySource === "signin" && (
+        <Box marginTop={1}>
+          <Text color={theme.info.color}>✓ signed in — checking the new key with OpenRouter…</Text>
+        </Box>
+      )}
+
+      {(step === "key" || (step === "checking" && keySource === "key")) && (
         <Box marginTop={1} flexDirection="column">
           <Text>Paste your OpenRouter API key</Text>
           <Text color={theme.info.color} dimColor>
@@ -140,7 +211,7 @@ export function Onboarding({ onDone, onCancel }: Props) {
           )}
           <Box marginTop={1}>
             <Text color={theme.info.color} dimColor>
-              Enter to continue · Esc to quit · tip: set OPENROUTER_API_KEY to skip this screen
+              Enter to continue · Esc back · tip: set OPENROUTER_API_KEY to skip this screen
             </Text>
           </Box>
         </Box>
