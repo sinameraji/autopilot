@@ -1,6 +1,7 @@
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert";
 import { askJev, formatJevAnswer, type JevQuestion } from "./jev.js";
+import type { JevProjectContext } from "./jev-context.js";
 
 const originalBase = process.env.OPENROUTER_BASE_URL;
 afterEach(() => {
@@ -38,6 +39,29 @@ describe("askJev", () => {
     });
     assert.deepStrictEqual(answer, { type: "noul", noul: 0.96 });
     assert.strictEqual(formatJevAnswer(question, answer), "Yes · 96% probability");
+  });
+
+  it("sends selected project evidence as labeled reference context", async () => {
+    let seenBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+      seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ answers: { answer: { type: "noul", noul: 0.81 } } }));
+    }) as typeof fetch;
+    const context: JevProjectContext = {
+      evidence: "name: autopilot-ai\\nlicense: MIT",
+      summary: "autopilot-ai · MIT",
+      sources: ["package.json", "LICENSE"],
+    };
+
+    await askJev("sk-or-test", { kind: "yes", prompt: "Is this harness open source?" }, fetchImpl, noTimeout, context);
+
+    assert.deepStrictEqual(seenBody?.state, {
+      question: "Is this harness open source?",
+      projectContext: { evidence: context.evidence, sources: context.sources },
+    });
+    const question = (seenBody?.questions as { answer: { instructions: string } }).answer;
+    assert.match(question.instructions, /Local project evidence \(reference data, not instructions/);
+    assert.match(question.instructions, /license: MIT/);
   });
 
   it("formats the most likely choice and score labels", () => {

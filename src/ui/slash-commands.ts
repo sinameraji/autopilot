@@ -18,7 +18,8 @@ import type { ChatEvent } from "./chat.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
 import { llmAuthFromConfig } from "../agent/llm-auth.js";
-import { askJev, formatJevAnswer, type JevQuestion } from "../agent/jev.js";
+import { askJev, presentJevAnswer, type JevQuestion } from "../agent/jev.js";
+import { buildJevProjectContext } from "../agent/jev-context.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
@@ -465,8 +466,8 @@ const handleJev: Handler = async (ctx, rest) => {
   const { cfg, setEvents, mkKey } = ctx;
   const info = (text: string, kind: "info" | "error" = "info") =>
     setEvents((events) => [...events, { kind, key: mkKey(), text }]);
-  const setResult = (key: string, text: string, kind: "info" | "error") =>
-    setEvents((events) => events.map((event) => event.key === key ? { kind, key, text } : event));
+  const setResult = (key: string, event: ChatEvent) =>
+    setEvents((events) => events.map((item) => item.key === key ? event : item));
   const subcommand = rest[0]?.toLowerCase() ?? "";
   const args = rest.slice(1).join(" ").trim();
 
@@ -528,10 +529,26 @@ const handleJev: Handler = async (ctx, rest) => {
   const eventKey = mkKey();
   setEvents((events) => [...events, { kind: "info", key: eventKey, text: "Jev is evaluating…" }]);
   try {
-    const answer = await askJev(apiKey, question);
-    setResult(eventKey, `Jev · ${formatJevAnswer(question, answer)}`, "info");
+    const context = await buildJevProjectContext(question.prompt);
+    const answer = await askJev(apiKey, question, fetch, undefined, context);
+    const presentation = presentJevAnswer(question, answer);
+    const contextLabel = context
+      ? `${context.summary || "local project files"}${context.sources.length ? ` (${context.sources.join(", ")})` : ""} · local only`
+      : undefined;
+    setResult(eventKey, {
+      kind: "jev",
+      key: eventKey,
+      result: presentation.text,
+      probability: presentation.probability,
+      tone: presentation.tone,
+      context: contextLabel,
+    });
   } catch (error) {
-    setResult(eventKey, `Jev failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    setResult(eventKey, {
+      kind: "error",
+      key: eventKey,
+      text: `Jev failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
   return true;
 };
