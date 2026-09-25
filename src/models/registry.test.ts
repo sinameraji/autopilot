@@ -6,7 +6,7 @@ import {
   isFreeModel,
   listModels,
   migrateLegacyModelId,
-  RECOMMENDED_MODEL_IDS,
+  featuredModels,
   registerOpenRouterModels,
   registerUserModels,
   vendorOf,
@@ -42,10 +42,6 @@ describe("seed models (offline fallback)", () => {
 
   it("marks Kimi K3 as not accepting temperature", () => {
     assert.strictEqual(getModel("moonshotai/kimi-k3")?.supports.temperature, false);
-  });
-
-  it("recommends the seeded Kimi models, default included", () => {
-    assert.ok(RECOMMENDED_MODEL_IDS.includes(DEFAULT_MODEL));
   });
 });
 
@@ -115,5 +111,46 @@ describe("migrateLegacyModelId", () => {
     assert.strictEqual(migrateLegacyModelId("moonshotai/kimi-k3"), "moonshotai/kimi-k3");
     assert.strictEqual(migrateLegacyModelId("anthropic/claude-sonnet-4.6"), "anthropic/claude-sonnet-4.6");
     assert.strictEqual(migrateLegacyModelId(undefined), undefined);
+  });
+});
+
+describe("featuredModels", () => {
+  const now = Date.UTC(2026, 8, 25);
+  const day = 86_400;
+  const q = (agentic: number, coding: number) => ({ agentic, coding });
+  const nowSec = now / 1000;
+
+  it("ranks recent tool-capable models by agentic + coding score, capped per vendor", () => {
+    const models = [
+      entry("a/top", { quality: q(58, 82), created: nowSec - 20 * day }),
+      entry("a/second", { quality: q(56, 78), created: nowSec - 60 * day }),
+      entry("a/third", { quality: q(55, 77), created: nowSec - 30 * day }),
+      entry("b/good", { quality: q(50, 76), created: nowSec - 70 * day }),
+      entry("c/cheap", { quality: q(41, 69), created: nowSec - 50 * day }),
+    ];
+    const ids = featuredModels(models, { now, perVendor: 2 }).map((m) => m.id);
+    assert.deepStrictEqual(ids, ["a/top", "a/second", "b/good", "c/cheap"]);
+  });
+
+  it("drops stale models, models without tools or benchmarks, and variant/alias duplicates", () => {
+    const models = [
+      entry("a/fresh", { quality: q(50, 70), created: nowSec - 10 * day }),
+      entry("a/old", { quality: q(60, 90), created: nowSec - 400 * day }),
+      entry("b/no-tools", { quality: q(60, 90), created: nowSec, supports: { tools: false, reasoning: false, streaming: true } }),
+      entry("c/unscored", { created: nowSec }),
+      entry("a/fresh:batch", { quality: q(50, 70), created: nowSec }),
+      entry("~a/latest", { quality: q(50, 70), created: nowSec }),
+    ];
+    assert.deepStrictEqual(featuredModels(models, { now }).map((m) => m.id), ["a/fresh"]);
+  });
+
+  it("respects the limit", () => {
+    const models = Array.from({ length: 30 }, (_, i) => entry(`v${i}/m`, { quality: q(40 + i, 60), created: nowSec }));
+    assert.strictEqual(featuredModels(models, { now, limit: 12 }).length, 12);
+  });
+
+  it("falls back to the seed models when nothing has benchmark data (offline)", () => {
+    const ids = featuredModels(listModels(), { now }).map((m) => m.id);
+    assert.ok(ids.includes(DEFAULT_MODEL));
   });
 });

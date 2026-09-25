@@ -1,14 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { useTheme } from "./theme-context.js";
-import {
-  isFreeModel,
-  listModels,
-  RECOMMENDED_MODEL_IDS,
-  vendorOf,
-  type ModelEntry,
-  type ModelPricing,
-} from "../models/registry.js";
+import { featuredModels, listModels, type ModelEntry, type ModelPricing } from "../models/registry.js";
 import { fuzzyFilter } from "../util/fuzzy.js";
 
 interface Props {
@@ -16,6 +9,8 @@ interface Props {
   onPick: (model: ModelEntry | null) => void;
   /** Optional whitelist of models. When provided, only these models are shown. */
   models?: ModelEntry[];
+  /** Heading override (onboarding uses its own wording). */
+  title?: string;
 }
 
 const PAGE_SIZE = 30;
@@ -91,46 +86,34 @@ interface BuildOpts {
 }
 
 /**
- * Sections, in order: kimiflare's recommended models, OpenRouter's free
- * models, then every other model grouped by vendor (alphabetical). Within the
- * free and vendor sections the vendor prefix is stripped when it's shared.
+ * The default (unsearched) view: only the best & latest models (see
+ * featuredModels — ranked live from OpenRouter's benchmark data), plus the
+ * current model if it isn't among them. Everything else is one search away.
  */
-function buildRowsGrouped(opts: BuildOpts): Row[] {
+function buildRowsFeatured(opts: BuildOpts): Row[] {
   const { models, current } = opts;
-  const recommended = RECOMMENDED_MODEL_IDS.map((id) => models.find((m) => m.id === id)).filter(
-    (m): m is ModelEntry => !!m,
-  );
-  const shown = new Set(recommended.map((m) => m.id));
-  const free = models.filter((m) => !shown.has(m.id) && isFreeModel(m));
-  for (const m of free) shown.add(m.id);
-  const byVendor = new Map<string, ModelEntry[]>();
-  for (const m of models) {
-    if (shown.has(m.id)) continue;
-    const v = vendorOf(m.id);
-    const arr = byVendor.get(v) ?? [];
-    arr.push(m);
-    byVendor.set(v, arr);
-  }
-
+  const featured = featuredModels(models);
   const rows: Row[] = [];
-  const section = (label: string, key: string, list: ModelEntry[], stripPrefix: boolean) => {
-    if (list.length === 0) return;
-    rows.push({ kind: "header", label, key: `__hdr_${key}__` });
-    const prefix = stripPrefix ? commonSlashPrefix(list.map((m) => m.id)) : "";
-    for (const m of list) {
-      rows.push({
-        kind: "model",
-        model: m,
-        displayId: prefix && m.id.startsWith(prefix) ? m.id.slice(prefix.length) : m.id,
-        context: formatContext(m.contextWindow),
-        price: formatPrice(m.pricing),
-        isCurrent: m.id === current,
-      });
-    }
-  };
-  section("Recommended", "recommended", recommended, false);
-  section("Free (daily request cap)", "free", free, false);
-  for (const v of [...byVendor.keys()].sort()) section(v, v, byVendor.get(v)!, true);
+  const push = (m: ModelEntry) =>
+    rows.push({
+      kind: "model",
+      model: m,
+      displayId: m.id,
+      context: formatContext(m.contextWindow),
+      price: formatPrice(m.pricing),
+      isCurrent: m.id === current,
+    });
+  const cur = current ? models.find((m) => m.id === current) : undefined;
+  if (cur && !featured.some((m) => m.id === cur.id)) {
+    rows.push({ kind: "header", label: "Current", key: "__hdr_current__" });
+    push(cur);
+  }
+  rows.push({
+    kind: "header",
+    label: "Best & latest — ranked by agentic + coding benchmarks",
+    key: "__hdr_featured__",
+  });
+  for (const m of featured) push(m);
   return rows;
 }
 
@@ -152,26 +135,19 @@ function buildRowsFlat(opts: BuildOpts): Row[] {
 }
 
 /**
- * Search the catalog: every whitespace-separated term must appear literally in
- * the id or name ("kimi" → only Kimi models, "claude sonnet" → Sonnets).
- * Only when nothing matches literally does it fall back to fuzzy
- * (subsequence) matching, which on a 400+ model catalog would otherwise
- * match almost everything.
+ * Fuzzy search over id + display name, best matches first (the shared
+ * fuzzyFilter). Equally good matches come newest-first, and `:batch`
+ * variants — a duplicate of almost every model, meant for offline batch
+ * jobs — are left out (still selectable with `/model <id>`).
  */
 export function filterModels(models: ModelEntry[], query: string): ModelEntry[] {
-  const q = query.trim().toLowerCase();
-  if (!q) return models;
-  const terms = q.split(/\s+/);
-  const hay = (m: ModelEntry) => `${m.id} ${m.name ?? ""}`.toLowerCase();
-  const literal = models.filter((m) => {
-    const h = hay(m);
-    return terms.every((t) => h.includes(t));
-  });
-  if (literal.length > 0) return literal;
-  return fuzzyFilter(models, q, (m) => `${m.id} ${m.name ?? ""}`);
+  const candidates = models
+    .filter((m) => !m.id.endsWith(":batch"))
+    .sort((a, b) => (b.created ?? 0) - (a.created ?? 0));
+  return fuzzyFilter(candidates, query, (m) => `${m.id} ${m.name ?? ""}`);
 }
 
-export function ModelPicker({ current, onPick, models }: Props) {
+export function ModelPicker({ current, onPick, models, title }: Props) {
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -190,7 +166,7 @@ export function ModelPicker({ current, onPick, models }: Props) {
     idColWidth: MIN_ID_WIDTH,
     ctxColWidth: 6,
   };
-  const rawRows: Row[] = query.trim() ? buildRowsFlat(baseOpts) : buildRowsGrouped(baseOpts);
+  const rawRows: Row[] = query.trim() ? buildRowsFlat(baseOpts) : buildRowsFeatured(baseOpts);
 
   // Measure column widths from visible model rows.
   const modelRows = rawRows.filter((r): r is Extract<Row, { kind: "model" }> => r.kind === "model");
@@ -292,12 +268,13 @@ export function ModelPicker({ current, onPick, models }: Props) {
   return (
     <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
       <Text color={theme.accent} bold>
-        Pick a model  ·  current: {current}
+        {title ?? `Pick a model${current ? `  ·  current: ${current}` : ""}`}
       </Text>
       <Text color={theme.info.color}>
-        {query ? `Search: ${query}▌` : "Type to search…"}
+        {query
+          ? `Search: ${query}▌  ·  ${modelRows.length} match${modelRows.length === 1 ? "" : "es"}`
+          : `Type to fuzzy-search all ${allModels.length} models…`}
         {totalPages > 1 ? `  ·  Page ${safePage + 1} of ${totalPages}` : ""}
-        {`  ·  ${modelRows.length} model${modelRows.length === 1 ? "" : "s"}`}
       </Text>
       <Box marginTop={1}>
         <Text color={theme.muted?.color ?? theme.info.color} dimColor>

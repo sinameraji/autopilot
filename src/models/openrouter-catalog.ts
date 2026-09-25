@@ -18,7 +18,7 @@ import { registerOpenRouterModels, type ModelEntry } from "./registry.js";
 import { fetchWithNetworkRetry, openRouterUrl } from "./openrouter.js";
 
 /** Bump when the cached `ModelEntry` shape changes, so an old cache is refetched. */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 3;
 
 /** Default: refetch after 6 hours; always fall back to a stale cache on fetch failure. */
 export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -27,6 +27,14 @@ export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 export interface OpenRouterRawModel {
   id: string;
   name?: string;
+  created?: number;
+  benchmarks?: {
+    artificial_analysis?: {
+      coding_index?: number | null;
+      agentic_index?: number | null;
+      intelligence_index?: number | null;
+    } | null;
+  } | null;
   context_length?: number;
   top_provider?: { max_completion_tokens?: number | null } | null;
   pricing?: { prompt?: string; completion?: string; input_cache_read?: string };
@@ -52,9 +60,17 @@ function perMtok(perToken: string | undefined): number {
 /** Pure mapping, no I/O — kept separate so it's directly unit-testable. */
 export function mapOpenRouterModel(raw: OpenRouterRawModel): ModelEntry {
   const supported = new Set(raw.supported_parameters ?? []);
+  const aa = raw.benchmarks?.artificial_analysis;
+  const quality = {
+    ...(typeof aa?.coding_index === "number" ? { coding: aa.coding_index } : {}),
+    ...(typeof aa?.agentic_index === "number" ? { agentic: aa.agentic_index } : {}),
+    ...(typeof aa?.intelligence_index === "number" ? { intelligence: aa.intelligence_index } : {}),
+  };
   return {
     id: raw.id,
     ...(raw.name ? { name: raw.name } : {}),
+    ...(typeof raw.created === "number" ? { created: raw.created } : {}),
+    ...(Object.keys(quality).length > 0 ? { quality } : {}),
     contextWindow: raw.context_length ?? 128_000,
     maxOutputTokens: raw.top_provider?.max_completion_tokens ?? 4_096,
     pricing: {

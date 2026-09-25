@@ -6,12 +6,11 @@
   <a href="https://github.com/sinameraji/kimiflare/blob/main/LICENSE"><img src="https://img.shields.io/github/license/sinameraji/kimiflare?style=flat-square&color=2ea44f" alt="license"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D20-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/typescript-5.7-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
-  <a href="https://openrouter.ai/moonshotai/kimi-k2.6"><img src="https://img.shields.io/badge/default%20model-Kimi%20K2.6-f59e0b?style=flat-square" alt="Default model: Kimi K2.6"></a>
   <a href="https://openrouter.ai"><img src="https://img.shields.io/badge/runs%20on-OpenRouter-6566f1?style=flat-square" alt="Runs on OpenRouter"></a>
 </p>
 
 <p align="center">
-  <strong>A terminal coding agent that runs any model on <a href="https://openrouter.ai">OpenRouter</a> with your own key — Kimi K2.6 by default.</strong><br>
+  <strong>A terminal coding agent that runs any model on <a href="https://openrouter.ai">OpenRouter</a> with your own key.</strong><br>
   One key, 400+ models, per-turn billed cost.
 </p>
 
@@ -19,14 +18,14 @@
 
 KimiFlare sends every model call to **[OpenRouter](https://openrouter.ai)** using **your own OpenRouter API key** — bring-your-own-key, nothing proxied, nothing marked up. On first run you paste the key once (it's checked against OpenRouter before it's saved) and pick a model. That's the whole setup.
 
-- **Any model, one key.** The model picker is OpenRouter's live catalog — Kimi, Claude, GPT, Gemini, DeepSeek, GLM, Qwen, free models and more — cached locally and refreshed every few hours. Switch any time with `/model`.
+- **Any model, one key.** The model picker is OpenRouter's live catalog — Claude, GPT, Gemini, Grok, Qwen, GLM, Kimi, DeepSeek, free models and more — opening on the best & latest by benchmark score, with fuzzy search over everything. Switch any time with `/model`.
 - **Real cost, per turn.** OpenRouter reports what each generation actually cost; the status bar shows it (a local estimate marked `≈$` only until the billed number arrives). `/cost` totals it by session, day, month and all time.
 - **Reliable tool calling.** Requests only go to upstream providers that support every parameter kimiflare sends (tools above all), and OpenRouter routes tool-calling traffic to the providers with the best tool-call success rates. The status bar shows which provider served the last turn.
 - **Prompt caching that stays warm.** Each session pins to one upstream provider (OpenRouter sticky routing), so the long, stable prompt prefix keeps hitting the provider's cache across turns.
 
 ## What to remember
 
-- **262k context window** (Kimi K2.6; 1M on Kimi K3) — Read entire modules, large configs, and full stack traces without the model losing track.
+- **Up to 1M+ context** (model-dependent) — Read entire modules, large configs, and full stack traces without the model losing track.
 - **Image understanding** — Drop image paths (PNG, JPG, WebP, GIF, BMP up to 5 MB) into any prompt. Great for UI reviews, diagrams, and screenshots.
 - **Plan / Edit / Auto modes** — `plan` is a whitelist-only research mode: only read-only tools (read, glob, grep, web search, GitHub read-only, browser fetch) are allowed. Writes, edits, mutating bash, MCP tools, and LSP renames are all blocked. `edit` (default) prompts per mutating call. `auto` approves everything for trusted tasks.
 - **Windows support** — OS-aware shell auto-detects `cmd.exe` / PowerShell on Windows, `bash` on Unix. The `bash` tool works out of the box on all platforms.
@@ -89,7 +88,7 @@ Earlier kimiflare versions ran on Cloudflare Workers AI / AI Gateway. On the fir
 
 ### Model
 
-The default is **Kimi K2.6** (`moonshotai/kimi-k2.6`, 262k context, reasoning, tools, vision). The model picker (`/model`) pins kimiflare's recommended models on top, then OpenRouter's free models, then every other tool-capable model grouped by vendor; type to search. Or set one directly:
+You pick the model on first run, and can switch any time with `/model`. The picker opens on the **best & latest** models — recent, tool-capable models ranked by the agentic and coding benchmark scores OpenRouter publishes (Artificial Analysis), at most two per lab — so it stays current as new models ship, with no list maintained in code. Start typing to fuzzy-search all of them (`sonet` finds Claude Sonnet, `gpt 6` the GPT-6 family). Or set one directly:
 
 ```sh
 /model moonshotai/kimi-k3          # 1M context

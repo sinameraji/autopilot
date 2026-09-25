@@ -12,7 +12,7 @@ import type { PrintFormat } from "./print-mode.js";
 const program = new Command();
 program
   .name("kimiflare")
-  .description("Terminal coding agent. Runs any OpenRouter model with your own OpenRouter key (default: Kimi K2.6).")
+  .description("Terminal coding agent. Runs any OpenRouter model with your own OpenRouter key.")
   .version(getAppVersion())
   .option("-p, --print <prompt>", "one-shot mode: send prompt, stream reply to stdout, exit")
   .option("-m, --model <id>", `OpenRouter model id (defaults to ${DEFAULT_MODEL})`)

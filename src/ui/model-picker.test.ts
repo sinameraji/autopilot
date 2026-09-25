@@ -20,20 +20,30 @@ const catalog = [
 ];
 
 describe("filterModels", () => {
-  it("prefers literal matches over fuzzy subsequences", () => {
-    assert.deepStrictEqual(filterModels(catalog, "kimi").map((x) => x.id), ["moonshotai/kimi-k2.6"]);
+  it("fuzzy-matches id or name and ranks the closest matches first", () => {
+    const ids = filterModels(catalog, "kimi").map((x) => x.id);
+    assert.strictEqual(ids[0], "moonshotai/kimi-k2.6");
   });
 
-  it("requires every term, matching id or name", () => {
+  it("requires every term to match", () => {
     assert.deepStrictEqual(filterModels(catalog, "claude sonnet").map((x) => x.id), ["anthropic/claude-sonnet-5"]);
   });
 
-  it("falls back to fuzzy when nothing matches literally", () => {
+  it("tolerates abbreviations (subsequence match)", () => {
     assert.ok(filterModels(catalog, "clsnt").some((x) => x.id === "anthropic/claude-sonnet-5"));
   });
 
   it("returns everything for an empty query", () => {
     assert.strictEqual(filterModels(catalog, "  ").length, catalog.length);
+  });
+
+  it("lists equally good matches newest first and hides :batch duplicates", () => {
+    const models = [
+      { ...m("vendor/flash-1"), created: 100 },
+      { ...m("vendor/flash-2"), created: 300 },
+      { ...m("vendor/flash-2:batch"), created: 300 },
+    ];
+    assert.deepStrictEqual(filterModels(models, "flash").map((x) => x.id), ["vendor/flash-2", "vendor/flash-1"]);
   });
 });
 

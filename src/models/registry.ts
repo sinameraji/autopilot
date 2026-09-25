@@ -7,10 +7,9 @@
  * routing decision to make here. What the user *does* choose is the model,
  * and the list of models is not maintained by hand: the live OpenRouter
  * catalog (see openrouter-catalog.ts) is registered at startup via
- * `registerOpenRouterModels()`. The small SEED list below is only the offline
- * fallback — the Kimi models kimiflare is built around, so a first run with no
- * network and no cached catalog still has accurate context windows/pricing
- * for the default model.
+ * `registerOpenRouterModels()`. The small SEED list below is only an offline
+ * fallback, so a first run with no network and no cached catalog still has
+ * accurate context windows/pricing for the default and plumbing models.
  *
  * Model ids are OpenRouter's own `vendor/model[:variant]` ids, e.g.
  * "moonshotai/kimi-k2.6" or "deepseek/deepseek-r1:free". Ids from the
@@ -41,20 +40,34 @@ export interface ModelCapabilities {
   temperature?: boolean;
 }
 
+/** Artificial Analysis scores OpenRouter publishes per model (0–100, higher is better). */
+export interface ModelQuality {
+  coding?: number;
+  agentic?: number;
+  intelligence?: number;
+}
+
 export interface ModelEntry {
   /** OpenRouter model id, e.g. "moonshotai/kimi-k2.6". */
   id: string;
   /** Human-readable name from the catalog, e.g. "MoonshotAI: Kimi K2.6". */
   name?: string;
+  /** Release date, epoch seconds (from the catalog). */
+  created?: number;
+  /** Benchmark scores, when OpenRouter has them. Drives the "best & latest" list. */
+  quality?: ModelQuality;
   contextWindow: number;
   maxOutputTokens: number;
   pricing: ModelPricing;
   supports: ModelCapabilities;
 }
 
+// Offline fallback only: accurate context/pricing for the default and
+// plumbing models before (or without) the live catalog. Not a recommendation —
+// the picker's featured list is ranked from live benchmark data (see
+// featuredModels). Verified against https://openrouter.ai/api/v1/models on
+// 2026-09-25; the live catalog replaces these numbers once it loads.
 const SEED: ModelEntry[] = [
-  // Pricing/context verified against https://openrouter.ai/api/v1/models on
-  // 2026-09-25. The live catalog replaces these numbers once it loads.
   {
     id: "moonshotai/kimi-k3",
     name: "MoonshotAI: Kimi K3",
@@ -89,10 +102,6 @@ const SEED: ModelEntry[] = [
     supports: { tools: true, reasoning: true, streaming: true, vision: true },
   },
 ];
-
-/** Ids of the models kimiflare recommends, in display order. The model picker
- *  pins these to the top; everything else in the catalog follows. */
-export const RECOMMENDED_MODEL_IDS: readonly string[] = SEED.map((m) => m.id);
 
 const seedIndex = new Map<string, ModelEntry>(SEED.map((m) => [m.id, m]));
 let userOverrides: Map<string, ModelEntry> = new Map();
@@ -197,3 +206,50 @@ const LEGACY_MODEL_IDS: Record<string, string> = {
   "@cf/zai-org/glm-5.2": "z-ai/glm-5.2",
   "@cf/baai/bge-base-en-v1.5": "baai/bge-base-en-v1.5",
 };
+
+/** Variant / alias ids that duplicate a base model in listings. */
+function isListingDuplicate(id: string): boolean {
+  return id.startsWith("~") || /:(batch|free|nitro|floor|thinking|extended)$/.test(id);
+}
+
+/**
+ * The "best & latest" models to show when nothing is searched: recent
+ * (released within `maxAgeDays`), tool-capable models ranked by OpenRouter's
+ * published Artificial Analysis agentic + coding scores — the two that matter
+ * for a coding agent — with at most `perVendor` per vendor so no single lab
+ * crowds the list. Entirely data-driven: it changes as OpenRouter's catalog
+ * does, with no model names in code. Falls back to the seed list when the
+ * catalog carries no benchmark data (offline, first run without network).
+ */
+export function featuredModels(
+  models: ModelEntry[] = listModels(),
+  opts: { limit?: number; perVendor?: number; maxAgeDays?: number; now?: number } = {},
+): ModelEntry[] {
+  const limit = opts.limit ?? 12;
+  const perVendor = opts.perVendor ?? 2;
+  const maxAgeSec = (opts.maxAgeDays ?? 365) * 86_400;
+  const nowSec = (opts.now ?? Date.now()) / 1000;
+  const score = (m: ModelEntry) => (m.quality?.agentic ?? 0) + (m.quality?.coding ?? 0);
+
+  const ranked = models
+    .filter(
+      (m) =>
+        m.supports.tools &&
+        !isListingDuplicate(m.id) &&
+        score(m) > 0 &&
+        (m.created === undefined || nowSec - m.created <= maxAgeSec),
+    )
+    .sort((a, b) => score(b) - score(a) || (b.created ?? 0) - (a.created ?? 0));
+
+  const out: ModelEntry[] = [];
+  const perVendorCount = new Map<string, number>();
+  for (const m of ranked) {
+    const v = vendorOf(m.id);
+    const n = perVendorCount.get(v) ?? 0;
+    if (n >= perVendor) continue;
+    perVendorCount.set(v, n + 1);
+    out.push(m);
+    if (out.length >= limit) break;
+  }
+  return out.length > 0 ? out : SEED.filter((s) => models.some((m) => m.id === s.id));
+}

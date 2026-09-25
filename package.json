@@ -1,7 +1,7 @@
 {
   "name": "kimiflare",
   "version": "0.99.0",
-  "description": "A terminal coding agent that runs any OpenRouter model with your own key — Kimi K2.6 by default. Per-turn billed cost, web search, GitHub, headless browser, LSP, MCP, local memory.",
+  "description": "A terminal coding agent that runs any OpenRouter model with your own key. Per-turn billed cost, web search, GitHub, headless browser, LSP, MCP, local memory.",
   "keywords": [
     "ai",
     "cli",

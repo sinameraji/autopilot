@@ -12,14 +12,13 @@
  * (theme, MCP servers, …) survive.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { CustomTextInput } from "./text-input.js";
-import { formatModelPrice, ModelPicker } from "./model-picker.js";
+import { ModelPicker } from "./model-picker.js";
 import { useTheme } from "./theme-context.js";
 import { openBrowser } from "./app-helpers.js";
 import {
-  DEFAULT_MODEL,
   hasLegacyCloudflareConfig,
   loadConfig,
   patchPersistedConfig,
@@ -31,14 +30,14 @@ import {
   OPENROUTER_KEYS_URL,
   type OpenRouterKeyInfo,
 } from "../models/openrouter.js";
-import { getModelOrInfer, RECOMMENDED_MODEL_IDS, type ModelEntry } from "../models/registry.js";
+import type { ModelEntry } from "../models/registry.js";
 
 interface Props {
   onDone: (cfg: KimiConfig) => void;
   onCancel?: () => void;
 }
 
-type Step = "key" | "checking" | "model" | "browse" | "saving";
+type Step = "key" | "checking" | "model" | "saving";
 
 export function Onboarding({ onDone, onCancel }: Props) {
   const theme = useTheme();
@@ -47,22 +46,11 @@ export function Onboarding({ onDone, onCancel }: Props) {
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyInfo, setKeyInfo] = useState<OpenRouterKeyInfo | null>(null);
   const [upgrading, setUpgrading] = useState(false);
-  const [modelIdx, setModelIdx] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     void hasLegacyCloudflareConfig().then(setUpgrading);
   }, []);
-
-  const recommended = useMemo(
-    () => RECOMMENDED_MODEL_IDS.map((id) => getModelOrInfer(id)),
-    [],
-  );
-  // Default selection: kimiflare's default model; the last row opens the full catalog.
-  useEffect(() => {
-    const i = recommended.findIndex((m) => m.id === DEFAULT_MODEL);
-    if (i >= 0) setModelIdx(i);
-  }, [recommended]);
 
   const submitKey = async (raw: string) => {
     const candidate = raw.trim();
@@ -105,36 +93,13 @@ export function Onboarding({ onDone, onCancel }: Props) {
     }
   };
 
-  useInput((input, k) => {
-    if (step === "key") {
+  useInput(
+    (input, k) => {
       if (k.escape) onCancel?.();
       if (k.ctrl && input === "o") openBrowser(OPENROUTER_KEYS_URL);
-      return;
-    }
-    if (step !== "model") return;
-    const rows = recommended.length + 1; // + "Browse all models…"
-    if (k.upArrow) setModelIdx((i) => (i - 1 + rows) % rows);
-    else if (k.downArrow) setModelIdx((i) => (i + 1) % rows);
-    else if (k.escape) {
-      setStep("key");
-      setKeyInfo(null);
-    } else if (k.return) {
-      if (modelIdx === recommended.length) setStep("browse");
-      else void finish(recommended[modelIdx]!);
-    }
-  });
-
-  if (step === "browse") {
-    return (
-      <ModelPicker
-        current={DEFAULT_MODEL}
-        onPick={(m) => {
-          if (m) void finish(m);
-          else setStep("model");
-        }}
-      />
-    );
-  }
+    },
+    { isActive: step === "key" },
+  );
 
   const stepNo = step === "key" || step === "checking" ? 1 : 2;
 
@@ -187,34 +152,26 @@ export function Onboarding({ onDone, onCancel }: Props) {
             ✓ key accepted{keyInfo?.label ? ` (${keyInfo.label})` : ""}
             {describeCredit(keyInfo)}
           </Text>
-          <Box marginTop={1} flexDirection="column">
-            <Text>Pick a model — you can switch any time with /model</Text>
-            <Text color={theme.info.color} dimColor>
-              ↑/↓ to move, Enter to pick. Prices are USD per million tokens (input / output).
-            </Text>
-          </Box>
-          <Box marginTop={1} flexDirection="column">
-            {recommended.map((m, i) => (
-              <Text key={m.id} color={i === modelIdx ? theme.palette.primary : undefined}>
-                {i === modelIdx ? "› " : "  "}
-                {(m.name ?? m.id).replace(/^[^:]+:\s*/, "").padEnd(22)}
-                <Text color={theme.info.color} dimColor>
-                  {`${formatModelPrice(m.pricing)}  ·  ${formatContext(m.contextWindow)} ctx${
-                    m.id === DEFAULT_MODEL ? "  ·  default" : ""
-                  }`}
-                </Text>
-              </Text>
-            ))}
-            <Text color={modelIdx === recommended.length ? theme.palette.primary : undefined}>
-              {modelIdx === recommended.length ? "› " : "  "}
-              Browse all OpenRouter models…
-            </Text>
-          </Box>
+          {step === "model" && (
+            <Box marginTop={1} flexDirection="column">
+              <ModelPicker
+                current=""
+                title="Pick a model — switch any time with /model  ·  prices are USD per million tokens"
+                onPick={(m) => {
+                  if (m) void finish(m);
+                  else {
+                    setStep("key");
+                    setKeyInfo(null);
+                  }
+                }}
+              />
+            </Box>
+          )}
           {keyInfo?.isFreeTier && (
             <Box marginTop={1}>
               <Text color={theme.warn}>
-                This key has no credits yet: only free models (ids ending in :free) will work, with a daily
-                request cap. Add credits at https://openrouter.ai/settings/credits to use the models above.
+                This key has no credits yet: only free models work (type "free" to find them), with a daily
+                request cap. Add credits at https://openrouter.ai/settings/credits to use the others.
               </Text>
             </Box>
           )}
@@ -238,9 +195,4 @@ function describeCredit(info: OpenRouterKeyInfo | null): string {
   if (!info) return "";
   if (typeof info.limitRemaining === "number") return ` · $${info.limitRemaining.toFixed(2)} credit left on this key`;
   return "";
-}
-
-function formatContext(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
-  return `${Math.round(n / 1_000)}k`;
 }
