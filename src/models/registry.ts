@@ -56,6 +56,14 @@ export interface ModelEntry {
   created?: number;
   /** Benchmark scores, when OpenRouter has them. Drives the "best & latest" list. */
   quality?: ModelQuality;
+  /**
+   * Request parameters the model's OpenRouter endpoints accept (the catalog's
+   * `supported_parameters`). The client only sends parameters listed here —
+   * required because every request sets `provider.require_parameters`, which
+   * makes OpenRouter reject a request if no endpoint supports every parameter
+   * sent. Undefined when unknown (seed entries, ids not in the catalog).
+   */
+  parameters?: string[];
   contextWindow: number;
   maxOutputTokens: number;
   pricing: ModelPricing;

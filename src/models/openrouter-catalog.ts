@@ -18,7 +18,7 @@ import { registerOpenRouterModels, type ModelEntry } from "./registry.js";
 import { fetchWithNetworkRetry, openRouterUrl } from "./openrouter.js";
 
 /** Bump when the cached `ModelEntry` shape changes, so an old cache is refetched. */
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 /** Default: refetch after 6 hours; always fall back to a stale cache on fetch failure. */
 export const DEFAULT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -71,6 +71,7 @@ export function mapOpenRouterModel(raw: OpenRouterRawModel): ModelEntry {
     ...(raw.name ? { name: raw.name } : {}),
     ...(typeof raw.created === "number" ? { created: raw.created } : {}),
     ...(Object.keys(quality).length > 0 ? { quality } : {}),
+    ...(raw.supported_parameters ? { parameters: [...raw.supported_parameters] } : {}),
     contextWindow: raw.context_length ?? 128_000,
     maxOutputTokens: raw.top_provider?.max_completion_tokens ?? 4_096,
     pricing: {

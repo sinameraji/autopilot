@@ -7,9 +7,27 @@
 import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert";
 import { runKimi, type RunKimiOpts } from "./client.js";
+import { registerOpenRouterModels, type ModelEntry } from "../models/registry.js";
 import { KimiApiError } from "../util/errors.js";
 
 const KEY = "sk-or-test-key-123456";
+
+// Parameter lists as OpenRouter's catalog reports them (supported_parameters).
+// gpt-5.6-luna is the real list from 2026-09-25: no temperature, no
+// parallel_tool_calls — sending either with require_parameters 404s.
+const catalogEntry = (id: string, parameters: string[], reasoning = true): ModelEntry => ({
+  id,
+  contextWindow: 400_000,
+  maxOutputTokens: 100_000,
+  pricing: { inputPerMtok: 1, outputPerMtok: 1 },
+  supports: { tools: true, reasoning, streaming: true },
+  parameters,
+});
+const LUNA = catalogEntry("openai/gpt-5.6-luna", [
+  "include_reasoning", "max_completion_tokens", "max_tokens", "reasoning", "reasoning_effort",
+  "response_format", "seed", "structured_outputs", "tool_choice", "tools",
+]);
+const MAXTOKENS_ONLY = catalogEntry("vendor/older-model", ["max_tokens", "reasoning", "temperature", "tool_choice", "tools"]);
 
 describe("runKimi: OpenRouter request", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -88,26 +106,59 @@ describe("runKimi: OpenRouter request", () => {
     }
   });
 
-  it("puts the model id in the body unchanged, with max_completion_tokens (not max_tokens)", async () => {
-    const { body } = await send({ maxCompletionTokens: 1234 });
+  it("puts the model id in the body unchanged", async () => {
+    const { body } = await send();
     assert.strictEqual(body.model, "moonshotai/kimi-k2.6");
-    assert.strictEqual(body.max_completion_tokens, 1234);
-    assert.ok(!("max_tokens" in body));
     assert.strictEqual(body.stream, true);
+  });
+
+  describe("only sends parameters the model's endpoints accept", () => {
+    before(() => registerOpenRouterModels([LUNA, MAXTOKENS_ONLY]));
+    after(() => registerOpenRouterModels([]));
+    const tools = [{ type: "function" as const, function: { name: "read", description: "r", parameters: { type: "object" } } }];
+
+    it("gpt-5.6-luna: no temperature or parallel_tool_calls; max_completion_tokens + reasoning_effort", async () => {
+      const { body } = await send({ model: LUNA.id, tools, temperature: 0.2, reasoningEffort: "high", maxCompletionTokens: 1234 });
+      assert.ok(!("temperature" in body));
+      assert.ok(!("parallel_tool_calls" in body));
+      assert.strictEqual(body.tool_choice, "auto");
+      assert.strictEqual(body.max_completion_tokens, 1234);
+      assert.ok(!("max_tokens" in body));
+      assert.strictEqual(body.reasoning_effort, "high");
+      assert.deepStrictEqual(body.provider, { require_parameters: true });
+    });
+
+    it("falls back to max_tokens and reasoning.effort when those are what the model lists", async () => {
+      const { body } = await send({ model: MAXTOKENS_ONLY.id, tools, reasoningEffort: "low", maxCompletionTokens: 999 });
+      assert.strictEqual(body.max_tokens, 999);
+      assert.ok(!("max_completion_tokens" in body));
+      assert.deepStrictEqual(body.reasoning, { effort: "low" });
+      assert.ok(!("reasoning_effort" in body));
+      assert.strictEqual(body.temperature, 0.2);
+    });
+
+    it("merges configured provider prefs over require_parameters", async () => {
+      const { body } = await send({ model: LUNA.id, provider: { ignore: ["SlowCo"], quantizations: ["fp8"] } });
+      assert.deepStrictEqual(body.provider, { require_parameters: true, ignore: ["SlowCo"], quantizations: ["fp8"] });
+    });
+  });
+
+  it("with no parameter list (not in the catalog), sends only near-universal params and no require_parameters", async () => {
+    const tools = [{ type: "function" as const, function: { name: "read", description: "r", parameters: { type: "object" } } }];
+    const { body } = await send({ tools, maxCompletionTokens: 777, reasoningEffort: "high" });
+    assert.strictEqual(body.max_tokens, 777);
+    assert.ok(!("max_completion_tokens" in body));
+    assert.ok(!("tool_choice" in body));
+    assert.ok(!("parallel_tool_calls" in body));
+    assert.ok(!("reasoning_effort" in body));
+    assert.strictEqual((body.tools as unknown[]).length, 1);
+    assert.ok(!("provider" in body));
   });
 
   it("omits the deprecated usage/stream_options flags (OpenRouter always returns usage)", async () => {
     const { body } = await send();
     assert.ok(!("stream_options" in body));
     assert.ok(!("usage" in body));
-  });
-
-  it("sends reasoning_effort only for models that support reasoning", async () => {
-    const withReasoning = await send({ reasoningEffort: "high" });
-    assert.strictEqual(withReasoning.body.reasoning_effort, "high");
-    // Unknown ids fall back to conservative capabilities (reasoning: false).
-    const unknown = await send({ model: "someone/unknown-model", reasoningEffort: "high" });
-    assert.ok(!("reasoning_effort" in unknown.body));
   });
 
   it("omits temperature for Kimi K3, which only accepts its default", async () => {
@@ -126,31 +177,11 @@ describe("runKimi: OpenRouter request", () => {
     assert.strictEqual(none.req.headers.get("X-Session-ID"), null);
   });
 
-  it("always requires providers to support every parameter, merged with configured prefs", async () => {
-    const plain = await send();
-    assert.deepStrictEqual(plain.body.provider, { require_parameters: true });
-    const withPrefs = await send({ provider: { ignore: ["SlowCo"], quantizations: ["fp8"] } });
-    assert.deepStrictEqual(withPrefs.body.provider, {
-      require_parameters: true,
-      ignore: ["SlowCo"],
-      quantizations: ["fp8"],
-    });
-  });
-
   it("adds top-level cache_control only for anthropic/* models", async () => {
     const claude = await send({ model: "anthropic/claude-sonnet-4-6" });
     assert.deepStrictEqual(claude.body.cache_control, { type: "ephemeral" });
     const kimi = await send();
     assert.ok(!("cache_control" in kimi.body));
-  });
-
-  it("sends tools with auto tool choice and parallel calls", async () => {
-    const { body } = await send({
-      tools: [{ type: "function", function: { name: "read", description: "r", parameters: { type: "object" } } }],
-    });
-    assert.strictEqual(body.tool_choice, "auto");
-    assert.strictEqual(body.parallel_tool_calls, true);
-    assert.strictEqual((body.tools as unknown[]).length, 1);
   });
 
   it("accepts OpenRouter's :variant and ~alias model ids", async () => {

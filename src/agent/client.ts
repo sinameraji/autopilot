@@ -115,23 +115,45 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
   const supportsTemperature = entry.supports.temperature !== false;
   const supportsReasoning = entry.supports.reasoning === true;
 
+  const hasTools = !!opts.tools && opts.tools.length > 0;
+  const maxTokens = opts.maxCompletionTokens ?? 16384;
   const body: Record<string, unknown> = {
     model: opts.model,
     messages: sanitizeMessagesForApi(opts.messages),
-    ...(opts.tools && opts.tools.length
-      ? { tools: opts.tools, tool_choice: "auto", parallel_tool_calls: true }
-      : {}),
     stream: true,
-    ...(supportsTemperature ? { temperature: opts.temperature ?? 0.2 } : {}),
-    max_completion_tokens: opts.maxCompletionTokens ?? 16384,
-    ...(opts.reasoningEffort && supportsReasoning ? { reasoning_effort: opts.reasoningEffort } : {}),
   };
   if (customEndpoint) {
+    // The host's gateway gets the plain OpenAI-shaped request.
+    if (hasTools) Object.assign(body, { tools: opts.tools, tool_choice: "auto", parallel_tool_calls: true });
+    if (supportsTemperature) body.temperature = opts.temperature ?? 0.2;
+    body.max_completion_tokens = maxTokens;
+    if (opts.reasoningEffort && supportsReasoning) body.reasoning_effort = opts.reasoningEffort;
     // OpenAI's streaming API omits `usage` unless asked; OpenRouter always
     // sends it (and documents this flag as a no-op), so only custom
     // endpoints get it.
     body.stream_options = { include_usage: true };
   } else {
+    // Only send optional parameters the model's endpoints accept. With
+    // `require_parameters` (below) a single unsupported parameter would leave
+    // no eligible provider and the request 404s — and most models accept
+    // e.g. `max_tokens` but not `max_completion_tokens`, or omit
+    // `parallel_tool_calls`. For a model we have no parameter list for, send
+    // only the near-universal ones and skip require_parameters.
+    const known = entry.parameters ? new Set(entry.parameters) : null;
+    const accepts = (p: string) => (known ? known.has(p) : p === "tools" || p === "max_tokens" || p === "temperature");
+    if (hasTools) {
+      body.tools = opts.tools;
+      if (accepts("tool_choice")) body.tool_choice = "auto";
+      if (accepts("parallel_tool_calls")) body.parallel_tool_calls = true;
+    }
+    if (supportsTemperature && accepts("temperature")) body.temperature = opts.temperature ?? 0.2;
+    if (accepts("max_completion_tokens")) body.max_completion_tokens = maxTokens;
+    else if (accepts("max_tokens")) body.max_tokens = maxTokens;
+    if (opts.reasoningEffort && supportsReasoning) {
+      if (accepts("reasoning_effort")) body.reasoning_effort = opts.reasoningEffort;
+      else if (accepts("reasoning")) body.reasoning = { effort: opts.reasoningEffort };
+    }
+
     // Sticky routing: OpenRouter pins a session to the provider that served
     // it, so the prompt-prefix cache stays warm across turns (10 min idle
     // window). Without it OpenRouter hashes the first system + user message,
@@ -140,8 +162,10 @@ export async function* runKimi(opts: RunKimiOpts): AsyncGenerator<KimiEvent, voi
     // Only route to providers that support every parameter we send — above
     // all `tools`: a few endpoints for some models serve the model without
     // tool calling, and a coding agent is useless there. Tool-calling quality
-    // ordering (Auto Exacto) is applied by OpenRouter on top of this.
-    body.provider = { require_parameters: true, ...(opts.provider ?? {}) };
+    // ordering (Auto Exacto) is applied by OpenRouter on top of this. Skipped
+    // when the model's parameter list is unknown (we can't guarantee a match).
+    const provider = { ...(known ? { require_parameters: true } : {}), ...(opts.provider ?? {}) };
+    if (Object.keys(provider).length > 0) body.provider = provider;
     // Anthropic models only cache with explicit breakpoints; the top-level
     // directive makes OpenRouter place them automatically. Everyone else
     // kimiflare defaults to (Moonshot, DeepSeek, Z.AI, OpenAI, …) caches
