@@ -293,11 +293,11 @@ export function humanizeInfo(text: string, tier?: IntentTier): string {
   }
 
   // Config
-  if (text === "configuration saved — welcome to kimiflare!") {
+  if (text === "configuration saved — welcome to autopilot (formerly kimiflare)!") {
     return pick(tier, {
-      light: "All set — welcome to KimiFlare!",
-      medium: "Configuration saved — welcome to KimiFlare!",
-      heavy: "Configuration saved — welcome to KimiFlare!",
+      light: "All set — welcome to autopilot (formerly kimiflare)!",
+      medium: "Configuration saved — welcome to autopilot (formerly kimiflare)!",
+      heavy: "Configuration saved — welcome to autopilot (formerly kimiflare)!",
     });
   }
 

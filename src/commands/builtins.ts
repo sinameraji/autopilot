@@ -33,7 +33,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "shell", argHint: "[auto|bash|cmd|powershell|<path>]", description: "Show or set shell for bash tool", source: "builtin" },
   { name: "changelog-image", argHint: "[owner/repo] [days]", description: "Generate a changelog image from merged PRs", source: "builtin" },
   { name: "logout", description: "Clear stored credentials", source: "builtin" },
-  { name: "exit", description: "Exit kimiflare", source: "builtin" },
+  { name: "exit", description: "Exit autopilot (formerly kimiflare)", source: "builtin" },
 ];
 
 export const BUILTIN_COMMAND_NAMES = new Set(

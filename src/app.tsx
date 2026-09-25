@@ -1524,7 +1524,7 @@ function App({
       ) {
         setEvents((e) => [
           ...e,
-          { kind: "info", key: mkKey(), text: "Tip: Rerunning /init occasionally helps KimiFlare stay accurate as your project evolves." },
+          { kind: "info", key: mkKey(), text: "Tip: Rerunning /init occasionally helps autopilot (formerly kimiflare) stay accurate as your project evolves." },
         ]);
       }
 
@@ -2348,7 +2348,7 @@ function App({
             setCfg(newCfg);
             setEvents((e) => [
               ...e,
-              { kind: "info", key: mkKey(), text: "configuration saved — welcome to kimiflare!" },
+              { kind: "info", key: mkKey(), text: "configuration saved — welcome to autopilot (formerly kimiflare)!" },
             ]);
           }}
         />

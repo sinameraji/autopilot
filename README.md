@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/logo.png" alt="kimiflare" width="180">
-</p>
+<h1 align="center">autopilot <sub>(formerly kimiflare)</sub></h1>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/kimiflare"><img src="https://img.shields.io/npm/v/kimiflare?style=flat-square&color=cb3837" alt="npm version"></a>
@@ -15,13 +13,6 @@
 <p align="center">
   <strong>A terminal coding agent that runs any model on <a href="https://openrouter.ai">OpenRouter</a> with your own key — Kimi K2.6 by default.</strong><br>
   One key, 400+ models, per-turn billed cost.
-</p>
-
-<p align="center">
-  <img src="docs/demos/onboarding.gif" alt="kimiflare TUI demo" width="900">
-</p>
-<p align="center">
-  <a href="https://kimiflare.com">Watch full demos →</a>
 </p>
 
 ## How it works

@@ -153,7 +153,7 @@ const CATEGORIES: Category[] = [
 const SINGLE_COMMANDS: CommandItem[] = [
   { command: "/reasoning", description: "toggle show/hide model reasoning" },
   { command: "/help", description: "show this menu" },
-  { command: "/exit", description: "exit kimiflare" },
+  { command: "/exit", description: "exit autopilot (formerly kimiflare)" },
 ];
 
 export function HelpMenu({ customCommands, costAttributionEnabled, onDone, onCommand }: Props) {

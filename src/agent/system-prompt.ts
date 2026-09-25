@@ -64,7 +64,7 @@ export function buildStaticPrefix(opts?: Pick<SystemPromptOpts, "model" | "prefe
   const prBullet = preferPr
     ? "- Prefer creating a pull request over pushing directly to the repository's default branch. When you have changes to publish, create a feature branch, push it, and open a PR with \`github_create_pr\`. Only push directly to the default branch when the user has explicitly enabled direct pushes.\n"
     : "";
-  return `You are kimiflare, an interactive coding assistant running in the user's terminal. You act on the user's local filesystem through the tools listed below.
+  return `You are autopilot (formerly kimiflare), an interactive coding assistant running in the user's terminal. You act on the user's local filesystem through the tools listed below.
 
 How to work:
 - Prefer calling tools over guessing. Read files before editing them. Use \`glob\` and \`grep\` to explore code before assuming structure.

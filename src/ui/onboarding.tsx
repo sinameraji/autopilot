@@ -139,17 +139,11 @@ export function Onboarding({ onDone, onCancel }: Props) {
   const stepNo = step === "key" || step === "checking" ? 1 : 2;
 
   return (
+    // No header here: the startup banner (ui/logo.ts) names the app just above.
     <Box flexDirection="column" paddingY={1}>
-      <Box marginBottom={1}>
-        <Text bold color={theme.palette.primary}>
-          kimiflare
-        </Text>
-        <Text color={theme.info.color}>{"  "}Terminal coding agent</Text>
-      </Box>
-
       {upgrading && (
         <Box flexDirection="column" marginBottom={1}>
-          <Text color={theme.accent}>kimiflare now runs on OpenRouter.</Text>
+          <Text color={theme.accent}>autopilot (formerly kimiflare) now runs on OpenRouter.</Text>
           <Text color={theme.info.color} dimColor>
             Cloudflare Workers AI and AI Gateway are no longer used. Paste an OpenRouter key once and your
             other settings carry over — Kimi models, memory and sessions all keep working.
@@ -164,7 +158,7 @@ export function Onboarding({ onDone, onCancel }: Props) {
           <Text>Paste your OpenRouter API key</Text>
           <Text color={theme.info.color} dimColor>
             Create one at {OPENROUTER_KEYS_URL} (Ctrl+O opens it). Model calls are billed to your own
-            OpenRouter account — kimiflare never sees or stores it anywhere but your config file.
+            OpenRouter account — autopilot (formerly kimiflare) never sees or stores it anywhere but your config file.
           </Text>
           <Box marginTop={1}>
             <Text color={theme.palette.primary}>› </Text>

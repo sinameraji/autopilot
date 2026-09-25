@@ -163,7 +163,7 @@ const EventView = React.memo(function EventView({
       <Box flexDirection="column">
         <Box>
           <Text bold color={theme.assistant ?? theme.info.color}>
-            kimiflare:{" "}
+            autopilot (formerly kimiflare):{" "}
           </Text>
           <Box flexDirection="column">
             {showReasoning && evt.reasoning ? (

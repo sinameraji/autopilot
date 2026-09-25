@@ -551,7 +551,7 @@ const handleKey: Handler = async (ctx, rest) => {
     info(
       envKey
         ? "removed the key from the config file (the one in OPENROUTER_API_KEY is still used)"
-        : "OpenRouter key removed — kimiflare will ask for one on next launch",
+        : "OpenRouter key removed — autopilot (formerly kimiflare) will ask for one on next launch",
     );
     return true;
   }
