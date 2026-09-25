@@ -142,7 +142,7 @@ export async function* deployForTui(): AsyncGenerator<DeployStep, { workerUrl: s
 }
 
 export async function runDeploy(): Promise<void> {
-  console.log("kimiflare remote deploy\n");
+  console.log("autopilot remote deploy\n");
   try {
     for await (const step of deployForTui()) {
       console.log(step.message);

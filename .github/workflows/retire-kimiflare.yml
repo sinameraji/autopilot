@@ -1,0 +1,45 @@
+name: Retire kimiflare (one-off)
+
+# Publishes the final forwarding kimiflare release (deprecated/kimiflare) and
+# marks the kimiflare package deprecated in favour of autopilot-ai. Run
+# manually once, after autopilot-ai is on npm. Idempotent: skips the publish
+# if that kimiflare version is already out; re-deprecating is harmless.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Require autopilot-ai on npm first
+        run: npm view autopilot-ai version
+
+      - name: Publish final kimiflare (forwards to autopilot-ai)
+        working-directory: deprecated/kimiflare
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          if npm view "kimiflare@$LOCAL" version >/dev/null 2>&1; then
+            echo "kimiflare@$LOCAL already on npm; skipping publish."
+          else
+            npm publish --access public --provenance
+          fi
+
+      - name: Deprecate kimiflare
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm deprecate kimiflare "kimiflare has been renamed to autopilot. Install: npm i -g autopilot-ai (command: autopilot)"

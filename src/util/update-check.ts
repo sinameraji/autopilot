@@ -2,14 +2,17 @@ import { readFile, writeFile, mkdir, access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getUserAgent } from "./version.js";
+import { getUserAgent, PACKAGE_NAME } from "./version.js";
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-const NPM_REGISTRY = "https://registry.npmjs.org/kimiflare/latest";
+const NPM_REGISTRY = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
 
 interface CacheEntry {
   checkedAt: number;
   latestVersion: string;
+  /** Package the version belongs to — caches written for the old `kimiflare`
+   *  package are ignored so they can't mask an autopilot-ai update. */
+  name?: string;
 }
 
 export interface OptionalDepCheckResult {
@@ -31,7 +34,7 @@ async function findPackageJson(startDir: string): Promise<{ path: string; versio
     try {
       const raw = await readFile(candidate, "utf8");
       const parsed = JSON.parse(raw) as { name?: string; version?: string };
-      if (parsed.name === "kimiflare" && parsed.version) {
+      if (parsed.name === PACKAGE_NAME && parsed.version) {
         return { path: candidate, version: parsed.version };
       }
     } catch {
@@ -54,7 +57,7 @@ async function readCache(): Promise<CacheEntry | null> {
   try {
     const raw = await readFile(cachePath(), "utf8");
     const parsed = JSON.parse(raw) as CacheEntry;
-    if (Date.now() - parsed.checkedAt < CACHE_TTL_MS) {
+    if (parsed.name === PACKAGE_NAME && Date.now() - parsed.checkedAt < CACHE_TTL_MS) {
       return parsed;
     }
   } catch {
@@ -163,7 +166,7 @@ export async function checkForUpdate(force = false): Promise<UpdateCheckResult> 
   }
 
   const hasUpdate = isNewer(localVersion, latestVersion);
-  await writeCache({ checkedAt: Date.now(), latestVersion });
+  await writeCache({ checkedAt: Date.now(), latestVersion, name: PACKAGE_NAME });
   return { hasUpdate, localVersion, latestVersion };
 }
 

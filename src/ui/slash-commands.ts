@@ -1152,7 +1152,7 @@ const handleUpdate: Handler = (ctx, _rest, arg) => {
       ]);
       setEvents((e) => [
         ...e,
-        { kind: "info", key: mkKey(), text: "run:  npm update -g kimiflare  then restart" },
+        { kind: "info", key: mkKey(), text: "run:  npm i -g autopilot-ai@latest  then restart" },
       ]);
     } else {
       ctx.setHasUpdate(false);
@@ -1475,7 +1475,7 @@ const handleRemote: Handler = (ctx, rest, arg) => {
   if (arg === "status" || arg === "cancel") {
     setEvents((e) => [
       ...e,
-      { kind: "info", key: mkKey(), text: `Use \`kimiflare remote ${arg}\` from your shell.` },
+      { kind: "info", key: mkKey(), text: `Use \`autopilot remote ${arg}\` from your shell.` },
     ]);
     return true;
   }
@@ -1553,7 +1553,7 @@ const handleRemote: Handler = (ctx, rest, arg) => {
       } catch {
         setEvents((e) => [
           ...e,
-          { kind: "error", key: mkKey(), text: "GitHub auth failed. Try `kimiflare auth github` from shell." },
+          { kind: "error", key: mkKey(), text: "GitHub auth failed. Try `autopilot auth github` from shell." },
         ]);
         return;
       }

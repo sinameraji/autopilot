@@ -1,8 +1,10 @@
 {
-  "name": "kimiflare",
-  "version": "0.99.0",
-  "description": "A terminal coding agent that runs any OpenRouter model with your own key. Per-turn billed cost, web search, GitHub, headless browser, LSP, MCP, local memory.",
+  "name": "autopilot-ai",
+  "version": "1.0.0",
+  "description": "autopilot (formerly kimiflare): a terminal coding agent that runs any OpenRouter model with your own key. Per-turn billed cost, web search, GitHub, headless browser, LSP, MCP, local memory.",
   "keywords": [
+    "autopilot",
+    "kimiflare",
     "ai",
     "cli",
     "coding-agent",
@@ -20,14 +22,14 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sinameraji/kimiflare.git"
+    "url": "git+https://github.com/sinameraji/autopilot.git"
   },
-  "homepage": "https://github.com/sinameraji/kimiflare#readme",
-  "bugs": "https://github.com/sinameraji/kimiflare/issues",
+  "homepage": "https://github.com/sinameraji/autopilot#readme",
+  "bugs": "https://github.com/sinameraji/autopilot/issues",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "kimiflare": "bin/kimiflare.mjs"
+    "autopilot": "bin/autopilot.mjs"
   },
   "exports": {
     ".": {
@@ -56,7 +58,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts src/**/*.test.tsx",
     "record-demos": "vhs demos/*.tape",
-    "start": "node bin/kimiflare.mjs",
+    "start": "node bin/autopilot.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

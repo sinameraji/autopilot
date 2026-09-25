@@ -1,5 +1,5 @@
 /**
- * Ground-truth check for the numbers kimiflare shows (`kimiflare cost --verify`,
+ * Ground-truth check for the numbers kimiflare shows (`autopilot cost --verify`,
  * `/cost verify`).
  *
  * For every recorded turn that has an OpenRouter generation id, fetch
@@ -125,7 +125,7 @@ export function formatVerifyReport(r: VerifyResult): string {
   lines.push("");
   const checked = r.rows.length - missing;
   lines.push(
-    `Totals — kimiflare: in ${totals.ours.input}, out ${totals.ours.output}, cached ${totals.ours.cached}, $${totals.ours.cost.toFixed(6)}`,
+    `Totals — autopilot:  in ${totals.ours.input}, out ${totals.ours.output}, cached ${totals.ours.cached}, $${totals.ours.cost.toFixed(6)}`,
   );
   lines.push(
     `         OpenRouter: in ${totals.theirs.input}, out ${totals.theirs.output}, cached ${totals.theirs.cached}, $${totals.theirs.cost.toFixed(6)}`,

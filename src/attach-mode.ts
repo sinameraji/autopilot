@@ -1,5 +1,5 @@
 /**
- * Attach mode: connect to a running kimiflare serve instance
+ * Attach mode: connect to a running autopilot serve instance
  * and stream the response to stdout.
  */
 
