@@ -124,15 +124,27 @@ program
   .description("Authenticate with external services")
   .addCommand(
     new Command("openrouter")
-      .description("Save your OpenRouter API key (validated first). For headless setups, OPENROUTER_API_KEY works too.")
-      .argument("[key]", "the key (sk-or-…); omit to be prompted without echo")
-      .action(async (keyArg: string | undefined) => {
+      .description(
+        "Connect your OpenRouter account: sign in through the browser (default), paste a key, or pass one. For headless setups, OPENROUTER_API_KEY works too.",
+      )
+      .argument("[key]", "an existing key (sk-or-…) to save instead of signing in")
+      .option("--paste", "paste an existing key (prompted without echo) instead of signing in")
+      .option("--code", "sign in on another device and paste the code OpenRouter shows (default over SSH)")
+      .action(async (keyArg: string | undefined, cmdOpts: { paste?: boolean; code?: boolean }) => {
         const { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } = await import("./models/openrouter.js");
         const { patchPersistedConfig } = await import("./config.js");
         let key = keyArg?.trim();
-        if (!key) {
+        if (!key && cmdOpts.paste) {
           console.log(`Create a key at ${OPENROUTER_KEYS_URL}, then paste it here.`);
           key = (await promptHidden("OpenRouter API key: ")).trim();
+        }
+        if (!key) {
+          try {
+            key = await signInFromCli(!!cmdOpts.code);
+          } catch (e) {
+            console.error(e instanceof Error ? e.message : String(e));
+            process.exit(1);
+          }
         }
         if (!looksLikeOpenRouterKey(key)) {
           console.error("That doesn't look like an OpenRouter key — they start with sk-or-.");
@@ -145,8 +157,8 @@ program
         }
         const savedTo = await patchPersistedConfig({ openrouterApiKey: key });
         const credit = typeof res.info.limitRemaining === "number" ? ` · $${res.info.limitRemaining.toFixed(2)} credit left` : "";
-        console.log(`✓ Key accepted${res.info.label ? ` (${res.info.label})` : ""}${credit}`);
-        console.log(`Saved to ${savedTo}. Run \`kimiflare\` to start.`);
+        console.log(`✓ Connected${res.info.label ? ` (${res.info.label})` : ""}${credit}`);
+        console.log(`Saved to ${savedTo}. Run \`autopilot\` to start.`);
       }),
   )
   .addCommand(
@@ -402,4 +414,37 @@ async function promptHidden(question: string): Promise<string> {
     });
     muted = true;
   });
+}
+
+/**
+ * `autopilot auth openrouter` sign-in: browser + local callback by default;
+ * with `code` (or over SSH / without a display) print a link to open on any
+ * device and read the code OpenRouter shows back from the terminal.
+ */
+async function signInFromCli(codeMode: boolean): Promise<string> {
+  const oauth = await import("./models/openrouter-oauth.js");
+  const { openBrowser } = await import("./ui/app-helpers.js");
+  const pkce = oauth.createPkce();
+  if (codeMode || oauth.isHeadlessEnvironment()) {
+    const url = oauth.buildAuthUrl({ challenge: pkce.challenge });
+    console.log("Sign in with OpenRouter — open this link on any device and approve autopilot:\n");
+    console.log(`  ${url}\n`);
+    const { createInterface } = await import("node:readline/promises");
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const code = (await rl.question("Paste the code OpenRouter shows: ")).trim();
+    rl.close();
+    return oauth.exchangeCode(code, pkce.verifier);
+  }
+  const listener = await oauth.startLoopbackListener();
+  const url = oauth.buildAuthUrl({ challenge: pkce.challenge, callbackUrl: listener.callbackUrl });
+  const opened = openBrowser(url);
+  console.log(
+    opened
+      ? "Opening your browser to sign in with OpenRouter — approve autopilot there."
+      : "Open this link to sign in with OpenRouter and approve autopilot:",
+  );
+  console.log(`\n  ${url}\n`);
+  console.log("Waiting… (Ctrl+C to cancel; use --code to sign in from another device)");
+  const code = await listener.code;
+  return oauth.exchangeCode(code, pkce.verifier);
 }
