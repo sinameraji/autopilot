@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.0](https://github.com/sinameraji/autopilot/compare/v0.99.0...v1.0.0) (2026-09-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* publish as `autopilot-ai` (command: `autopilot`); the final `kimiflare` release forwards to it
+* replace Cloudflare with OpenRouter as the sole model provider (bring your own OpenRouter key)
+
+### Features
+
+* /key and `autopilot auth openrouter` for managing the OpenRouter key; onboarding validates the key before saving ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* `cost --verify` checks recorded tokens and cost against OpenRouter's billing records; per-turn billed cost in the status bar ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* model picker opens on the best & latest models (ranked by live benchmarks) with fuzzy search over the full OpenRouter catalog ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* plan/edit/auto modes behind a feature flag (off by default); /settings to turn them on ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* publish as `autopilot-ai` (command: `autopilot`); the final `kimiflare` release forwards to it ([adcedc8](https://github.com/sinameraji/autopilot/commit/adcedc8d5022ed79435d002d7c29b8a42d99c662))
+* replace Cloudflare with OpenRouter as the sole model provider (bring your own OpenRouter key) ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* show the app as "autopilot (formerly kimiflare)" and drop the logo artwork ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+
+
+### Bug Fixes
+
+* fast typing no longer drops characters in the model and resume pickers ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+* only send request parameters each model supports (no-endpoint 404s) ([e9293df](https://github.com/sinameraji/autopilot/commit/e9293dfd4131d61a34408cc70d2238e8b65a9823))
+
 ## [0.99.0](https://github.com/sinameraji/kimiflare/compare/v0.98.1...v0.99.0) (2026-08-20)
 
 
