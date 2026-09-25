@@ -1,26 +1,36 @@
-name: Deploy to Cloudflare Pages
+name: Deploy GitHub Pages
 
 on:
   push:
     branches: [main]
-    paths: ['docs/**', 'functions/**', '.github/workflows/pages.yml']
+    paths: ['docs/**', '.github/workflows/pages.yml']
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
 
 jobs:
   deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      deployments: write
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Wrangler
-        run: npm install -g wrangler
-
-      - name: Deploy to Cloudflare Pages
-        run: wrangler pages deploy docs --project-name=kimiflare
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
