@@ -21,6 +21,7 @@ export type ChatEvent =
   | ({ kind: "tool"; key: string } & ToolEventState)
   | { kind: "info"; key: string; text: string }
   | { kind: "error"; key: string; text: string }
+  | { kind: "jev"; key: string; result: string; probability?: string; tone: "yes" | "no" | "neutral"; receipt: string }
   | { kind: "memory"; key: string; text: string }
   | {
       kind: "meta";
@@ -194,6 +195,26 @@ const EventView = React.memo(function EventView({
       <Text color={theme.info.color}>
         · {humanizeInfo(evt.text, intentTier)}
       </Text>
+    );
+  }
+  if (evt.kind === "jev") {
+    const resultColor = evt.tone === "yes"
+      ? theme.palette.success
+      : evt.tone === "no"
+        ? theme.warn
+        : theme.accent;
+    const mutedColor = theme.muted?.color ?? theme.info.color;
+    return (
+      <Box flexDirection="column">
+        <Box>
+          <Text bold color={theme.accent}>Jev</Text>
+          <Text>  </Text>
+          <Text bold color={resultColor}>{evt.result}</Text>
+          {evt.probability && <Text color={theme.accent}> {evt.probability}</Text>}
+          <Text color={mutedColor} dimColor>  · estimate, not verified</Text>
+        </Box>
+        <Text color={mutedColor} dimColor>  {evt.receipt}</Text>
+      </Box>
     );
   }
   if (evt.kind === "memory") {

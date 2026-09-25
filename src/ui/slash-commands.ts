@@ -18,7 +18,8 @@ import type { ChatEvent } from "./chat.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
 import { llmAuthFromConfig } from "../agent/llm-auth.js";
-import { askJev, formatJevAnswer, type JevQuestion } from "../agent/jev.js";
+import { askJev, presentJevAnswer, type JevQuestion } from "../agent/jev.js";
+import { buildJevContext, formatJevContextReceipt } from "../agent/jev-context.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
@@ -465,14 +466,21 @@ const handleJev: Handler = async (ctx, rest) => {
   const { cfg, setEvents, mkKey } = ctx;
   const info = (text: string, kind: "info" | "error" = "info") =>
     setEvents((events) => [...events, { kind, key: mkKey(), text }]);
-  const setResult = (key: string, text: string, kind: "info" | "error") =>
-    setEvents((events) => events.map((event) => event.key === key ? { kind, key, text } : event));
+  const setResult = (key: string, event: ChatEvent) =>
+    setEvents((events) => events.map((item) => item.key === key ? event : item));
   const subcommand = rest[0]?.toLowerCase() ?? "";
-  const args = rest.slice(1).join(" ").trim();
+  let args = rest.slice(1).join(" ").trim();
+  const noContext = /(?:^|\s)--no-context(?=\s|$)/i.test(args);
+  const showContext = /(?:^|\s)--show-context(?=\s|$)/i.test(args);
+  args = args.replace(/(?:^|\s)--(?:no-context|show-context)(?=\s|$)/gi, " ").trim();
 
   if (!subcommand || subcommand === "help") {
     info([
-      "Jev is a one-shot typed decision; it does not write free-form answers or change /model.",
+      "Jev returns typed decisions, not free-form reasoning, and does not change /model.",
+      "It may send recent chat for explicit references and project metadata/license evidence for current-project questions to OpenRouter.",
+      "A short context receipt is shown by default; append --show-context to display the exact excerpts sent.",
+      "Append --no-context to send only the question.",
+      "Jev does not receive system prompts or tool output, read arbitrary source files, or browse the web.",
       "  /jev yes <question>",
       "  /jev choose <question> --options option-a|option-b|...",
       "  /jev score <question> --scale low|medium|high",
@@ -526,12 +534,32 @@ const handleJev: Handler = async (ctx, rest) => {
   }
 
   const eventKey = mkKey();
-  setEvents((events) => [...events, { kind: "info", key: eventKey, text: "Jev is evaluating…" }]);
+  setEvents((events) => [
+    ...events,
+    { kind: "user", key: mkKey(), text: `/jev ${rest.join(" ")}` },
+    { kind: "info", key: eventKey, text: "Jev is evaluating…" },
+  ]);
   try {
-    const answer = await askJev(apiKey, question);
-    setResult(eventKey, `Jev · ${formatJevAnswer(question, answer)}`, "info");
+    const context = noContext ? [] : await buildJevContext(question.prompt, ctx.messagesRef.current, process.cwd());
+    const receipt = formatJevContextReceipt(context, showContext);
+    setResult(eventKey, { kind: "info", key: eventKey, text: `Jev is evaluating · ${receipt}` });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const answer = await askJev(apiKey, question, { context });
+    const presentation = presentJevAnswer(question, answer);
+    setResult(eventKey, {
+      kind: "jev",
+      key: eventKey,
+      result: presentation.text,
+      probability: presentation.probability,
+      tone: presentation.tone,
+      receipt,
+    });
   } catch (error) {
-    setResult(eventKey, `Jev failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    setResult(eventKey, {
+      kind: "error",
+      key: eventKey,
+      text: `Jev failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
   }
   return true;
 };
