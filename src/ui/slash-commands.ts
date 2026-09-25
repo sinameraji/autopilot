@@ -529,7 +529,7 @@ const handleJev: Handler = async (ctx, rest) => {
   const eventKey = mkKey();
   setEvents((events) => [
     ...events,
-    { kind: "user", key: mkKey(), text: question.prompt },
+    { kind: "user", key: mkKey(), text: `/jev ${rest.join(" ")}` },
     { kind: "info", key: eventKey, text: "Jev is evaluating…" },
   ]);
   try {
