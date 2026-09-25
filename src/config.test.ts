@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { validateModelId } from "./agent/client.js";
 import { getModelOrInfer } from "./models/registry.js";
-import { loadConfig, hasLegacyCloudflareConfig, DEFAULT_MODEL } from "./config.js";
+import {
+  loadConfig,
+  hasLegacyCloudflareConfig,
+  DEFAULT_MODEL,
+  REQUESTY_DEFAULT_MODEL,
+  REQUESTY_PLUMBING_MODEL,
+} from "./config.js";
 
 describe("validateModelId", () => {
   it("accepts OpenRouter model ids", () => {
@@ -53,6 +59,7 @@ describe("loadConfig", () => {
     "KIMI_MODEL",
     "KIMIFLARE_BASE_URL",
     "KIMIFLARE_API_KEY",
+    "REQUESTY_API_KEY",
     "XDG_CONFIG_HOME",
   ] as const;
   const saved: Record<string, string | undefined> = {};
@@ -266,6 +273,35 @@ describe("loadConfig", () => {
       const cfg = await loadConfig();
       assert.strictEqual(cfg?.accountId, "acct");
       assert.strictEqual(cfg?.apiToken, "cf-token");
+    });
+  });
+
+  describe("Requesty (opt-in)", () => {
+    it("resolves with ONLY REQUESTY_API_KEY and uses Requesty model ids by default", async () => {
+      process.env.REQUESTY_API_KEY = "rq-env";
+      const cfg = await loadConfig();
+      assert.ok(cfg, "expected a usable config with only a Requesty key");
+      assert.strictEqual(cfg.requestyApiKey, "rq-env");
+      assert.strictEqual(cfg.openrouterApiKey, undefined);
+      assert.strictEqual(cfg.model, REQUESTY_DEFAULT_MODEL);
+      assert.strictEqual(cfg.plumbingModel, REQUESTY_PLUMBING_MODEL);
+      assert.strictEqual(cfg.memoryExtractionModel, REQUESTY_PLUMBING_MODEL);
+    });
+
+    it("resolves a persisted requestyApiKey and keeps the persisted model", async () => {
+      await writeConfigFile({ requestyApiKey: "rq-file", model: "openai/gpt-4o-mini" });
+      const cfg = await loadConfig();
+      assert.strictEqual(cfg?.requestyApiKey, "rq-file");
+      assert.strictEqual(cfg?.model, "openai/gpt-4o-mini");
+    });
+
+    it("never changes the defaults when an OpenRouter key is also configured", async () => {
+      process.env.OPENROUTER_API_KEY = "sk-or-env";
+      process.env.REQUESTY_API_KEY = "rq-env";
+      const cfg = await loadConfig();
+      assert.strictEqual(cfg?.openrouterApiKey, "sk-or-env");
+      assert.strictEqual(cfg?.model, DEFAULT_MODEL);
+      assert.strictEqual(cfg?.plumbingModel, undefined);
     });
   });
 

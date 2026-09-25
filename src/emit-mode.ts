@@ -35,7 +35,7 @@ import { TurnSupervisor } from "./agent/supervisor.js";
 import { loadConfig, type KimiConfig, type ReasoningEffort } from "./config.js";
 
 export interface EmitModeOpts
-  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"> {
+  extends Pick<KimiConfig, "openrouterApiKey" | "requestyApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"> {
   model: string;
   reasoningEffort?: ReasoningEffort;
   prompt: string;

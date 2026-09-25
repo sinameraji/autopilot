@@ -43,6 +43,13 @@ export interface KimiConfig {
    * Bring-your-own only: kimiflare never pays for or proxies model calls.
    */
   openrouterApiKey?: string;
+  /**
+   * Optional Requesty API key (env: REQUESTY_API_KEY, which wins over the
+   * file). Used only when no OpenRouter key and no custom endpoint are
+   * configured: model calls then go to Requesty (https://requesty.ai). Set
+   * REQUESTY_BASE_URL to pick a region, e.g. https://router.eu.requesty.ai/v1.
+   */
+  requestyApiKey?: string;
   /** OpenRouter model id, e.g. "moonshotai/kimi-k2.6". */
   model: string;
   /**
@@ -221,6 +228,9 @@ export const DEFAULT_MODEL = "moonshotai/kimi-k2.6";
 /** Cheap, fast model for internal side-calls (summaries, memory extraction,
  *  task decomposition, …) when no per-task model is configured. */
 export const DEFAULT_PLUMBING_MODEL = "moonshotai/kimi-k2.5";
+/** Defaults when Requesty is the gateway (Requesty managed policy ids). */
+export const REQUESTY_DEFAULT_MODEL = "kimi-k2.6";
+export const REQUESTY_PLUMBING_MODEL = "deepseek-v4-flash";
 export const DEFAULT_REASONING_EFFORT: ReasoningEffort = "medium";
 
 export function configPath(): string {
@@ -289,7 +299,11 @@ export async function loadConfig(): Promise<KimiConfig | null> {
   const baseUrl = process.env.KIMIFLARE_BASE_URL ?? persisted.baseUrl;
   const apiKey = process.env.KIMIFLARE_API_KEY ?? persisted.apiKey;
 
-  if (!openrouterApiKey && !baseUrl) return null;
+  // Requesty is opt-in: only used when neither of the above is configured.
+  const requestyApiKey = process.env.REQUESTY_API_KEY || persisted.requestyApiKey || undefined;
+  const requesty = !!requestyApiKey && !openrouterApiKey && !baseUrl;
+
+  if (!openrouterApiKey && !baseUrl && !requestyApiKey) return null;
 
   // KIMI_MODEL is an override, not a default: leave it undefined when unset so
   // the persisted `model` (set via /model) is honoured on the next launch.
@@ -309,15 +323,18 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     : undefined;
 
   const m = migrateLegacyModelId;
+  // The OpenRouter plumbing default is not a Requesty id.
+  const requestyPlumbing = requesty ? REQUESTY_PLUMBING_MODEL : undefined;
   const cfg: KimiConfig = {
     openrouterApiKey,
+    requestyApiKey,
     baseUrl,
     apiKey,
     // Cloudflare credentials survive only for /multi-agent Commute, which
     // deploys a Worker into the user's own Cloudflare account.
     accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? process.env.CF_ACCOUNT_ID ?? persisted.accountId,
     apiToken: process.env.CLOUDFLARE_API_TOKEN ?? process.env.CF_API_TOKEN ?? persisted.apiToken,
-    model: m(envModel ?? persisted.model) ?? DEFAULT_MODEL,
+    model: m(envModel ?? persisted.model) ?? (requesty ? REQUESTY_DEFAULT_MODEL : DEFAULT_MODEL),
     openrouterProvider: persisted.openrouterProvider,
     reasoningEffort: envEffort ?? persisted.reasoningEffort,
     modesEnabled: persisted.modesEnabled,
@@ -336,8 +353,9 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     memoryMaxAgeDays: readNumberEnv("KIMIFLARE_MEMORY_MAX_AGE_DAYS") ?? persisted.memoryMaxAgeDays,
     memoryMaxEntries: readNumberEnv("KIMIFLARE_MEMORY_MAX_ENTRIES") ?? persisted.memoryMaxEntries,
     memoryEmbeddingModel: m(process.env.KIMIFLARE_MEMORY_EMBEDDING_MODEL ?? persisted.memoryEmbeddingModel),
-    plumbingModel: m(process.env.KIMIFLARE_PLUMBING_MODEL ?? persisted.plumbingModel),
-    memoryExtractionModel: m(process.env.KIMIFLARE_MEMORY_EXTRACTION_MODEL ?? persisted.memoryExtractionModel),
+    plumbingModel: m(process.env.KIMIFLARE_PLUMBING_MODEL ?? persisted.plumbingModel) ?? requestyPlumbing,
+    memoryExtractionModel:
+      m(process.env.KIMIFLARE_MEMORY_EXTRACTION_MODEL ?? persisted.memoryExtractionModel) ?? requestyPlumbing,
     codeMode: readBooleanEnv("KIMIFLARE_CODE_MODE") ?? persisted.codeMode ?? true,
     lspEnabled: persisted.lspEnabled,
     lspServers: persisted.lspServers,
@@ -372,7 +390,7 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     workerProxyMemory: persisted.workerProxyMemory,
     workerProxyLsp: persisted.workerProxyLsp,
     workerProxyMcp: persisted.workerProxyMcp,
-    decompositionModel: m(persisted.decompositionModel),
+    decompositionModel: m(persisted.decompositionModel) ?? requestyPlumbing,
     decompositionStrategy: persisted.decompositionStrategy,
     synthesisModel: m(persisted.synthesisModel),
     synthesisStrategy: persisted.synthesisStrategy,

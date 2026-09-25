@@ -29,6 +29,7 @@ import { runCleanup, shouldCleanup } from "./cleanup.js";
 export interface MemoryManagerOpts {
   dbPath: string;
   openrouterApiKey?: string;
+  requestyApiKey?: string;
   customEndpoint?: CustomEndpoint;
   model?: string;
   plumbingModel?: string;
@@ -42,6 +43,7 @@ export interface MemoryManagerOpts {
 
 interface LlmOpts {
   openrouterApiKey?: string;
+  requestyApiKey?: string;
   customEndpoint?: CustomEndpoint;
   model: string;
   provider?: OpenRouterProviderPrefs;
@@ -51,6 +53,7 @@ interface LlmOpts {
 async function runKimiText(opts: LlmOpts & { messages: ChatMessage[]; temperature?: number }): Promise<string> {
   const events = runKimi({
     openrouterApiKey: opts.openrouterApiKey,
+    requestyApiKey: opts.requestyApiKey,
     customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: opts.messages,
@@ -162,6 +165,7 @@ export class MemoryManager {
   private get llmOpts(): LlmOpts {
     return {
       openrouterApiKey: this.opts.openrouterApiKey,
+      requestyApiKey: this.opts.requestyApiKey,
       customEndpoint: this.opts.customEndpoint,
       model: this.opts.model ?? DEFAULT_MODEL,
       provider: this.opts.provider,
@@ -171,6 +175,7 @@ export class MemoryManager {
   private get plumbingLlmOpts(): LlmOpts {
     return {
       openrouterApiKey: this.opts.openrouterApiKey,
+      requestyApiKey: this.opts.requestyApiKey,
       customEndpoint: this.opts.customEndpoint,
       model: this.opts.plumbingModel ?? DEFAULT_PLUMBING_MODEL,
       provider: this.opts.provider,
@@ -180,6 +185,7 @@ export class MemoryManager {
   private get extractionLlmOpts(): LlmOpts {
     return {
       openrouterApiKey: this.opts.openrouterApiKey,
+      requestyApiKey: this.opts.requestyApiKey,
       customEndpoint: this.opts.customEndpoint,
       model: this.opts.extractionModel ?? DEFAULT_PLUMBING_MODEL,
       provider: this.opts.provider,
@@ -248,6 +254,7 @@ export class MemoryManager {
     // 6. Embed and store
     const embeddings = await fetchEmbeddings({
       openrouterApiKey: this.opts.openrouterApiKey,
+      requestyApiKey: this.opts.requestyApiKey,
       customEndpoint: this.opts.customEndpoint,
       model: this.opts.embeddingModel,
       texts: [embedText],
@@ -391,6 +398,7 @@ export class MemoryManager {
       try {
         const embeddings = await fetchEmbeddings({
           openrouterApiKey: this.opts.openrouterApiKey,
+          requestyApiKey: this.opts.requestyApiKey,
           customEndpoint: this.opts.customEndpoint,
           model: this.opts.embeddingModel,
           texts: [query.text],
@@ -471,6 +479,7 @@ export class MemoryManager {
       try {
         const embeddings = await fetchEmbeddings({
           openrouterApiKey: this.opts.openrouterApiKey,
+          requestyApiKey: this.opts.requestyApiKey,
           customEndpoint: this.opts.customEndpoint,
           model: this.opts.embeddingModel,
           texts: [mem.content],

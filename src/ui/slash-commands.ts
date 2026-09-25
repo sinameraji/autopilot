@@ -17,9 +17,10 @@ import { configPath, loadConfig, saveConfig, patchPersistedConfig, DEFAULT_MODEL
 import type { ChatEvent } from "./chat.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
-import { llmAuthFromConfig } from "../agent/llm-auth.js";
+import { llmAuthFromConfig, usesRequesty } from "../agent/llm-auth.js";
 import { askJev, formatJevAnswer, type JevQuestion } from "../agent/jev.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
+import { checkRequestyKey } from "../models/requesty.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
 import {
@@ -580,7 +581,9 @@ const handleModel: Handler = (ctx, rest, arg) => {
   // `/model <id>` → set directly. Old Cloudflare ids (@cf/…) are translated.
   const id = migrateLegacyModelId(rest.join(" ").trim());
   try {
-    validateModelId(id);
+    // Requesty managed policy ids ("claude-sonnet-4-5") have no vendor prefix.
+    if (!(cfg && usesRequesty(llmAuthFromConfig(cfg)))) validateModelId(id);
+    else if (!id) throw new Error("empty model id");
   } catch {
     setEvents((e) => [
       ...e,
@@ -699,6 +702,17 @@ const handleKey: Handler = async (ctx, rest) => {
     return true;
   }
 
+  if (cfg && usesRequesty(llmAuthFromConfig(cfg)) && cfg.requestyApiKey) {
+    const rq = cfg.requestyApiKey;
+    const rqSource = process.env.REQUESTY_API_KEY ? "environment" : "config file";
+    const rqRes = await checkRequestyKey(rq);
+    const rqMasked = `${rq.slice(0, 8)}…${rq.slice(-4)}`;
+    info(
+      rqRes.ok ? `Requesty key ${rqMasked} (${rqSource}) · valid` : `Requesty key ${rqMasked} (${rqSource}): ${rqRes.message}`,
+      rqRes.ok ? "info" : "error",
+    );
+    return true;
+  }
   const key = cfg?.openrouterApiKey;
   if (!key) {
     info(`no OpenRouter key configured — run /key set <key> (create one at ${OPENROUTER_KEYS_URL})`);
@@ -1507,6 +1521,7 @@ const handleLogout: Handler = (ctx) => {
   // servers, …). A key in OPENROUTER_API_KEY is outside our control.
   void patchPersistedConfig({
     openrouterApiKey: undefined,
+    requestyApiKey: undefined,
     apiKey: undefined,
     accountId: undefined,
     apiToken: undefined,
