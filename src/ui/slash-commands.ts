@@ -18,6 +18,7 @@ import type { ChatEvent } from "./chat.js";
 import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
 import { llmAuthFromConfig } from "../agent/llm-auth.js";
+import { askJev, formatJevAnswer, type JevQuestion } from "../agent/jev.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
@@ -457,6 +458,81 @@ const handleShell: Handler = (ctx, _rest, arg) => {
       text: `shell: ${cfg.shell ?? "auto"} (${detected.shell} ${detected.args.join(" ")})`,
     },
   ]);
+  return true;
+};
+
+const handleJev: Handler = async (ctx, rest) => {
+  const { cfg, setEvents, mkKey } = ctx;
+  const info = (text: string, kind: "info" | "error" = "info") =>
+    setEvents((events) => [...events, { kind, key: mkKey(), text }]);
+  const setResult = (key: string, text: string, kind: "info" | "error") =>
+    setEvents((events) => events.map((event) => event.key === key ? { kind, key, text } : event));
+  const subcommand = rest[0]?.toLowerCase() ?? "";
+  const args = rest.slice(1).join(" ").trim();
+
+  if (!subcommand || subcommand === "help") {
+    info([
+      "Jev is a one-shot typed decision; it does not write free-form answers or change /model.",
+      "  /jev yes <question>",
+      "  /jev choose <question> --options option-a|option-b|...",
+      "  /jev score <question> --scale low|medium|high",
+    ].join("\n"));
+    return true;
+  }
+  if (ctx.busy) {
+    info("can't run /jev while the agent is working — press Esc to interrupt first", "error");
+    return true;
+  }
+
+  let question: JevQuestion;
+  if (subcommand === "yes") {
+    if (!args) {
+      info("usage: /jev yes <question>", "error");
+      return true;
+    }
+    question = { kind: "yes", prompt: args };
+  } else if (subcommand === "choose" || subcommand === "score") {
+    const flag = subcommand === "choose" ? "--options" : "--scale";
+    const flagIndex = args.toLowerCase().lastIndexOf(`${flag} `);
+    if (flagIndex < 0) {
+      info(`usage: /jev ${subcommand} <question> ${flag} option-1|option-2|...`, "error");
+      return true;
+    }
+    const prompt = args.slice(0, flagIndex).trim();
+    const values = args.slice(flagIndex + flag.length).trim().split("|").map((item) => item.trim()).filter(Boolean);
+    if (!prompt || values.length < 2 || values.length > 12 || new Set(values.map((value) => value.toLowerCase())).size !== values.length) {
+      info(`${flag} needs a question and 2–12 distinct, non-empty values separated by |`, "error");
+      return true;
+    }
+    question = subcommand === "choose"
+      ? { kind: "choose", prompt, options: values }
+      : { kind: "score", prompt, scale: values };
+  } else {
+    info("unknown Jev question type — use /jev yes, /jev choose, or /jev score", "error");
+    return true;
+  }
+
+  if (question.prompt.length > 4_000) {
+    info("Jev questions must be 4,000 characters or fewer", "error");
+    return true;
+  }
+  const apiKey =
+    process.env.OPENROUTER_API_KEY?.trim() ||
+    process.env.KIMIFLARE_OPENROUTER_KEY?.trim() ||
+    cfg?.openrouterApiKey?.trim();
+  if (!apiKey) {
+    info(`no OpenRouter key configured — run /key set <key> or set OPENROUTER_API_KEY (create a key at ${OPENROUTER_KEYS_URL})`, "error");
+    return true;
+  }
+
+  const eventKey = mkKey();
+  setEvents((events) => [...events, { kind: "info", key: eventKey, text: "Jev is evaluating…" }]);
+  try {
+    const answer = await askJev(apiKey, question);
+    setResult(eventKey, `Jev · ${formatJevAnswer(question, answer)}`, "info");
+  } catch (error) {
+    setResult(eventKey, `Jev failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+  }
   return true;
 };
 
@@ -1783,6 +1859,7 @@ const handlers: Record<string, Handler> = {
   "/cost": handleCost,
   "/shell": handleShell,
   "/model": handleModel,
+  "/jev": handleJev,
   "/key": handleKey,
   "/settings": handleSettings,
   "/mode": handleMode,
