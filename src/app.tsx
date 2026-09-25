@@ -43,7 +43,8 @@ import { TaskList } from "./ui/task-list.js";
 import { WorkerList } from "./ui/worker-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import QRCode from "qrcode";
 import type { ToolRender } from "./tools/registry.js";
 import { CustomTextInput } from "./ui/text-input.js";
@@ -500,8 +501,32 @@ function App({
     showSkillsPicker ||
     showShellPicker;
 
-  const loadFilePickerItems = useCallback(async (): Promise<FilePickerItem[]> => {
+  const loadFilePickerItems = useCallback(async (query = ""): Promise<FilePickerItem[]> => {
     const cwd = process.cwd();
+    const pathQuery = query.startsWith("/") || query.startsWith("~") || query.startsWith(".");
+    if (pathQuery) {
+      const slash = query.lastIndexOf("/");
+      const exactDirectory = query === "~" || query === "." || query === ".." || query.endsWith("/..");
+      const prefix = exactDirectory ? `${query.replace(/\/$/, "")}/` : slash >= 0 ? query.slice(0, slash + 1) : "";
+      const directory = exactDirectory ? query : slash >= 0 ? query.slice(0, slash + 1) : query;
+      const expanded = directory.startsWith("~") ? join(homedir(), directory.slice(1)) : directory;
+      const target = resolve(cwd, expanded || ".");
+      const entries = await glob("*", {
+        cwd: target,
+        dot: false,
+        absolute: false,
+        onlyFiles: false,
+        markDirectories: true,
+        suppressErrors: true,
+      });
+      return entries.slice(0, 300).map((entry) => {
+        const isDirectory = entry.endsWith("/");
+        return { name: prefix + (isDirectory ? entry.slice(0, -1) : entry), isDirectory };
+      }).sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+    }
     const entries = await glob("**/*", {
       cwd,
       ignore: buildFilePickerIgnoreList(cwd),
@@ -510,17 +535,10 @@ function App({
       onlyFiles: false,
       markDirectories: true,
     });
-    const strings = entries.slice(0, 300);
-    const items: FilePickerItem[] = strings.map((e) => ({
-      name: e.endsWith("/") ? e.slice(0, -1) : e,
-      isDirectory: e.endsWith("/"),
+    return entries.slice(0, 300).map((entry) => ({
+      name: entry.endsWith("/") ? entry.slice(0, -1) : entry,
+      isDirectory: entry.endsWith("/"),
     }));
-    items.sort((a, b) => {
-      if (a.isDirectory && !b.isDirectory) return -1;
-      if (!a.isDirectory && b.isDirectory) return 1;
-      return a.name.localeCompare(b.name);
-    });
-    return items;
   }, []);
 
   const picker = usePickerController({
