@@ -7,6 +7,8 @@ import { fuzzyFilter } from "../util/fuzzy.js";
 interface Props {
   current: string;
   onPick: (model: ModelEntry | null) => void;
+  /** Whether an agent turn is currently in progress. */
+  turnInProgress?: boolean;
   /** Optional whitelist of models. When provided, only these models are shown. */
   models?: ModelEntry[];
   /** Heading override (onboarding uses its own wording). */
@@ -147,7 +149,7 @@ export function filterModels(models: ModelEntry[], query: string): ModelEntry[] 
   return fuzzyFilter(candidates, query, (m) => `${m.id} ${m.name ?? ""}`);
 }
 
-export function ModelPicker({ current, onPick, models, title }: Props) {
+export function ModelPicker({ current, onPick, turnInProgress = false, models, title }: Props) {
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -272,6 +274,11 @@ export function ModelPicker({ current, onPick, models, title }: Props) {
     <Box flexDirection="column" borderStyle="round" borderColor={theme.accent} paddingX={1}>
       <Text color={theme.accent} bold>
         {title ?? `Pick a model${current ? `  ·  current: ${current}` : ""}`}
+      </Text>
+      <Text color={theme.info.color} dimColor>
+        {turnInProgress
+          ? `The active turn continues with ${current || "the current model"}; your selection applies to the next message. History is kept.`
+          : "Your selection applies to the next message. Conversation history is kept."}
       </Text>
       {/* Search box: always live — typing anywhere in the picker goes here. */}
       <Box borderStyle="round" borderColor={query ? theme.accent : theme.info.color} paddingX={1} marginTop={1}>
