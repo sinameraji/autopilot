@@ -19,6 +19,7 @@ import type { ChatMessage, Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
 import { llmAuthFromConfig } from "../agent/llm-auth.js";
 import { askJev, formatJevAnswer, type JevQuestion } from "../agent/jev.js";
+import { buildJevContext, formatJevContextReceipt } from "../agent/jev-context.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
 import type { DailyUsage } from "../usage-tracker.js";
@@ -468,11 +469,16 @@ const handleJev: Handler = async (ctx, rest) => {
   const setResult = (key: string, text: string, kind: "info" | "error") =>
     setEvents((events) => events.map((event) => event.key === key ? { kind, key, text } : event));
   const subcommand = rest[0]?.toLowerCase() ?? "";
-  const args = rest.slice(1).join(" ").trim();
+  let args = rest.slice(1).join(" ").trim();
+  const noContext = /(?:^|\s)--no-context(?=\s|$)/i.test(args);
+  args = args.replace(/(?:^|\s)--no-context(?=\s|$)/gi, " ").trim();
 
   if (!subcommand || subcommand === "help") {
     info([
-      "Jev is a one-shot typed decision; it does not write free-form answers or change /model.",
+      "Jev returns typed decisions, not free-form reasoning, and does not change /model.",
+      "It may send recent chat for explicit references and project metadata/license evidence for current-project questions to OpenRouter.",
+      "The selected context is shown before sending; append --no-context to send only the question.",
+      "Jev does not receive system prompts or tool output, read arbitrary source files, or browse the web.",
       "  /jev yes <question>",
       "  /jev choose <question> --options option-a|option-b|...",
       "  /jev score <question> --scale low|medium|high",
@@ -528,8 +534,20 @@ const handleJev: Handler = async (ctx, rest) => {
   const eventKey = mkKey();
   setEvents((events) => [...events, { kind: "info", key: eventKey, text: "Jev is evaluating…" }]);
   try {
-    const answer = await askJev(apiKey, question);
-    setResult(eventKey, `Jev · ${formatJevAnswer(question, answer)}`, "info");
+    const context = noContext ? [] : await buildJevContext(question.prompt, ctx.messagesRef.current, process.cwd());
+    const receipt = formatJevContextReceipt(context);
+    setResult(
+      eventKey,
+      [`Sending Jev request to OpenRouter…`, `Question: ${question.prompt}`, receipt].join("\n"),
+      "info",
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const answer = await askJev(apiKey, question, { context });
+    setResult(
+      eventKey,
+      [`Jev · ${formatJevAnswer(question, answer)}`, `Question sent: ${question.prompt}`, receipt].join("\n"),
+      "info",
+    );
   } catch (error) {
     setResult(eventKey, `Jev failed: ${error instanceof Error ? error.message : String(error)}`, "error");
   }
