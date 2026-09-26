@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/sinameraji/autopilot/compare/v1.2.0...v1.2.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **ui:** drop "(formerly kimiflare)" from chat label ([#656](https://github.com/sinameraji/autopilot/issues/656)) ([3ca908a](https://github.com/sinameraji/autopilot/commit/3ca908a30f33ef58535ad71bdeafaf9b4f7dd090))
+
 ## [1.2.0](https://github.com/sinameraji/autopilot/compare/v1.1.0...v1.2.0) (2026-09-25)
 
 
