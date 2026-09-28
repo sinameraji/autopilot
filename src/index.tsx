@@ -20,6 +20,7 @@ program
   // parseable so old scripts don't break; it's ignored with a notice.
   .addOption(new Option("--cloud", "(retired) KimiFlare Cloud").hideHelp())
   .option("--dangerously-allow-all", "auto-approve every permission prompt (print mode only)")
+  .addOption(new Option("--worker-profile <profile>", "internal worker permission profile").hideHelp())
   .option("--reasoning", "include reasoning in stdout (print mode only)")
   .option("--thinking", "alias for --reasoning")
   .option("--continue-on-limit", "reset tool-call counter and continue when the 200-call limit is hit (print mode only)")
@@ -209,6 +210,7 @@ const opts = program.opts<{
   model?: string;
   cloud?: boolean;
   dangerouslyAllowAll?: boolean;
+  workerProfile?: string;
   reasoning?: boolean;
   thinking?: boolean;
   continueOnLimit?: boolean;
@@ -275,6 +277,11 @@ async function main() {
   // the bottom of `main()` next to the Ink path so both share the TTY guard
   // + cfg checks. Default is `ink` until Camouflage covers every surface and
   // we've burned-in via opt-in dogfooding.)
+
+  if (opts.workerProfile && (opts.workerProfile !== "research" || opts.print === undefined)) {
+    console.error(`autopilot: unsupported or misplaced worker profile "${opts.workerProfile}" (requires -p).`);
+    process.exit(2);
+  }
 
   if (opts.emitEvents) {
     if (opts.print === undefined) {
@@ -353,6 +360,7 @@ async function main() {
       dir: opts.dir,
       title: opts.title,
       permissions: cfg.permissions,
+      workerProfile: opts.workerProfile as "research" | undefined,
     });
     return;
   }

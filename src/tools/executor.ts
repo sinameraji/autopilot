@@ -19,6 +19,8 @@ import { presentPlanOptionsTool } from "./plan-options.js";
 import { ToolArtifactStore } from "./artifact-store.js";
 import { reduceToolOutput, DEFAULT_REDUCER_CONFIG } from "./reducer.js";
 import { makeExpandArtifactTool } from "./expand-artifact.js";
+import { realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 export const ALL_TOOLS: ToolSpec[] = [
   { ...readTool, isReadOnly: true },
@@ -44,6 +46,74 @@ export const ALL_TOOLS: ToolSpec[] = [
   spawnWorkerTool,
   { ...presentPlanOptionsTool, isReadOnly: true },
 ];
+
+export const RESEARCH_WORKER_TOOL_NAMES = new Set([
+  "read", "glob", "grep", "github_read_pr", "github_read_issue", "github_read_code",
+  "github_list_merged_prs", "github_list_releases",
+]);
+
+export function getWorkerTools(profile?: "research"): ToolSpec[] {
+  return profile === "research"
+    ? ALL_TOOLS
+        .filter((tool) => RESEARCH_WORKER_TOOL_NAMES.has(tool.name) && tool.isReadOnly === true)
+        .map(restrictResearchTool)
+    : ALL_TOOLS;
+}
+
+function restrictResearchTool(tool: ToolSpec): ToolSpec {
+  return {
+    ...tool,
+    run: async (args: Record<string, unknown>, ctx: ToolContext) => {
+      if (tool.name === "read") {
+        await assertResearchPath(args.path, ctx.cwd);
+      } else if (tool.name === "glob" || tool.name === "grep") {
+        await assertResearchPath(args.path ?? ".", ctx.cwd);
+        if (tool.name === "glob") assertSafePattern(args.pattern);
+        if (tool.name === "grep" && args.glob !== undefined) assertSafePattern(args.glob);
+      }
+      return tool.run(args, ctx);
+    },
+  };
+}
+
+const SENSITIVE_RESEARCH_PATHS = new Set([
+  ".git", ".ssh", ".aws", ".config", ".hotcell", ".npmrc", ".netrc", ".git-credentials",
+]);
+
+async function assertResearchPath(pathValue: unknown, cwd: string): Promise<void> {
+  if (typeof pathValue !== "string" || !pathValue) throw new Error("Research worker paths must be non-empty strings.");
+  const root = await realpath(cwd);
+  const candidate = resolve(root, pathValue);
+  assertInsideResearchRoot(candidate, root);
+  assertNoSensitivePath(candidate, root);
+  const actual = await realpath(candidate);
+  assertInsideResearchRoot(actual, root);
+  assertNoSensitivePath(actual, root);
+}
+
+function assertInsideResearchRoot(path: string, root: string): void {
+  const rel = relative(root, path);
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error("Research workers may only inspect paths inside their cloned repository.");
+  }
+}
+
+function assertNoSensitivePath(path: string, root: string): void {
+  const parts = relative(root, path).split(sep).filter(Boolean).map((part) => part.toLowerCase());
+  if (parts.some((part) => part === ".env" || part.startsWith(".env.") || SENSITIVE_RESEARCH_PATHS.has(part))) {
+    throw new Error("Research worker access to environment, credential, and VCS metadata paths is blocked.");
+  }
+}
+
+function assertSafePattern(value: unknown): void {
+  if (typeof value !== "string" || !value || isAbsolute(value)) {
+    throw new Error("Research worker glob patterns must be relative to the repository.");
+  }
+  const parts = value.replaceAll("\\\\", "/").split("/");
+  if (parts.some((part) => part === ".." || part === ".env" || part.startsWith(".env.") || SENSITIVE_RESEARCH_PATHS.has(part.toLowerCase()))) {
+    throw new Error("Research worker glob patterns cannot traverse outside the repository or target sensitive paths.");
+  }
+}
 
 /**
  * Whether the user said yes or no.

@@ -105,7 +105,7 @@ export interface WorkerFinding {
 /** Result returned by a standalone research/executor worker. */
 export interface WorkerResultMessage {
   workerId: string;
-  status: "completed" | "failed" | "cancelled" | "budget_exhausted";
+  status: "completed" | "failed" | "cancelled" | "budget_exhausted" | "spend_exhausted" | "timed_out";
   task: string;
   findings: WorkerFinding[];
   recommendations: string[];
@@ -127,6 +127,12 @@ export interface WorkerResultMessage {
   budgetExceeded?: boolean;
   /** True when the result contains partial findings produced before budget exhaustion. */
   partialResult?: boolean;
+  /** Exact model selected for this worker. */
+  model?: string;
+  /** Local child-process exit status, when applicable. */
+  exitCode?: number;
+  /** Bounded local artifacts (paths/content) awaiting coordinator review. */
+  artifacts?: Array<{ path: string; content: string }>;
 }
 
 /** Replace lone UTF-16 surrogates with the replacement character (U+FFFD).

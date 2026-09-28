@@ -144,6 +144,8 @@ export interface KimiConfig {
   uiEngine?: "ink" | "camouflage";
   /** Worker endpoint URL for spawning standalone research/executor workers. */
   workerEndpoint?: string;
+  /** Worker provider. Remote remains the compatibility default. */
+  workerBackend?: "remote" | "hotcell";
   /** Max cost per worker in USD (default: 1.0). */
   workerBudgetUsd?: number;
   /** Hard ceiling for workerBudgetUsd. Any configured or programmatic value above this is silently capped. Default: 5.0. */
@@ -355,6 +357,12 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     githubTokenExpiry: persisted.githubTokenExpiry,
     githubRepo: persisted.githubRepo,
     workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT ?? persisted.workerEndpoint,
+    workerBackend:
+      process.env.KIMIFLARE_WORKER_BACKEND === "hotcell"
+        ? "hotcell"
+        : process.env.KIMIFLARE_WORKER_BACKEND === "remote"
+          ? "remote"
+          : persisted.workerBackend === "hotcell" ? "hotcell" : "remote",
     workerBudgetUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_USD") ?? persisted.workerBudgetUsd,
     workerBudgetMaxUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_MAX_USD") ?? persisted.workerBudgetMaxUsd,
     workerMaxParallel: readNumberEnv("KIMIFLARE_WORKER_MAX_PARALLEL") ?? persisted.workerMaxParallel,
