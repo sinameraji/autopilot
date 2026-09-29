@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
 import {
-  clearLimitLoopResolvers,
   interruptTurn,
   interruptOrExit,
   type InterruptDeps,
@@ -26,8 +25,6 @@ function makeDeps(overrides: Partial<{
   busy: boolean;
   hasScope: boolean;
   aborting: boolean;
-  limit: boolean;
-  loop: boolean;
   permission: boolean;
 }> = {}): MockDeps {
   const events: string[] = [];
@@ -54,10 +51,6 @@ function makeDeps(overrides: Partial<{
     activeScopeRef: ref(activeScope as never),
     isAbortingRef: ref(overrides.aborting ?? false),
     supervisorRef: ref(supervisor as never),
-    limitResolveRef: ref(overrides.limit ? ((_: string) => {}) as never : null),
-    loopResolveRef: ref(overrides.loop ? ((_: string) => {}) as never : null),
-    setLimitModal: () => {},
-    setLoopModal: () => {},
     hasPendingPermission: () => overrides.permission ?? false,
     denyPendingPermission: () => overrides.permission ?? false,
     pendingToolCallsRef: ref(new Map<string, string>([["t1", "bash"]])),
@@ -99,40 +92,12 @@ function makeDeps(overrides: Partial<{
   return deps;
 }
 
-describe("clearLimitLoopResolvers", () => {
-  it("returns false flags when nothing is pending", () => {
-    const deps = makeDeps();
-    const { hadLimit, hadLoop } = clearLimitLoopResolvers(deps);
-    assert.strictEqual(hadLimit, false);
-    assert.strictEqual(hadLoop, false);
-  });
-
-  it("clears the limit resolver and returns the flag", () => {
-    const deps = makeDeps({ limit: true });
-    const { hadLimit, hadLoop } = clearLimitLoopResolvers(deps);
-    assert.strictEqual(hadLimit, true);
-    assert.strictEqual(hadLoop, false);
-    assert.strictEqual(deps.limitResolveRef.current, null);
-  });
-
-  it("clears both resolvers when both are pending", () => {
-    const deps = makeDeps({ limit: true, loop: true });
-    const { hadLimit, hadLoop } = clearLimitLoopResolvers(deps);
-    assert.strictEqual(hadLimit, true);
-    assert.strictEqual(hadLoop, true);
-    assert.strictEqual(deps.limitResolveRef.current, null);
-    assert.strictEqual(deps.loopResolveRef.current, null);
-  });
-});
-
 describe("interruptTurn", () => {
-  it("is a no-op when idle (no busy, no perm, no resolvers)", () => {
+  it("is a no-op when idle (no busy, no perm)", () => {
     const deps = makeDeps();
     const out = interruptTurn(deps);
     assert.deepStrictEqual(out, {
       hadPermission: false,
-      hadLimit: false,
-      hadLoop: false,
       didInterruptTurn: false,
     });
     assert.strictEqual(deps.events.length, 0);
@@ -140,10 +105,10 @@ describe("interruptTurn", () => {
     assert.strictEqual(deps.clearTaskCalls, 0);
   });
 
-  it("clears resolvers without killing a turn when not busy", () => {
-    const deps = makeDeps({ limit: true });
+  it("denies a pending permission without killing a turn when not busy", () => {
+    const deps = makeDeps({ permission: true });
     const out = interruptTurn(deps);
-    assert.strictEqual(out.hadLimit, true);
+    assert.strictEqual(out.hadPermission, true);
     assert.strictEqual(out.didInterruptTurn, false);
     assert.strictEqual(deps.saveCalls, 0);
   });
@@ -184,18 +149,6 @@ describe("interruptOrExit", () => {
 
   it("does NOT exit when a permission was pending", () => {
     const deps = makeDeps({ permission: true });
-    interruptOrExit(deps);
-    assert.strictEqual(deps.stopAllCalls, 0);
-  });
-
-  it("does NOT exit when a limit resolver was pending", () => {
-    const deps = makeDeps({ limit: true });
-    interruptOrExit(deps);
-    assert.strictEqual(deps.stopAllCalls, 0);
-  });
-
-  it("does NOT exit when a loop resolver was pending", () => {
-    const deps = makeDeps({ loop: true });
     interruptOrExit(deps);
     assert.strictEqual(deps.stopAllCalls, 0);
   });

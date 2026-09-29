@@ -46,13 +46,9 @@ export interface AgentCallbacks {
    *  `artifactId`, when present, points at the full raw bytes in the artifact store. */
   onTruncation?: (info: { tool: string; toolCallId: string; rawBytes: number; reducedBytes: number; artifactId?: string }) => void;
   askPermission: PermissionAsker;
-  /** Called when the tool-call iteration limit is reached. Return "continue" to
-   *  reset the counter and keep going, or "stop" to end the turn immediately. */
-  onToolLimitReached?: () => Promise<"continue" | "stop">;
-  /** Called when the agent is detected repeating identical tool calls (loop). Return "continue" to
-   *  reset the guardrail and keep going, "synthesize" to ask the agent to conclude without tools,
-   *  or "stop" to end the turn immediately. */
-  onLoopDetected?: () => Promise<"continue" | "stop" | "synthesize">;
+  /** Notification (never awaited) when a loop or iteration-cap guardrail
+   *  acts on its own — the loop never blocks waiting for a user decision. */
+  onGuardrail?: (event: GuardrailEvent) => void;
   /** Called when accumulated high-signal memories suggest KIMI.md may be stale. */
   onKimiMdStale?: () => void;
   /** Called when session-start memory recall succeeds and memories are injected. */
@@ -88,8 +84,17 @@ export interface AgentTurnOpts extends LlmAuth {
   codeMode?: boolean;
   /** Called after write/edit tools succeed so LSP document sync can fire. */
   onFileChange?: (path: string, content: string) => void;
-  /** When true, hitting the tool-call limit resets the counter and appends a continue message instead of throwing. */
+  /** What happens when `maxToolIterations` is reached. "continue" resets the
+   *  counter automatically (bounded by `maxTotalToolIterations`), "stop" ends
+   *  the turn cleanly, "throw" raises an error. Defaults to "continue" when
+   *  `continueOnLimit` is set, otherwise "throw". */
+  toolLimitBehavior?: ToolLimitBehavior;
+  /** Legacy alias for `toolLimitBehavior: "continue"`. */
   continueOnLimit?: boolean;
+  /** Hard ceiling on tool iterations across automatic counter resets, so a
+   *  runaway turn stays bounded. When reached, the model is asked for a final
+   *  tool-free summary and the turn ends. Default: 5 × `maxToolIterations`. */
+  maxTotalToolIterations?: number;
   /** Cumulative prompt token budget. When exceeded, a final synthesis turn is run and then BudgetExhaustedError is thrown. */
   maxInputTokens?: number;
   /** Intent classification result for this turn, for telemetry. */
@@ -135,6 +140,23 @@ export interface AgentTurnOpts extends LlmAuth {
   postFirstByteIdleTimeoutMs?: number;
 }
 
+export type ToolLimitBehavior = "continue" | "stop" | "throw";
+
+export type GuardrailEvent =
+  /** Every tool call in an iteration was blocked; the model was told to change approach. */
+  | { kind: "loop_recovery"; message: string }
+  /** The model kept hitting the loop guardrail after recovery; the turn ends with a summary. */
+  | { kind: "loop_stopped"; message: string }
+  /** `maxToolIterations` was reached and the counter was reset automatically. */
+  | { kind: "limit_reset"; message: string; totalIterations: number }
+  /** `maxToolIterations` was reached with `toolLimitBehavior: "stop"`. */
+  | { kind: "limit_stopped"; message: string; totalIterations: number }
+  /** `maxTotalToolIterations` was reached; the turn ends with a summary. */
+  | { kind: "limit_ceiling"; message: string; totalIterations: number };
+
+/** Automatic loop recoveries granted per turn before the turn is wrapped up. */
+export const MAX_LOOP_RECOVERIES = 1;
+
 export class BudgetExhaustedError extends Error {
   constructor(message = "Cumulative input token budget exhausted") {
     super(message);
@@ -143,7 +165,7 @@ export class BudgetExhaustedError extends Error {
 }
 
 export class AgentLoopError extends Error {
-  constructor(message = "Agent got stuck repeating the same tool calls") {
+  constructor(message = "Agent got stuck repeating the same tool calls and was stopped after a recovery attempt") {
     super(message);
     this.name = "AgentLoopError";
   }
@@ -275,12 +297,20 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
   const turnStart = performance.now();
   logger.info("turn:start", { sessionId: opts.sessionId, codeMode: opts.codeMode ?? false });
   const max = opts.maxToolIterations ?? 200;
+  const limitBehavior: ToolLimitBehavior =
+    opts.toolLimitBehavior ?? (opts.continueOnLimit ? "continue" : "throw");
+  const requestedCeiling = opts.maxTotalToolIterations;
+  const hardCeiling = Math.max(
+    max,
+    requestedCeiling !== undefined && Number.isFinite(requestedCeiling) && requestedCeiling > 0
+      ? Math.floor(requestedCeiling)
+      : max * 5,
+  );
   const codeMode = opts.codeMode ?? false;
 
-  // M6.1: fire the Stop hook on any clean exit (turn ended normally,
-  // user opted to stop on loop/limit). Skipped on abort/throw because
-  // those aren't "the agent finished its turn." Inline at each return
-  // site below — three of them in this function.
+  // M6.1: fire the Stop hook when the agent finishes its turn (normally,
+  // stopped at the iteration limit, or after a guardrail's final summary).
+  // Skipped on abort and on error paths that never produced an answer.
   const fireStopHook = async (): Promise<void> => {
     if (opts.signal.aborted) return;
     if (!opts.hooks?.hasEnabledHooks("Stop")) return;
@@ -477,8 +507,13 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
 
   let cumulativePromptTokens = 0;
   let iter = 0;
+  let totalIter = 0;
   let budgetExhausted = false;
   let loopExhausted = false;
+  let loopRecoveries = 0;
+  // Set when a guardrail decides the turn must end: the next request is a
+  // final, tool-free summary and the turn finishes after it.
+  let finalizeReason: "loop" | "limit_ceiling" | null = null;
 
   // Task auto-advance heuristic: track tasks state and mutating tools since
   // the last tasks_set so we can nudge the UI forward when the model forgets.
@@ -505,31 +540,22 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       });
     }
 
-    if (loopExhausted) {
+    if (finalizeReason === null && totalIter >= hardCeiling) {
+      finalizeReason = "limit_ceiling";
       opts.messages.push({
         role: "system",
         content:
-          "You have repeatedly called the same tools with identical arguments and are stuck in a loop. " +
-          "Please synthesize what you know from the conversation history and provide a final answer.",
+          `You have reached the hard safety ceiling of ${hardCeiling} tool iterations for this turn. ` +
+          "Do not call any more tools. Summarize what you accomplished, what remains unfinished, " +
+          "and the concrete next steps needed to complete the task.",
       });
-    }
-
-    if (iter >= max) {
-      if (opts.callbacks.onToolLimitReached) {
-        const decision = await opts.callbacks.onToolLimitReached();
-        if (decision === "continue") {
-          opts.messages.push({
-            role: "system",
-            content:
-              "You have reached the tool-call limit for this session. " +
-              "The counter has been reset so you can continue working. Please proceed with your task.",
-          });
-          iter = 0;
-        } else {
-          await fireStopHook();
-          return;
-        }
-      } else if (opts.continueOnLimit) {
+      opts.callbacks.onGuardrail?.({
+        kind: "limit_ceiling",
+        message: `Tool-iteration ceiling (${hardCeiling}) reached — wrapping up the turn with a summary.`,
+        totalIterations: totalIter,
+      });
+    } else if (finalizeReason === null && iter >= max) {
+      if (limitBehavior === "continue") {
         opts.messages.push({
           role: "system",
           content:
@@ -537,12 +563,26 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             "The counter has been reset so you can continue working. Please proceed with your task.",
         });
         iter = 0;
+        opts.callbacks.onGuardrail?.({
+          kind: "limit_reset",
+          message: `Tool-call limit (${max}) reached — counter reset automatically (${totalIter}/${hardCeiling} total).`,
+          totalIterations: totalIter,
+        });
+      } else if (limitBehavior === "stop") {
+        opts.callbacks.onGuardrail?.({
+          kind: "limit_stopped",
+          message: `Tool-call limit (${max}) reached — turn stopped.`,
+          totalIterations: totalIter,
+        });
+        await fireStopHook();
+        return;
       } else {
         throw new Error(`kimiflare: tool iteration limit reached (${max})`);
       }
     }
 
     iter++;
+    totalIter++;
     turn++;
     const previousMessages = opts.messages.slice();
     const toolCalls: ToolCall[] = [];
@@ -711,8 +751,27 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           }
         : {}),
     };
+    if (finalizeReason !== null) {
+      // Final summary pass: never execute tools, and don't leave dangling
+      // tool_calls in history (they'd have no matching tool results).
+      delete assistantMsg.tool_calls;
+      if (!assistantMsg.content) {
+        assistantMsg.content =
+          finalizeReason === "loop"
+            ? "Stopped: I kept repeating blocked tool calls and could not make further progress on this task."
+            : `Stopped: reached the ${hardCeiling}-iteration safety ceiling for this turn before finishing.`;
+      }
+    }
     opts.messages.push(assistantMsg);
     opts.callbacks.onAssistantFinal?.(assistantMsg);
+
+    if (finalizeReason !== null) {
+      logger.info("turn:finalized", { sessionId: opts.sessionId, reason: finalizeReason, totalIter });
+      if (budgetExhausted) throw new BudgetExhaustedError();
+      await fireStopHook();
+      if (finalizeReason === "loop") throw new AgentLoopError();
+      return;
+    }
 
     if (toolCalls.length === 0) {
       if (opts.sessionId && lastUsage) {
@@ -1447,34 +1506,39 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       throw new BudgetExhaustedError();
     }
     if (loopExhausted) {
-      if (opts.callbacks.onLoopDetected) {
-        const decision = await opts.callbacks.onLoopDetected();
-        if (decision === "continue") {
-          opts.messages.push({
-            role: "system",
-            content:
-              "You were stuck calling the same tools with identical arguments. " +
-              "The guardrail has been reset so you can continue. Try a different approach.",
-          });
-          loopExhausted = false;
-          recentToolCalls.length = 0;
-          continue;
-        }
-        if (decision === "synthesize") {
-          opts.messages.push({
-            role: "system",
-            content:
-              "You were stuck calling the same tools with identical arguments. " +
-              "Please synthesize and conclude your findings so far. Do not call any more tools.",
-          });
-          loopExhausted = false;
-          recentToolCalls.length = 0;
-          continue;
-        }
-        await fireStopHook();
-        return;
+      // Never block on a user decision here: unattended runs must keep
+      // moving. Give the model one chance to change approach; if it trips
+      // the guardrail again, run a final tool-free summary and end the turn.
+      loopExhausted = false;
+      recentToolCalls.length = 0;
+      if (loopRecoveries < MAX_LOOP_RECOVERIES) {
+        loopRecoveries++;
+        opts.messages.push({
+          role: "system",
+          content:
+            "Every tool call in your last step was blocked because you kept repeating the same calls with identical arguments. " +
+            "Do not repeat them. Either take a genuinely different approach (different tools, arguments, or files), " +
+            "or, if you already have enough information, stop calling tools and give your final answer.",
+        });
+        opts.callbacks.onGuardrail?.({
+          kind: "loop_recovery",
+          message: "Loop guardrail: repeated tool calls were blocked — asked the agent to change approach.",
+        });
+        continue;
       }
-      throw new AgentLoopError();
+      finalizeReason = "loop";
+      opts.messages.push({
+        role: "system",
+        content:
+          "You are still repeating blocked tool calls after being asked to change approach, so this turn is ending. " +
+          "Do not call any more tools. Summarize what you accomplished, what is blocking you, " +
+          "and what the user could do next.",
+      });
+      opts.callbacks.onGuardrail?.({
+        kind: "loop_stopped",
+        message: "Loop guardrail: the agent kept repeating blocked tool calls — ending the turn with a summary.",
+      });
+      continue;
     }
   }
 }

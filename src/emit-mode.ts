@@ -45,6 +45,8 @@ export interface EmitModeOpts
   multiTurn?: boolean;
   codeMode?: boolean;
   continueOnLimit?: boolean;
+  /** Hard ceiling on tool iterations across `continueOnLimit` resets. */
+  maxTotalToolIterations?: number;
   maxInputTokens?: number;
   /** When false (default), the bash tool blocks `git push` to the default branch. */
   allowDirectPush?: boolean;
@@ -290,6 +292,7 @@ export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
         signal: controller.signal,
         codeMode: opts.codeMode,
         continueOnLimit: opts.continueOnLimit,
+        maxTotalToolIterations: opts.maxTotalToolIterations,
         maxInputTokens: opts.maxInputTokens,
         allowDirectPush: opts.allowDirectPush,
         preferPullRequests: opts.preferPullRequests,
@@ -382,6 +385,9 @@ export async function runEmitMode(opts: EmitModeOpts): Promise<void> {
           },
           onWarning: (msg) => {
             emit("RuntimeError", { message: msg, kind: "generic", severity: "warn" });
+          },
+          onGuardrail: (ev) => {
+            emit("RuntimeError", { message: ev.message, kind: "generic", severity: "warn" });
           },
           askPermission: async ({ tool, args }) => {
             const reqId = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

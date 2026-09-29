@@ -2,7 +2,6 @@ import React from "react";
 import type { TurnSupervisor } from "../agent/supervisor.js";
 import type { AbortScope } from "../util/abort-scope.js";
 import type { LspManager } from "../lsp/manager.js";
-import type { LimitDecision, LoopDecision } from "./limit-modal.js";
 import type { ChatEvent } from "./chat.js";
 
 // ── Shared dep shape ─────────────────────────────────────────────────────
@@ -13,11 +12,6 @@ export interface InterruptDeps {
   activeScopeRef: React.MutableRefObject<AbortScope | null>;
   isAbortingRef: React.MutableRefObject<boolean>;
   supervisorRef: React.MutableRefObject<TurnSupervisor>;
-  // Resolver refs (limit / loop modals that block the agent loop)
-  limitResolveRef: React.MutableRefObject<((d: LimitDecision) => void) | null>;
-  loopResolveRef: React.MutableRefObject<((d: LoopDecision) => void) | null>;
-  setLimitModal: (v: { limit: number; resolve: (d: LimitDecision) => void } | null) => void;
-  setLoopModal: (v: { resolve: (d: LoopDecision) => void } | null) => void;
   // Permission controller
   hasPendingPermission: () => boolean;
   denyPendingPermission: () => boolean;
@@ -46,8 +40,6 @@ export interface InterruptDeps {
 
 export interface InterruptOutcome {
   hadPermission: boolean;
-  hadLimit: boolean;
-  hadLoop: boolean;
   /** True when the busy turn was actually interrupted (i.e. all guards
    *  passed: busy + active scope + not already aborting). */
   didInterruptTurn: boolean;
@@ -56,29 +48,8 @@ export interface InterruptOutcome {
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 /**
- * Resolve any pending limit / loop modals with `"stop"` and close them.
- * Returns flags so the caller can decide whether to also exit (the
- * "Ctrl+C while nothing's happening → quit app" branch).
- */
-export function clearLimitLoopResolvers(deps: InterruptDeps): { hadLimit: boolean; hadLoop: boolean } {
-  const hadLimit = deps.limitResolveRef.current !== null;
-  const hadLoop = deps.loopResolveRef.current !== null;
-  if (hadLimit) {
-    deps.limitResolveRef.current!("stop");
-    deps.limitResolveRef.current = null;
-    deps.setLimitModal(null);
-  }
-  if (hadLoop) {
-    deps.loopResolveRef.current!("stop");
-    deps.loopResolveRef.current = null;
-    deps.setLoopModal(null);
-  }
-  return { hadLimit, hadLoop };
-}
-
-/**
  * Common interrupt sequence used by Ctrl+C, Esc, and SIGINT. Denies any
- * pending permission, clears limit/loop resolvers, and (if a turn is
+ * pending permission and (if a turn is
  * actually running) kills the turn, aborts the scope, marks in-flight
  * tools cancelled, emits an "(interrupted)" event, and triggers a
  * session save + task-list clear. Returns flags so the caller can take
@@ -89,7 +60,6 @@ export function clearLimitLoopResolvers(deps: InterruptDeps): { hadLimit: boolea
  */
 export function interruptTurn(deps: InterruptDeps): InterruptOutcome {
   const hadPermission = deps.denyPendingPermission();
-  const { hadLimit, hadLoop } = clearLimitLoopResolvers(deps);
 
   if (
     (deps.busyRef.current || deps.supervisorRef.current.isRunning) &&
@@ -111,9 +81,9 @@ export function interruptTurn(deps: InterruptDeps): InterruptOutcome {
     }
     void deps.saveSessionSafe();
     deps.clearTaskTracking();
-    return { hadPermission, hadLimit, hadLoop, didInterruptTurn: true };
+    return { hadPermission, didInterruptTurn: true };
   }
-  return { hadPermission, hadLimit, hadLoop, didInterruptTurn: false };
+  return { hadPermission, didInterruptTurn: false };
 }
 
 /**
@@ -127,17 +97,11 @@ export function exitApp(deps: InterruptDeps): void {
 
 /**
  * Convenience: run `interruptTurn`, then exit the app if nothing was
- * actually pending (no permission, no limit modal, no loop modal,
- * nothing to interrupt). Mirrors the Ctrl+C / SIGINT decision tree.
+ * actually pending (no permission, nothing to interrupt). Mirrors the Ctrl+C / SIGINT decision tree.
  */
 export function interruptOrExit(deps: InterruptDeps): InterruptOutcome {
   const outcome = interruptTurn(deps);
-  if (
-    !outcome.didInterruptTurn &&
-    !outcome.hadPermission &&
-    !outcome.hadLimit &&
-    !outcome.hadLoop
-  ) {
+  if (!outcome.didInterruptTurn && !outcome.hadPermission) {
     exitApp(deps);
   }
   return outcome;

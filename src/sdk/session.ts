@@ -475,6 +475,11 @@ class InternalSession implements KimiFlareSession {
       onWarning: (msg) => {
         this.emit({ type: "warning", message: msg });
       },
+      onGuardrail: (ev) => {
+        this.emit({ type: "warning", message: ev.message });
+        // In SDK mode the iteration limit ends the turn (see toolLimitBehavior below).
+        if (ev.kind === "limit_stopped") this.emit({ type: "status", status: "error" });
+      },
       askPermission: async (req) => {
         if (mode === "auto") return "allow";
         if (mode === "plan") {
@@ -516,11 +521,6 @@ class InternalSession implements KimiFlareSession {
 
         return decision;
       },
-      onToolLimitReached: async () => {
-        // In SDK mode, stop on limit reached
-        this.emit({ type: "status", status: "error" });
-        return "stop";
-      },
       onKimiMdStale: () => {
         this.onKimiMdStale?.();
       },
@@ -540,6 +540,9 @@ class InternalSession implements KimiFlareSession {
       callbacks,
       hooks: this.hooks, // M6.1: Stop fires at end-of-turn when enabled.
       maxToolIterations,
+      // SDK callers bound turns with `maxToolIterations`: stop cleanly at the
+      // limit rather than resetting (never waits on a prompt either way).
+      toolLimitBehavior: "stop",
       reasoningEffort: this.reasoningEffort,
       coauthor,
       sessionId: this.sessionId,

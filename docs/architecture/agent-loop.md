@@ -222,8 +222,9 @@ If the next turn still has tool calls, `BudgetExhaustedError` is thrown
 | ------------------------------------------------ | ---------------------- |
 | Zero tool calls in the assistant message         | `loop.ts:561–578` — normal return |
 | Budget exhausted and synthesis turn also had tools | `loop.ts:574`, also `:854` |
-| Tool-iteration cap (default 50) reached          | `loop.ts:354–397` — calls `onToolLimitReached()`; `continueOnLimit` resets `iter` |
-| Every tool in the turn was blocked               | `loop.ts:818–884` — `onLoopDetected()` returns `continue`, `synthesize`, or `stop`; otherwise throws `AgentLoopError` (`loop.ts:883`) |
+| Tool-iteration cap (default 200) reached         | `toolLimitBehavior` (`continueOnLimit` is an alias for `"continue"`): `"continue"` resets `iter` automatically (TUI, `/init`), `"stop"` ends the turn (SDK), `"throw"` errors (default; headless without `--continue-on-limit`). Never waits for input. |
+| Hard ceiling (`maxTotalToolIterations`, default 5 × cap) reached | One final tool-free summary request, then the turn ends cleanly. Configurable via config, `KIMIFLARE_MAX_TOTAL_TOOL_ITERATIONS`, or `--max-total-tool-iterations`. |
+| Every tool in the turn was blocked               | First time: automatic recovery instruction (change approach or answer). Again after that: one final tool-free summary request, Stop hook, then `AgentLoopError`. Never waits for input. |
 | `signal.aborted`                                 | checked at `loop.ts:207, 280, 526, 582, 834` |
 
 ### State mutated across iterations
@@ -242,8 +243,8 @@ If the next turn still has tool calls, `BudgetExhaustedError` is thrown
 (grep `loop.ts` for the full list):
 
 `onAssistantStart`, `onReasoningDelta`, `onTextDelta`, `onToolCallFinalized`,
-`onToolResult`, `onWarning`, `askPermission`, `onToolLimitReached`,
-`onLoopDetected`, `onKimiMdStale`, `onMemoryRecalled`, `onSkillsSelected`,
+`onToolResult`, `onWarning`, `askPermission`, `onGuardrail` (non-blocking
+notification), `onKimiMdStale`, `onMemoryRecalled`, `onSkillsSelected`,
 `onMetaBanner`, …
 
 These are the boundary between the loop and the UI (or any embedder via the

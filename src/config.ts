@@ -92,6 +92,9 @@ export interface KimiConfig {
   compiledContext?: boolean;
   /** Number of recent user turns to retain image content; older images are dropped. */
   imageHistoryTurns?: number;
+  /** Hard safety ceiling on tool iterations per turn, across automatic
+   *  200-call counter resets. Defaults to 1000. */
+  maxTotalToolIterations?: number;
   /** Enable local structured memory (SQLite + embeddings). */
   memoryEnabled?: boolean;
   /** Path to memory database. Defaults to .kimiflare/memory.db in repo root, or ~/.local/share/kimiflare/memory.db. */
@@ -331,6 +334,8 @@ export async function loadConfig(): Promise<KimiConfig | null> {
       imageHistoryTurns === undefined || Number.isNaN(imageHistoryTurns)
         ? persisted.imageHistoryTurns
         : imageHistoryTurns,
+    maxTotalToolIterations:
+      readNumberEnv("KIMIFLARE_MAX_TOTAL_TOOL_ITERATIONS") ?? persisted.maxTotalToolIterations,
     memoryEnabled: readBooleanEnv("KIMIFLARE_MEMORY_ENABLED") ?? persisted.memoryEnabled ?? false,
     memoryDbPath: process.env.KIMIFLARE_MEMORY_DB_PATH ?? persisted.memoryDbPath,
     memoryMaxAgeDays: readNumberEnv("KIMIFLARE_MEMORY_MAX_AGE_DAYS") ?? persisted.memoryMaxAgeDays,
