@@ -1,0 +1,210 @@
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { allowsSubagentDispatch, resolveSubagentGuidance, SUBAGENT_JEV_OPTIONS } from "./subagent-policy.js";
+import type { JevAnswer, JevQuestion } from "../agent/jev.js";
+
+const apiKey = "sk-or-test";
+const choose = (probability: number): JevAnswer => ({
+  type: "choice",
+  probabilities: { delegate: probability, sequential: 1 - probability },
+});
+
+function mockAsk(answer: JevAnswer, capture?: (question: JevQuestion) => void) {
+  return async (_key: string, question: JevQuestion): Promise<JevAnswer> => {
+    capture?.(question);
+    return answer;
+  };
+}
+
+describe("resolveSubagentGuidance", () => {
+  it("exposes worker dispatch only for explicit, suggested, or high-confidence auto candidates", () => {
+    assert.equal(allowsSubagentDispatch("none"), false);
+    assert.equal(allowsSubagentDispatch("explicit-sequential"), false);
+    assert.equal(allowsSubagentDispatch("explicit-delegate"), true);
+    assert.equal(allowsSubagentDispatch("suggest"), true);
+    assert.equal(allowsSubagentDispatch("auto-delegate"), true);
+  });
+
+  it("keeps routine questions and one-file fixes local without calling Jev", async () => {
+    let calls = 0;
+    const ask = async () => {
+      calls++;
+      return choose(0.99);
+    };
+    for (const prompt of ["What does this function do?", "Fix the typo in src/one-file.ts"]) {
+      const result = await resolveSubagentGuidance({ prompt, tier: "light", policy: "auto", apiKey, ask });
+      assert.equal(result.kind, "none", prompt);
+    }
+    assert.equal(calls, 0);
+  });
+
+  it("does not delegate a broad but sequential migration", async () => {
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Migrate the entire repository sequentially, one module at a time, keeping each step in dependency order.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      ask: async () => { calls++; return choose(0.99); },
+    });
+    assert.equal(result.kind, "none");
+    assert.equal(calls, 0);
+  });
+
+  it("honors an explicit request for workers even when automatic policy is off", async () => {
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Use subagents to research the independent migration risks.",
+      tier: "heavy",
+      policy: "off",
+      ask: async () => { calls++; return choose(0); },
+    });
+    assert.equal(result.kind, "explicit-delegate");
+    assert.match(result.directive ?? "", /permission prompt/);
+    assert.equal(calls, 0);
+  });
+
+  it("lets an explicit no-delegation instruction override a positive mention", async () => {
+    for (const prompt of [
+      "Use subagents if helpful, but do not use any agents; work sequentially.",
+      "Do not delegate this task; handle the steps in order.",
+      "Never use workers for this change.",
+      "Do not delegate this; finish it without agents.",
+    ]) {
+      const result = await resolveSubagentGuidance({
+        prompt,
+        tier: "heavy",
+        policy: "auto",
+        apiKey,
+        ask: async () => choose(0.99),
+      });
+      assert.equal(result.kind, "explicit-sequential", prompt);
+      assert.match(result.directive ?? "", /Do not call spawn_worker/);
+    }
+  });
+
+  it("uses a Jev advisory only for ambiguous substantial candidates", async () => {
+    let question: JevQuestion | undefined;
+    const result = await resolveSubagentGuidance({
+      prompt: "Audit the codebase for vulnerabilities and report independent areas worth deeper review.",
+      tier: "heavy",
+      policy: "suggest",
+      apiKey,
+      ask: mockAsk(choose(0.7), (value) => { question = value; }),
+    });
+    assert.equal(result.kind, "suggest");
+    assert.equal(result.probability, 0.7);
+    assert.deepEqual(question?.kind === "choose" ? question.options : [], [...SUBAGENT_JEV_OPTIONS]);
+    assert.match(result.directive ?? "", /normal permission prompt is the required user confirmation/);
+  });
+
+  it("automatically recommends only above the stronger threshold and preserves permission gates", async () => {
+    const medium = await resolveSubagentGuidance({
+      prompt: "Compare authentication options across this repository.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      ask: mockAsk(choose(0.79)),
+    });
+    assert.equal(medium.kind, "suggest");
+
+    const high = await resolveSubagentGuidance({
+      prompt: "Compare authentication options across this repository.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      ask: mockAsk(choose(0.8)),
+    });
+    assert.equal(high.kind, "auto-delegate");
+    assert.match(high.directive ?? "", /normal permission prompt/);
+    assert.match(high.directive ?? "", /spend cap/);
+  });
+
+  it("short-circuits clear independent research without spending a Jev call", async () => {
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Research these independent questions in parallel: compare package A and package B.",
+      tier: "medium",
+      policy: "suggest",
+      apiKey,
+      ask: async () => { calls++; return choose(0); },
+    });
+    assert.equal(result.kind, "suggest");
+    assert.equal(calls, 0);
+
+    const shortExplicit = await resolveSubagentGuidance({
+      prompt: "Check these independent areas in parallel.",
+      tier: "light",
+      policy: "suggest",
+      apiKey,
+      ask: async () => { calls++; return choose(0); },
+    });
+    assert.equal(shortExplicit.kind, "suggest");
+    assert.equal(calls, 0);
+  });
+
+  it("redacts and bounds the only task text sent to Jev", async () => {
+    let question: JevQuestion | undefined;
+    const prompt = `Audit the repository for API-key leaks. Secret: sk-or-v1-12345678 ${"x".repeat(2_000)}`;
+    await resolveSubagentGuidance({
+      prompt,
+      tier: "heavy",
+      policy: "suggest",
+      apiKey,
+      ask: mockAsk(choose(0.4), (value) => { question = value; }),
+    });
+    const sent = question?.prompt ?? "";
+    assert.ok(sent.length < 1_600);
+    assert.doesNotMatch(sent, /sk-or-v1-12345678/);
+    assert.match(sent, /\[REDACTED\]/);
+  });
+
+  it("falls back to local work when Jev fails or is unavailable", async () => {
+    const unavailable = await resolveSubagentGuidance({
+      prompt: "Audit this repository for security issues.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      ask: async () => { throw new Error("offline"); },
+    });
+    assert.equal(unavailable.kind, "none");
+    assert.match(unavailable.reason, /Jev unavailable/);
+
+    const noKey = await resolveSubagentGuidance({
+      prompt: "Audit this repository for security issues.",
+      tier: "heavy",
+      policy: "auto",
+    });
+    assert.equal(noKey.kind, "none");
+  });
+
+  it("skips Jev when the turn is already cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Audit this repository for security issues.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      signal: controller.signal,
+      ask: async () => { calls++; return choose(0.99); },
+    });
+    assert.equal(result.kind, "none");
+    assert.equal(calls, 0);
+  });
+
+  it("does not use Jev for custom endpoints", async () => {
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Audit this repository for security issues.",
+      tier: "heavy",
+      policy: "auto",
+      apiKey,
+      customEndpoint: true,
+      ask: async () => { calls++; return choose(0.99); },
+    });
+    assert.equal(result.kind, "none");
+    assert.equal(calls, 0);
+  });
+});

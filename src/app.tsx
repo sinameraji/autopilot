@@ -58,6 +58,7 @@ import { deployForTui } from "./remote/deploy.js";
 import { authGitHubForTui } from "./remote/tui-auth.js";
 import { nextMode, type Mode } from "./mode.js";
 import { classifyIntent } from "./intent/classify.js";
+import { allowsSubagentDispatch, resolveSubagentGuidance } from "./intent/subagent-policy.js";
 import type { SemanticSkillRoutingResult } from "./skills/index.js";
 import { getMemoryDb } from "./memory/db.js";
 import { listAllSkills, createSkill, deleteSkill, setSkillEnabled, findSkillFile } from "./skills/manager.js";
@@ -1936,12 +1937,38 @@ function App({
         return;
       }
 
+      const delegationGuidance = await resolveSubagentGuidance({
+        prompt: display,
+        tier: classification.tier,
+        policy: cfg.subagentPolicy ?? "suggest",
+        apiKey: cfg.openrouterApiKey,
+        customEndpoint: Boolean(cfg.baseUrl),
+        signal: turnScope.signal,
+      });
+      if (delegationGuidance.kind !== "none") {
+        const probability = delegationGuidance.probability === undefined
+          ? ""
+          : ` (Jev estimate: ${Math.round(delegationGuidance.probability * 100)}%)`;
+        const text = delegationGuidance.kind === "explicit-delegate"
+          ? "Subagent policy: respecting your explicit request to delegate. Worker calls still require permission."
+          : delegationGuidance.kind === "explicit-sequential"
+            ? "Subagent policy: respecting your instruction to work without delegation."
+            : delegationGuidance.kind === "auto-delegate"
+              ? `Subagent policy: auto recommends independent research${probability}; worker calls remain permission-gated.`
+              : `Subagent suggestion: independent work may help${probability}. No worker will launch without your confirmation.`;
+        setEvents((events) => [...events, { kind: "info", key: mkKey(), text }]);
+      }
+
+      const turnTools = [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current].filter(
+        (tool) => tool.name !== "spawn_worker" || allowsSubagentDispatch(delegationGuidance.kind),
+      );
+
       supervisorRef.current.startTurn(
         {
           ...llmAuthFromConfig(cfg),
           model: overrideModel ?? cfg.model,
           messages: messagesRef.current,
-          tools: [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current],
+          tools: turnTools,
           executor: executorRef.current,
           cwd: process.cwd(),
           signal: turnScope.signal,
@@ -1964,6 +1991,7 @@ function App({
           preferPullRequests: cfg.preferPullRequests,
           onIterationEnd,
           intentClassification: classification,
+          delegationDirective: delegationGuidance.directive,
           sessionStartRecall: sessionStartRecallRef.current ?? undefined,
           skillsDb: getMemoryDb() ?? undefined,
           skillRoutingConfig: {

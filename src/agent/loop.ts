@@ -99,6 +99,8 @@ export interface AgentTurnOpts extends LlmAuth {
   maxInputTokens?: number;
   /** Intent classification result for this turn, for telemetry. */
   intentClassification?: { intent: string; tier: "light" | "medium" | "heavy"; rawScore: number; confidence: number };
+  /** Per-turn harness recommendation about subagent dispatch. */
+  delegationDirective?: string;
   /** Skills injected into the system prompt for this turn. */
   selectedSkills?: { name: string; body: string }[];
   /**
@@ -411,6 +413,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           mode: opts.mode,
           skillContext: skillResult.skillContext,
           preferPullRequests: opts.preferPullRequests,
+          delegationDirective: opts.delegationDirective,
         }),
       };
     } else {
@@ -423,6 +426,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           mode: opts.mode,
           skillContext: skillResult.skillContext,
           preferPullRequests: opts.preferPullRequests,
+          delegationDirective: opts.delegationDirective,
         }),
       };
     }
@@ -801,6 +805,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     }
 
     let blockedCount = 0;
+    const availableToolNames = new Set(opts.tools.map((tool) => tool.name));
+    if (codeMode) availableToolNames.add("execute_code");
 
     // Determine if every tool in this batch is read-only.  When they are,
     // we can execute them in parallel because there are no write-order
@@ -809,7 +815,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       toolCalls.length > 1 &&
       toolCalls.every((tc) => {
         const tool = opts.executor.list().find((t) => t.name === tc.function.name);
-        return tool?.isReadOnly === true;
+        return availableToolNames.has(tc.function.name) && tool?.isReadOnly === true;
       });
 
     // NOTE: Extending parallel execution to *mutable* tool calls is
@@ -1072,8 +1078,29 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       for (const [i, tc] of toolCalls.entries()) {
       if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
 
-      // Anti-loop guardrail
       const loopSignature = `${tc.function.name}:${stableStringify(tc.function.arguments)}`;
+      if (!availableToolNames.has(tc.function.name)) {
+        const unavailableResult: ToolResult = {
+          tool_call_id: tc.id,
+          name: tc.function.name,
+          content: `Tool ${tc.function.name} is not available under this turn's policy. Continue without it or ask the user to enable it.`,
+          ok: false,
+        };
+        toolResults.push(unavailableResult);
+        opts.messages.push({
+          role: "tool",
+          tool_call_id: tc.id,
+          content: sanitizeString(unavailableResult.content),
+          name: tc.function.name,
+        });
+        opts.callbacks.onToolResult?.(unavailableResult);
+        recentToolCalls.push(loopSignature);
+        if (recentToolCalls.length > LOOP_WINDOW) recentToolCalls.shift();
+        blockedCount++;
+        continue;
+      }
+
+      // Anti-loop guardrail
       const loopCount = recentToolCalls.filter((s) => s === loopSignature).length;
       if (loopCount >= LOOP_THRESHOLD) {
         const warning = `Loop detected: you have called ${tc.function.name} with the same arguments multiple times in a row. Consider a different approach.`;

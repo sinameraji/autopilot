@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { migrateLegacyModelId } from "./models/registry.js";
 import type { OpenRouterProviderPrefs } from "./agent/client.js";
+import type { SubagentPolicy } from "./intent/subagent-policy.js";
 
 export type ReasoningEffort = "low" | "medium" | "high";
 export const EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high"];
@@ -75,6 +76,8 @@ export interface KimiConfig {
   accountId?: string;
   apiToken?: string;
   reasoningEffort?: ReasoningEffort;
+  /** Harness subagent routing: off, suggest (default), or auto. Auto never bypasses tool permission or worker budgets. */
+  subagentPolicy?: SubagentPolicy;
   /**
    * Feature flag for the plan / edit / auto permission modes. Off by default:
    * every session runs in auto (tools run without per-call prompts) and the
@@ -240,6 +243,11 @@ function readReasoningEffortEnv(): ReasoningEffort | undefined {
     : undefined;
 }
 
+function readSubagentPolicyEnv(): SubagentPolicy | undefined {
+  const raw = process.env.KIMIFLARE_SUBAGENT_POLICY?.toLowerCase();
+  return raw === "off" || raw === "suggest" || raw === "auto" ? raw : undefined;
+}
+
 function readCoauthorEnv(): { enabled: boolean; name: string; email: string } | undefined {
   const enabled = process.env.KIMIFLARE_COAUTHOR;
   if (enabled === "0" || enabled === "false") return undefined;
@@ -300,6 +308,7 @@ export async function loadConfig(): Promise<KimiConfig | null> {
   // the persisted `model` (set via /model) is honoured on the next launch.
   const envModel = process.env.KIMI_MODEL || undefined;
   const envEffort = readReasoningEffortEnv();
+  const envSubagentPolicy = readSubagentPolicyEnv();
   const envCoauthor = readCoauthorEnv();
 
   const envCacheStable = process.env.KIMIFLARE_CACHE_STABLE_PROMPTS;
@@ -325,6 +334,7 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     model: m(envModel ?? persisted.model) ?? DEFAULT_MODEL,
     openrouterProvider: persisted.openrouterProvider,
     reasoningEffort: envEffort ?? persisted.reasoningEffort,
+    subagentPolicy: envSubagentPolicy ?? (persisted.subagentPolicy === "off" || persisted.subagentPolicy === "suggest" || persisted.subagentPolicy === "auto" ? persisted.subagentPolicy : "suggest"),
     modesEnabled: persisted.modesEnabled,
     coauthor: envCoauthor?.enabled ?? persisted.coauthor ?? true,
     coauthorName: envCoauthor?.name ?? persisted.coauthorName,

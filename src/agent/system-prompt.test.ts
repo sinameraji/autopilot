@@ -106,4 +106,17 @@ describe("buildSystemPrompt", () => {
     const sessionP = buildSessionPrefix({ cwd: "/tmp", tools: DUMMY_TOOLS, model: "m", mode: "edit" });
     assert.strictEqual(full, staticP + "\n\n" + sessionP);
   });
+
+  it("adds a per-turn delegation directive only when provided", () => {
+    const ordinary = buildSystemPrompt({ cwd: "/tmp", tools: DUMMY_TOOLS, model: "m" });
+    const advised = buildSystemPrompt({
+      cwd: "/tmp",
+      tools: DUMMY_TOOLS,
+      model: "m",
+      delegationDirective: "Do not call spawn_worker this turn.",
+    });
+    assert.doesNotMatch(ordinary, /Subagent policy for this turn/);
+    assert.match(advised, /Subagent policy for this turn/);
+    assert.match(advised, /Do not call spawn_worker this turn/);
+  });
 });

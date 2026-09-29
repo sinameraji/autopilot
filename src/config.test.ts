@@ -54,6 +54,7 @@ describe("loadConfig", () => {
     "KIMIFLARE_BASE_URL",
     "KIMIFLARE_API_KEY",
     "KIMIFLARE_WORKER_BACKEND",
+    "KIMIFLARE_SUBAGENT_POLICY",
     "XDG_CONFIG_HOME",
   ] as const;
   const saved: Record<string, string | undefined> = {};
@@ -115,6 +116,17 @@ describe("loadConfig", () => {
     assert.strictEqual((await loadConfig())?.workerBackend, "hotcell");
     process.env.KIMIFLARE_WORKER_BACKEND = "remote";
     assert.strictEqual((await loadConfig())?.workerBackend, "remote");
+  });
+
+  it("defaults subagent routing to suggest and supports persisted and env policy choices", async () => {
+    process.env.OPENROUTER_API_KEY = "sk-or-env";
+    assert.equal((await loadConfig())?.subagentPolicy, "suggest");
+    await writeConfigFile({ openrouterApiKey: "sk-or-file", subagentPolicy: "off" });
+    assert.equal((await loadConfig())?.subagentPolicy, "off");
+    process.env.KIMIFLARE_SUBAGENT_POLICY = "auto";
+    assert.equal((await loadConfig())?.subagentPolicy, "auto");
+    process.env.KIMIFLARE_SUBAGENT_POLICY = "invalid";
+    assert.equal((await loadConfig())?.subagentPolicy, "off");
   });
 
   it("resolves from KIMIFLARE_OPENROUTER_KEY", async () => {
