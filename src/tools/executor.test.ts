@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
-import { isDiffCommand, ToolExecutor, toPermissionResult } from "./executor.js";
+import { isDiffCommand, ToolExecutor, toPermissionResult, getWorkerTools, ALL_TOOLS } from "./executor.js";
 import { ToolError } from "./tool-error.js";
 import type { ToolSpec, ToolContext } from "./registry.js";
 import type { PermissionAsker, PermissionDecisionResult } from "./executor.js";
@@ -61,6 +61,25 @@ describe("isDiffCommand", () => {
     assert.strictEqual(isDiffCommand("npm test"), false);
     assert.strictEqual(isDiffCommand("ls -la"), false);
     assert.strictEqual(isDiffCommand("show diff"), false);
+  });
+});
+
+describe("getWorkerTools", () => {
+  it("keeps the default tool list compatible and restricts research to safe repository reads", async () => {
+    assert.strictEqual(getWorkerTools(), ALL_TOOLS);
+    const researchTools = getWorkerTools("research");
+    assert.ok(researchTools.length > 0);
+    assert.ok(researchTools.every((tool) => tool.isReadOnly === true));
+    assert.ok(researchTools.every((tool) => ["read", "glob", "grep", "github_read_pr", "github_read_issue", "github_read_code", "github_list_merged_prs", "github_list_releases"].includes(tool.name)));
+    for (const forbidden of ["bash", "write", "edit", "github_create_pr", "spawn_worker", "memory_forget"]) {
+      assert.ok(!researchTools.some((tool) => tool.name === forbidden), `${forbidden} must not be exposed`);
+    }
+
+    const read = researchTools.find((tool) => tool.name === "read")!;
+    await assert.rejects(() => read.run({ path: "/etc/passwd" }, { cwd: process.cwd() }), /inside their cloned repository/);
+    await assert.rejects(() => read.run({ path: ".env" }, { cwd: process.cwd() }), /credential.*paths is blocked/);
+    const glob = researchTools.find((tool) => tool.name === "glob")!;
+    await assert.rejects(() => glob.run({ pattern: "../.env" }, { cwd: process.cwd() }), /cannot traverse outside/);
   });
 });
 

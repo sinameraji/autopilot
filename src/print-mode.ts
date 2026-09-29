@@ -12,7 +12,7 @@ import type { AgentCallbacks } from "./agent/loop.js";
 import { llmAuthFromConfig } from "./agent/llm-auth.js";
 import { recordUsage } from "./usage-tracker.js";
 import { buildSystemPrompt } from "./agent/system-prompt.js";
-import { ToolExecutor, ALL_TOOLS } from "./tools/executor.js";
+import { ToolExecutor, getWorkerTools, RESEARCH_WORKER_TOOL_NAMES } from "./tools/executor.js";
 import type { ChatMessage, ContentPart } from "./agent/messages.js";
 import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "./sessions.js";
@@ -53,6 +53,8 @@ export interface PrintModeOpts
   title?: string;
   /** Config-based permission rules */
   permissions?: Record<string, PermissionRules>;
+  /** Narrow tool permission profile for isolated research workers. */
+  workerProfile?: "research";
   /** When false (default), the bash tool blocks `git push` to the default branch. */
   allowDirectPush?: boolean;
   /** When true (default), the system prompt instructs the model to prefer PRs over direct pushes. */
@@ -193,9 +195,10 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   const cwd = opts.dir ? resolve(opts.dir) : process.cwd();
 
   // M6.1: print mode loads the same hooks as the TUI.
+  const workerTools = getWorkerTools(opts.workerProfile);
   const { HooksManager } = await import("./hooks/manager.js");
   const hooks = new HooksManager(cwd);
-  const executor = new ToolExecutor(ALL_TOOLS, { hooks });
+  const executor = new ToolExecutor(workerTools, { hooks });
 
   // Resolve session
   const { sessionFile, isNew } = await resolveSession(opts);
@@ -208,14 +211,14 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   if (isNew || sessionFile.messages.length === 0) {
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: ALL_TOOLS, model: opts.model, preferPullRequests: opts.preferPullRequests }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests }),
     });
   } else {
     // Continue: load existing messages, filter out old system prompts, keep context
     const nonSystem = sessionFile.messages.filter((m) => m.role !== "system");
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: ALL_TOOLS, model: opts.model, preferPullRequests: opts.preferPullRequests }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests }),
     });
     messages.push(...nonSystem);
   }
@@ -347,6 +350,9 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       }
     },
     askPermission: async ({ tool, args }) => {
+      if (opts.workerProfile === "research") {
+        return RESEARCH_WORKER_TOOL_NAMES.has(tool.name) && tool.isReadOnly === true ? "allow" : "deny";
+      }
       if (opts.allowAll) return "allow";
 
       // Evaluate config-based permission rules
@@ -379,7 +385,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       reasoningEffort: opts.reasoningEffort,
       sessionId: sessionFile.id,
       messages,
-      tools: ALL_TOOLS,
+      tools: workerTools,
       executor,
       hooks,
       cwd,

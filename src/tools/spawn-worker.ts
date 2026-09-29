@@ -2,6 +2,7 @@ import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
 import type { WorkerResultMessage } from "../agent/messages.js";
 import { logger } from "../util/logger.js";
 import { loadConfig, resolveWorkerBudgetUsd, DEFAULT_MODEL } from "../config.js";
+import { runHotcellWorker } from "./hotcell-worker.js";
 
 interface SpawnWorkerArgs {
   mode: "plan" | "execute";
@@ -18,7 +19,6 @@ interface SpawnWorkerArgs {
 }
 
 const DEFAULT_WORKER_TIMEOUT_MS = 300_000; // 5 minutes
-const DEFAULT_WORKER_BUDGET_USD = 1.0;
 
 export async function callWorkerEndpoint(
   endpoint: string,
@@ -79,10 +79,9 @@ export async function callWorkerEndpoint(
 export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
   name: "spawn_worker",
   description: [
-    "Spawn a standalone remote worker agent to perform research or execute a plan.",
-    "Workers run independently with their own full context window and tool access.",
-    "Mode 'plan': read-only research worker that returns structured findings.",
-    "Mode 'execute': write-enabled worker that creates a branch, implements changes, and opens a PR.",
+    "Spawn a standalone worker using the configured remote endpoint or an opt-in local Hotcell sandbox.",
+    "Mode 'plan': read-only research. Local Hotcell workers use a clean committed revision and cannot edit files.",
+    "Mode 'execute': remote write + PR only; local Hotcell execute mode is intentionally unavailable.",
     "Use for heavy tasks that benefit from parallel research (e.g. 'research OAuth2, testing, and migration').",
   ].join(" "),
   parameters: {
@@ -115,11 +114,11 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
       tools: {
         type: "string",
         enum: ["all", "read-only"],
-        description: "Tool set available to the worker. Default 'all' for plan mode, ignored for execute.",
+        description: "Requested remote tool set. Local Hotcell research always uses a narrow read-only profile and rejects `all`.",
       },
       model: {
         type: "string",
-        description: `Model to use for the worker. Defaults to the session's model (${DEFAULT_MODEL} if unset).`,
+        description: "Model to use for the worker. Defaults to the active session model.",
       },
       branchName: {
         type: "string",
@@ -147,27 +146,74 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
     body: args.task.slice(0, 200),
   }),
   async run(args, ctx): Promise<ToolOutput> {
-    const endpoint = process.env.KIMIFLARE_WORKER_ENDPOINT;
+    const cfg = await loadConfig().catch(() => null);
+    const timeoutMs = cfg?.workerTimeoutMs
+      ?? readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS")
+      ?? DEFAULT_WORKER_TIMEOUT_MS;
+    const budgetCeiling = resolveWorkerBudgetUsd(cfg);
+
+    if (cfg?.workerBackend === "hotcell") {
+      if (cfg.baseUrl) {
+        return textOutput("Hotcell workers currently require an OpenRouter-backed session; custom model endpoints cannot be routed through the Hotcell gateway.");
+      }
+      if (args.mode !== "plan") {
+        return textOutput("Hotcell workers currently support read-only plan mode only. Execute mode is disabled until reviewed patch artifacts are supported.");
+      }
+      if (args.tools === "all") {
+        return textOutput("Hotcell research workers are restricted to read-only tools; the requested broader toolset is not available.");
+      }
+      const model = args.model ?? ctx.model;
+      if (!model) {
+        return textOutput("Hotcell worker requires the coordinator's active model ID. No model was provided; refusing to fall back to a default.");
+      }
+      const requestedBudget = args.budget?.maxCostUsd ?? budgetCeiling;
+      const budgetUsd = Math.min(requestedBudget, budgetCeiling);
+      if (!Number.isFinite(budgetUsd) || budgetUsd <= 0) {
+        return textOutput("Hotcell worker spend cap must be a positive number.");
+      }
+      try {
+        const result = await runHotcellWorker({
+          task: args.task,
+          context: args.context,
+          model,
+          budgetUsd,
+          timeoutMs,
+          maxParallel: cfg?.workerMaxParallel,
+          cwd: ctx.cwd,
+          signal: ctx.signal,
+        });
+        if (result.status !== "completed" && result.status !== "budget_exhausted") {
+          return textOutput(`Hotcell worker ${result.status}: ${result.error ?? "unknown error"}`);
+        }
+        const lines = [
+          `Hotcell worker ${result.status}${result.status === "budget_exhausted" ? " (partial result)" : ""}.`,
+          `Model: ${result.model ?? model} · Tokens: ${result.tokensUsed.toLocaleString()} · Cost: ${result.costUsd > 0 ? `${result.costUsd.toFixed(4)} total Hotcell cost` : "unavailable from Hotcell stats"}.`,
+          ...result.findings.map((finding) => `\n## ${finding.topic}\n${finding.summary}`),
+        ];
+        if (result.status === "budget_exhausted") {
+          lines.push("\nWorker input-token budget was exhausted; review partial findings before relying on them.");
+        }
+        return textOutput(lines.join("\n"));
+      } catch (error) {
+        return textOutput(`Failed to spawn Hotcell worker: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const endpoint = process.env.KIMIFLARE_WORKER_ENDPOINT ?? cfg?.workerEndpoint ?? cfg?.remoteWorkerUrl;
     if (!endpoint) {
-      const msg = "Worker endpoint not configured. Set KIMIFLARE_WORKER_ENDPOINT or workerEndpoint in config.";
-      const bytes = Buffer.byteLength(msg, "utf8");
-      return { content: msg, rawBytes: bytes, reducedBytes: bytes };
+      return textOutput("Worker endpoint not configured. Set KIMIFLARE_WORKER_ENDPOINT or workerEndpoint in config, or set workerBackend to hotcell.");
     }
 
     const apiKey = process.env.KIMIFLARE_WORKER_API_KEY;
-    const timeoutMs = readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS") ?? DEFAULT_WORKER_TIMEOUT_MS;
-    const cfg = await loadConfig().catch(() => null);
-    const budgetUsd = resolveWorkerBudgetUsd(cfg);
     const defaultModel = cfg?.model ?? DEFAULT_MODEL;
-
     const payload = {
       mode: args.mode,
       task: args.task,
       context: args.context ?? "",
-      budget: { maxCostUsd: budgetUsd },
+      budget: { maxCostUsd: budgetCeiling },
       outputFormat: args.outputFormat ?? "structured",
       tools: args.tools ?? (args.mode === "plan" ? "read-only" : "all"),
-      model: args.model ?? defaultModel,
+      model: args.model ?? ctx.model ?? defaultModel,
       ...(args.mode === "execute"
         ? {
             branchName: args.branchName,
@@ -230,6 +276,11 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
     }
   },
 };
+
+function textOutput(content: string): ToolOutput {
+  const bytes = Buffer.byteLength(content, "utf8");
+  return { content, rawBytes: bytes, reducedBytes: bytes };
+}
 
 function readNumberEnv(name: string): number | undefined {
   const raw = process.env[name];

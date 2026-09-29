@@ -88,6 +88,18 @@ Earlier kimiflare versions ran on Cloudflare Workers AI / AI Gateway. On the fir
 - Memory keeps working unchanged: embeddings use the same `bge-base-en-v1.5` model, now via OpenRouter.
 - `/gateway`, `autopilot auth cloudflare`, `--cloud` and the Cloud-only commands are gone. `/multi-agent` (Commute) still deploys to your Cloudflare account and keeps using `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` for that.
 
+### Local Hotcell research workers
+
+`spawn_worker` can optionally run read-only research in a local [Hotcell](https://github.com/sinameraji/hotcell) sandbox instead of the remote Commute worker. Install and start Hotcell, add your OpenRouter key to the Hotcell host key store (`hotcell keys add openrouter`), then opt in with either:
+
+```sh
+KIMIFLARE_WORKER_BACKEND=hotcell autopilot
+```
+
+or add `"workerBackend": "hotcell"` to `~/.config/kimiflare/config.json`. Remote workers remain the default. Each local worker uses an isolated cell with a pinned clean Git revision and a Hotcell-enforced spend ceiling; the exact active session model is passed through. The real provider key stays in Hotcell's host key store.
+
+The current local backend is **research-only**: workers cannot write files, run shell commands, create PRs, or use MCP tools. They can inspect repository files only inside the cloned workspace; environment files, VCS metadata, and credential paths are blocked. The parent workspace must be clean and have a credential-free HTTPS or SSH `origin` that the Hotcell daemon can clone. Local uncommitted changes are never copied. Results are returned for coordinator review and are not applied automatically. Hotcell CLI/daemon setup and gateway availability are required.
+
 ### Model
 
 You pick the model on first run, and can switch any time with `/model`. The picker opens on the **best & latest** models — recent, tool-capable models ranked by the agentic and coding benchmark scores OpenRouter publishes (Artificial Analysis), at most two per lab — so it stays current as new models ship, with no list maintained in code. Start typing to fuzzy-search all of them (`sonet` finds Claude Sonnet, `gpt 6` the GPT-6 family). Or set one directly:
