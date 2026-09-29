@@ -129,6 +129,39 @@ describe("Hotcell worker helpers", () => {
     assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
   });
 
+  it("recovers a successfully created cell by name when create output omits its ID", async () => {
+    const cwd = await makeRepo();
+    const calls: Array<{ args: string[]; options: { cwd: string; signal?: AbortSignal; timeoutMs: number } }> = [];
+    let cellName = "";
+    const runner: HotcellProcessRunner = async (_executable, args, options) => {
+      calls.push({ args, options });
+      if (args[0] === "create") {
+        cellName = args[args.indexOf("--name") + 1]!;
+        return { code: 0, stdout: "created successfully", stderr: "", aborted: false };
+      }
+      if (args[0] === "ls") {
+        return { code: 0, stdout: `ID NAME IMAGE STATUS\n${cellId} ${cellName} image running`, stderr: "", aborted: false };
+      }
+      if (args[0] === "exec") {
+        return { code: 0, stdout: JSON.stringify({ text: "Recovered by name." }), stderr: "", aborted: false };
+      }
+      if (args[0] === "stats") return { code: 0, stdout: "Cost: 0.01", stderr: "", aborted: false };
+      if (args[0] === "rm") return { code: 0, stdout: "", stderr: "", aborted: false };
+      return { code: 1, stdout: "", stderr: "unexpected command", aborted: false };
+    };
+    const result = await runHotcellWorker({
+      task: "Research",
+      model: "openai/gpt-6-luna",
+      budgetUsd: 0.25,
+      cwd,
+      processRunner: runner,
+    });
+
+    assert.equal(result.status, "completed");
+    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "ls", "exec", "stats", "rm"]);
+    assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
+  });
+
   it("cleans a named cell after setup failure and redacts diagnostics", async () => {
     const cwd = await makeRepo();
     const calls: Array<{ args: string[]; options: { cwd: string; signal?: AbortSignal; timeoutMs: number } }> = [];

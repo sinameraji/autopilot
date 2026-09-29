@@ -77,12 +77,12 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       "--memory", "1024", "--cpus", "2", "--setup", checkoutAndInstall,
     ], { cwd, signal: options.signal, timeoutMs: 300_000 });
     cellId = parseCellId(created.stdout);
-    if (!cellId && (created.code !== 0 || created.timedOut || created.aborted)) {
+    if (!cellId) {
       try {
         const cells = await execute(command, ["ls"], { cwd, timeoutMs: 10_000 });
         cellId = parseNamedCellId(cells.stdout, cellName);
       } catch {
-        // Best effort: the create command can fail after the daemon records the cell.
+        // Best effort: the create command can omit its ID or fail after recording the cell.
       }
     }
     if (created.timedOut || created.aborted) {
