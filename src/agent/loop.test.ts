@@ -196,7 +196,6 @@ describe("runAgentTurn", () => {
       signal: new AbortController().signal,
       callbacks: {
         askPermission: async () => "allow",
-        onLoopDetected: async () => "synthesize",
       },
     });
 
