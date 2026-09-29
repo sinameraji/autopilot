@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { Box, Text, useApp, useInput, useWindowSize, render } from "ink";
 import Spinner from "ink-spinner";
 
-import { runAgentTurn, AgentLoopError } from "./agent/loop.js";
+import { runAgentTurn, AgentLoopError, type GuardrailEvent } from "./agent/loop.js";
 import type { ResponseMeta } from "./agent/client.js";
 import { llmAuthFromConfig } from "./agent/llm-auth.js";
 import { buildSystemPrompt, buildSessionPrefix } from "./agent/system-prompt.js";
@@ -35,7 +35,6 @@ import { ChatView, type ChatEvent } from "./ui/chat.js";
 import { StatusBar } from "./ui/status.js";
 import { PermissionModal } from "./ui/permission.js";
 import { usePermissionController } from "./ui/use-permission-controller.js";
-import type { LimitDecision, LoopDecision } from "./ui/limit-modal.js";
 import { ResumePicker } from "./ui/resume-picker.js";
 import { CheckpointPicker } from "./ui/checkpoint-picker.js";
 import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
@@ -92,7 +91,7 @@ import { FilePicker, type FilePickerItem } from "./ui/file-picker.js";
 import { SlashPicker } from "./ui/slash-picker.js";
 import { usePickerController } from "./ui/use-picker-controller.js";
 import { useModalHost } from "./ui/use-modal-host.js";
-import { ModalHost, ModalOverlay } from "./ui/modal-host.js";
+import { ModalHost } from "./ui/modal-host.js";
 import { PlanCompletePicker } from "./ui/plan-complete-picker.js";
 import type { PlanCompleteChoice } from "./ui/plan-complete-picker.js";
 import { useSessionManager } from "./ui/use-session-manager.js";
@@ -228,8 +227,6 @@ function App({
   );
   const modals = useModalHost();
   const {
-    limitModal, setLimitModal,
-    loopModal, setLoopModal,
     commandWizard, setCommandWizard,
     commandPicker, setCommandPicker,
     commandToDelete, setCommandToDelete,
@@ -373,8 +370,6 @@ function App({
   const activeScopeRef = useRef<AbortScope | null>(null);
   /** Holds the latest Ctrl+C interrupt logic so the SIGINT handler can delegate to it. */
   const sigintHandlerRef = useRef<(() => void) | null>(null);
-  const limitResolveRef = useRef<((d: LimitDecision) => void) | null>(null);
-  const loopResolveRef = useRef<((d: LoopDecision) => void) | null>(null);
   const pendingToolCallsRef = useRef<Map<string, string>>(new Map());
   const modeRef = useRef<Mode>(mode);
   const effortRef = useRef<ReasoningEffort>(effort);
@@ -492,8 +487,6 @@ function App({
     checkpointSession !== null ||
     resuming ||
     perm !== null ||
-    limitModal !== null ||
-    loopModal !== null ||
     showInboxModal ||
     showHelpMenu ||
     showModePicker ||
@@ -880,7 +873,6 @@ function App({
         hasActiveScope: activeScopeRef.current !== null,
         isAborting: isAbortingRef.current,
         hasPerm: hasPendingPermission(),
-        hasLimit: limitResolveRef.current !== null,
       });
       // Multi-agent cancel path: abort the dedicated controller so the
       // polling loop breaks and /cancel fires on each active worker.
@@ -890,7 +882,7 @@ function App({
         return;
       }
       const outcome = runInterruptOrExit(interruptDepsRef.current!);
-      if (!outcome.didInterruptTurn && !outcome.hadPermission && !outcome.hadLimit && !outcome.hadLoop) {
+      if (!outcome.didInterruptTurn && !outcome.hadPermission) {
         logger.info("input:ctrl+c:exiting");
       }
       return;
@@ -903,8 +895,6 @@ function App({
       // Kept as-is for this pure refactor.
       const modalOpen =
         perm !== null ||
-        limitModal !== null ||
-        loopModal !== null ||
         showLspWizard ||
         showCommandList ||
         commandWizard !== null ||
@@ -953,8 +943,6 @@ function App({
       hasActiveScope: activeScopeRef.current !== null,
       isAborting: isAbortingRef.current,
       hasPerm: hasPendingPermission(),
-      hasLimit: limitResolveRef.current !== null,
-      hasLoop: loopResolveRef.current !== null,
     });
     // Multi-agent cancel path: abort the dedicated controller so the
     // polling loop breaks and /cancel fires on each active worker.
@@ -970,7 +958,7 @@ function App({
       ...interruptDepsRef.current!,
       skipPendingToolCleanup: true,
     });
-    if (!outcome.didInterruptTurn && !outcome.hadPermission && !outcome.hadLimit && !outcome.hadLoop) {
+    if (!outcome.didInterruptTurn && !outcome.hadPermission) {
       logger.info("sigint:handler:exiting");
     }
   };
@@ -1047,7 +1035,6 @@ function App({
   // by the useInput handler (Ctrl+C, Esc) and the SIGINT handler above.
   interruptDepsRef.current = {
     busyRef, activeScopeRef, isAbortingRef, supervisorRef,
-    limitResolveRef, loopResolveRef, setLimitModal, setLoopModal,
     hasPendingPermission, denyPendingPermission,
     pendingToolCallsRef, updateTool,
     setEvents, mkKey,
@@ -1072,7 +1059,6 @@ function App({
       artifactStoreRef,
       messagesRef,
       sessionStateRef,
-      limitResolveRef,
       pendingToolCallsRef,
       hooks: hooksManagerRef.current,
       sessionId: sessionIdRef.current,
@@ -1094,7 +1080,6 @@ function App({
       setUsage,
       setSessionUsage,
       setKimiMdStale,
-      setLoopModal,
       beginTurn,
       endTurn,
       ensureSessionId,
@@ -1122,8 +1107,6 @@ function App({
       modeRef,
       cacheStableRef,
       lastApiErrorRef,
-      limitResolveRef,
-      loopResolveRef,
       supervisorRef,
     });
   }, [cfg, busy, updateAssistant, updateTool, updateResponseMeta]);
@@ -1871,16 +1854,9 @@ function App({
           planOptionsRef.current = options;
         },
         askPermission: askForPermission,
-        onToolLimitReached: () =>
-          new Promise<LimitDecision>((resolve) => {
-            limitResolveRef.current = resolve;
-            setLimitModal({ limit: 200, resolve });
-          }),
-        onLoopDetected: () =>
-          new Promise<LoopDecision>((resolve) => {
-            loopResolveRef.current = resolve;
-            setLoopModal({ resolve });
-          }),
+        onGuardrail: (ev: GuardrailEvent) => {
+          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: ev.message }]);
+        },
         onKimiMdStale: () => {
           if (!kimiMdStaleNudgedRef.current) {
             kimiMdStaleNudgedRef.current = true;
@@ -1926,10 +1902,6 @@ function App({
         activeAsstIdRef.current = null;
         activeScopeRef.current = null;
         clearPermissionResolveRef();
-        limitResolveRef.current = null;
-        loopResolveRef.current = null;
-        setLimitModal(null);
-        setLoopModal(null);
         pendingToolCallsRef.current.clear();
 
         // Clear task list so it doesn't linger into the next turn
@@ -1971,6 +1943,10 @@ function App({
           hooks: hooksManagerRef.current,
           githubToken: cfg.githubOAuthToken,
           keepLastImageTurns: cfg.imageHistoryTurns ?? 2,
+          // Unattended-friendly: reset the per-cycle counter automatically,
+          // bounded by the hard ceiling (never pause for a modal).
+          toolLimitBehavior: "continue",
+          maxTotalToolIterations: cfg.maxTotalToolIterations,
           codeMode: effectiveCodeMode,
           allowDirectPush: cfg.allowDirectPush,
           preferPullRequests: cfg.preferPullRequests,
@@ -2642,12 +2618,6 @@ function App({
             onFeedback={(text) => {
               submitRef.current(text);
             }}
-          />
-        ) : limitModal || loopModal ? (
-          <ModalOverlay
-            modals={modals}
-            onLimitResolved={() => { limitResolveRef.current = null; }}
-            onLoopResolved={() => { loopResolveRef.current = null; }}
           />
         ) : showPlanCompletePicker ? (
           <PlanCompletePicker onPick={handlePlanCompletePick} />

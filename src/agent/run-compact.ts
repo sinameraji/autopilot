@@ -42,7 +42,6 @@ export interface RunCompactDeps {
   artifactStoreRef: React.MutableRefObject<ArtifactStore>;
   messagesRef: React.MutableRefObject<ChatMessage[]>;
   sessionStateRef: React.MutableRefObject<SessionState>;
-  limitResolveRef: React.MutableRefObject<unknown>;
   pendingToolCallsRef: React.MutableRefObject<Map<string, string>>;
   /** M6.1: fire PreCompact before compaction runs. Optional — if
    *  omitted, no hooks fire (back-compat for SDK callers). */
@@ -57,7 +56,7 @@ export async function runCompact(deps: RunCompactDeps): Promise<void> {
     beginTurn, endTurn, saveSessionSafe, clearPermissionResolveRef,
     sessionScopeRef, activeScopeRef, compiledContextRef,
     artifactStoreRef, messagesRef, sessionStateRef,
-    limitResolveRef, pendingToolCallsRef,
+    pendingToolCallsRef,
     hooks, sessionId,
     supervisorRef,
   } = deps;
@@ -157,7 +156,6 @@ export async function runCompact(deps: RunCompactDeps): Promise<void> {
     endTurn();
     activeScopeRef.current = null;
     clearPermissionResolveRef();
-    limitResolveRef.current = null;
     pendingToolCallsRef.current.clear();
   }
 }

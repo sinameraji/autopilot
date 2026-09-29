@@ -36,8 +36,6 @@ import type { LspManager } from "../lsp/manager.js";
 import type { MemoryManager } from "../memory/manager.js";
 import type { ChatEvent } from "../ui/chat.js";
 import type { Cfg } from "../app.js";
-import type { LoopDecision } from "../ui/limit-modal.js";
-import type { LoopModalState } from "../ui/use-modal-host.js";
 import { costLookupFromConfig, mkAssistantId, trackRecentFile } from "../ui/app-helpers.js";
 
 type SetEvents = React.Dispatch<React.SetStateAction<ChatEvent[]>>;
@@ -57,7 +55,6 @@ export interface RunInitDeps {
   setUsage: React.Dispatch<React.SetStateAction<Usage | null>>;
   setSessionUsage: React.Dispatch<React.SetStateAction<DailyUsage | null>>;
   setKimiMdStale: (v: boolean) => void;
-  setLoopModal: (v: LoopModalState | null) => void;
 
   // Turn-lifecycle hooks
   beginTurn: () => void;
@@ -89,8 +86,6 @@ export interface RunInitDeps {
   modeRef: React.MutableRefObject<Mode>;
   cacheStableRef: React.MutableRefObject<boolean>;
   lastApiErrorRef: React.MutableRefObject<{ httpStatus?: number; code?: number; message: string } | null>;
-  limitResolveRef: React.MutableRefObject<unknown>;
-  loopResolveRef: React.MutableRefObject<((d: LoopDecision) => void) | null>;
   supervisorRef: React.MutableRefObject<TurnSupervisor>;
 }
 
@@ -99,7 +94,7 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
     cfg, busy, mkKey, setEvents,
     setCodeMode, setTurnPhase, setCurrentToolName, setLastActivityAt,
     setUsage, setSessionUsage,
-    setKimiMdStale, setLoopModal,
+    setKimiMdStale,
     beginTurn, endTurn, ensureSessionId, onIterationEnd,
     updateAssistant, updateTool, updateResponseMeta,
     askForPermission, clearPermissionResolveRef,
@@ -107,7 +102,7 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
     mcpToolsRef, lspToolsRef, executorRef, effortRef, memoryManagerRef,
     pendingToolCallsRef, recentFilesRef, usageRef, activeAsstIdRef,
     responseMetaRef, kimiMdStaleNudgedRef, lspManagerRef, modeRef,
-    cacheStableRef, lastApiErrorRef, limitResolveRef, loopResolveRef,
+    cacheStableRef, lastApiErrorRef,
     supervisorRef,
   } = deps;
 
@@ -156,6 +151,8 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
       memoryManager: memoryManagerRef.current,
       githubToken: cfg.githubOAuthToken,
       codeMode: effectiveCodeMode,
+      toolLimitBehavior: "continue",
+      maxTotalToolIterations: cfg.maxTotalToolIterations,
       shell: cfg.shell,
       allowDirectPush: cfg.allowDirectPush,
       preferPullRequests: cfg.preferPullRequests,
@@ -255,11 +252,9 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
         },
         onResponseMeta: updateResponseMeta,
         askPermission: (req) => askForPermission(req, { promptOnBlockedBash: true }),
-        onLoopDetected: () =>
-          new Promise<LoopDecision>((resolve) => {
-            loopResolveRef.current = resolve;
-            setLoopModal({ resolve });
-          }),
+        onGuardrail: (ev) => {
+          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: ev.message }]);
+        },
         onKimiMdStale: () => {
           if (!kimiMdStaleNudgedRef.current) {
             kimiMdStaleNudgedRef.current = true;
@@ -358,9 +353,6 @@ export async function runInit(deps: RunInitDeps): Promise<void> {
     activeAsstIdRef.current = null;
     activeScopeRef.current = null;
     clearPermissionResolveRef();
-    limitResolveRef.current = null;
-    loopResolveRef.current = null;
-    setLoopModal(null);
     pendingToolCallsRef.current.clear();
   }
 }

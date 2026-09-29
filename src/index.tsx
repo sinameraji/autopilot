@@ -23,6 +23,7 @@ program
   .option("--reasoning", "include reasoning in stdout (print mode only)")
   .option("--thinking", "alias for --reasoning")
   .option("--continue-on-limit", "reset tool-call counter and continue when the 200-call limit is hit (print mode only)")
+  .option("--max-total-tool-iterations <n>", "hard ceiling on tool iterations per turn across --continue-on-limit resets (default 1000)", (v) => parseInt(v, 10))
   .option("--max-input-tokens <n>", "cumulative prompt token budget; exits 42 when exhausted (print mode only)", (v) => parseInt(v, 10))
   .option("--emit-events", "emit Camouflage NDJSON events to stdout; requires -p (for initial prompt)")
   .option("--multi-turn", "with --emit-events: keep reading stdin for UserInputSubmitted follow-ups after the initial turn")
@@ -212,6 +213,7 @@ const opts = program.opts<{
   reasoning?: boolean;
   thinking?: boolean;
   continueOnLimit?: boolean;
+  maxTotalToolIterations?: number;
   maxInputTokens?: number;
   emitEvents?: boolean;
   multiTurn?: boolean;
@@ -298,6 +300,7 @@ async function main() {
       multiTurn: !!opts.multiTurn,
       codeMode: cfg.codeMode,
       continueOnLimit: !!opts.continueOnLimit,
+      maxTotalToolIterations: opts.maxTotalToolIterations ?? cfg.maxTotalToolIterations,
       maxInputTokens: opts.maxInputTokens,
     });
     return;
@@ -344,6 +347,7 @@ async function main() {
       showReasoning: !!(opts.reasoning || opts.thinking),
       codeMode: cfg.codeMode,
       continueOnLimit: !!opts.continueOnLimit,
+      maxTotalToolIterations: opts.maxTotalToolIterations ?? cfg.maxTotalToolIterations,
       maxInputTokens: opts.maxInputTokens,
       updateResult,
       continueSession: !!opts.continue,

@@ -1,16 +1,6 @@
 import { useMemo, useState } from "react";
-import type { LimitDecision, LoopDecision } from "./limit-modal.js";
 import type { CustomCommand } from "../commands/types.js";
 import type { ModelEntry } from "../models/registry.js";
-
-export interface LimitModalState {
-  limit: number;
-  resolve: (d: LimitDecision) => void;
-}
-
-export interface LoopModalState {
-  resolve: (d: LoopDecision) => void;
-}
 
 export interface CommandWizardState {
   mode: "create" | "edit";
@@ -22,12 +12,6 @@ export interface CommandPickerState {
 }
 
 export interface ModalHostController {
-  // Resolver-style overlays (replace input/queue/statusbar).
-  limitModal: LimitModalState | null;
-  setLimitModal: (v: LimitModalState | null) => void;
-  loopModal: LoopModalState | null;
-  setLoopModal: (v: LoopModalState | null) => void;
-
   // Fullscreen modals (replace the whole conversation view).
   commandWizard: CommandWizardState | null;
   setCommandWizard: (v: CommandWizardState | null) => void;
@@ -72,7 +56,7 @@ export interface ModalHostController {
 
   /** Any fullscreen modal is active (would trigger an early return). */
   hasFullscreenModal: boolean;
-  /** Either resolver overlay is active. */
+  /** An overlay (plan-complete picker) is active. */
   hasOverlayModal: boolean;
   /** Any modal of any kind is active (use to gate input / pickers). */
   hasAnyModal: boolean;
@@ -80,8 +64,7 @@ export interface ModalHostController {
 
 /**
  * Lifts the M4.3 modal state out of `app.tsx`. Owns the seven modal
- * families listed in the roadmap (limit, loop, command*, LSP, theme,
- * remote, inbox) plus the derived activity flags.
+ * families listed in the roadmap (command*, LSP, theme, remote, inbox) plus the derived activity flags.
  *
  * Note on what is NOT here:
  *   - `perm` (permission modal) lives in `usePermissionController` (M4.1).
@@ -89,12 +72,10 @@ export interface ModalHostController {
  *     move with `SessionManager` (M4.4).
  *
  * The hook returns everything destructured so call sites can keep their
- * original names (`setLimitModal`, `commandWizard`, …) and no rename
+ * original names (`setCommandWizard`, `commandWizard`, …) and no rename
  * sweep is required — only the JSX renderer changes.
  */
 export function useModalHost(): ModalHostController {
-  const [limitModal, setLimitModal] = useState<LimitModalState | null>(null);
-  const [loopModal, setLoopModal] = useState<LoopModalState | null>(null);
   const [commandWizard, setCommandWizard] = useState<CommandWizardState | null>(null);
   const [commandPicker, setCommandPicker] = useState<CommandPickerState | null>(null);
   const [commandToDelete, setCommandToDelete] = useState<CustomCommand | null>(null);
@@ -135,7 +116,7 @@ export function useModalHost(): ModalHostController {
       showSkillsPicker ||
       showShellPicker ||
       showChangelogImagePicker;
-    const hasOverlayModal = limitModal !== null || loopModal !== null || showPlanCompletePicker;
+    const hasOverlayModal = showPlanCompletePicker;
     return {
       hasFullscreenModal,
       hasOverlayModal,
@@ -161,13 +142,9 @@ export function useModalHost(): ModalHostController {
     showShellPicker,
     showPlanCompletePicker,
     showChangelogImagePicker,
-    limitModal,
-    loopModal,
   ]);
 
   return {
-    limitModal, setLimitModal,
-    loopModal, setLoopModal,
     commandWizard, setCommandWizard,
     commandPicker, setCommandPicker,
     commandToDelete, setCommandToDelete,
@@ -194,8 +171,6 @@ export function useModalHost(): ModalHostController {
 // ── Pure helpers (handy for tests + downstream consumers) ────────────────
 
 export interface ModalFlagsInput {
-  limitModal: LimitModalState | null;
-  loopModal: LoopModalState | null;
   commandWizard: CommandWizardState | null;
   commandPicker: CommandPickerState | null;
   commandToDelete: CustomCommand | null;
@@ -239,8 +214,7 @@ export function computeModalFlags(s: ModalFlagsInput): ModalFlags {
     s.showSkillsPicker ||
     s.showShellPicker ||
     s.showChangelogImagePicker;
-  const hasOverlayModal =
-    s.limitModal !== null || s.loopModal !== null || s.showPlanCompletePicker;
+  const hasOverlayModal = s.showPlanCompletePicker;
   return {
     hasFullscreenModal,
     hasOverlayModal,
@@ -249,8 +223,6 @@ export function computeModalFlags(s: ModalFlagsInput): ModalFlags {
 }
 
 export const EMPTY_MODAL_STATE: ModalFlagsInput = {
-  limitModal: null,
-  loopModal: null,
   commandWizard: null,
   commandPicker: null,
   commandToDelete: null,

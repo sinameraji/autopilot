@@ -2,7 +2,6 @@ import React from "react";
 import { Box, Text } from "ink";
 import SelectInput from "ink-select-input";
 import { ThemeProvider } from "./theme-context.js";
-import { LimitModal } from "./limit-modal.js";
 import { CommandWizard } from "./command-wizard.js";
 import { CommandPicker } from "./command-picker.js";
 import { CommandList } from "./command-list.js";
@@ -419,62 +418,5 @@ export function ModalHost(props: ModalHostProps): React.ReactElement | null {
     );
   }
 
-  return null;
-}
-
-/**
- * Renders the active resolver-style overlay (limit or loop). Sits inline
- * inside the main conversation view, gating the input/queue/statusbar
- * region. Returns null when no overlay is active.
- */
-export interface ModalOverlayProps {
-  modals: ModalHostController;
-  /**
-   * Called after the limit modal resolves and before the modal is closed.
-   * Used by `app.tsx` to also clear its `limitResolveRef` bookkeeping —
-   * the agent loop reads that ref to fire `"stop"` on Ctrl+C / abort.
-   */
-  onLimitResolved?: () => void;
-  /** Mirror of `onLimitResolved` for the loop modal. */
-  onLoopResolved?: () => void;
-}
-
-export function ModalOverlay({
-  modals,
-  onLimitResolved,
-  onLoopResolved,
-}: ModalOverlayProps): React.ReactElement | null {
-  if (modals.limitModal) {
-    const m = modals.limitModal;
-    return (
-      <LimitModal
-        limit={m.limit}
-        onDecide={(d) => {
-          m.resolve(d);
-          onLimitResolved?.();
-          modals.setLimitModal(null);
-        }}
-      />
-    );
-  }
-  if (modals.loopModal) {
-    const m = modals.loopModal;
-    return (
-      <LimitModal
-        limit={50}
-        title="Agent stuck in a loop"
-        description="The agent kept calling the same tools with identical arguments. What would you like to do?"
-        items={[
-          { label: "Continue", value: "continue" },
-          { label: "Synthesize", value: "synthesize" },
-        ]}
-        onDecide={(d) => {
-          m.resolve(d);
-          onLoopResolved?.();
-          modals.setLoopModal(null);
-        }}
-      />
-    );
-  }
   return null;
 }

@@ -37,6 +37,8 @@ export interface PrintModeOpts
   updateResult: UpdateCheckResult;
   codeMode?: boolean;
   continueOnLimit?: boolean;
+  /** Hard ceiling on tool iterations across `continueOnLimit` resets. */
+  maxTotalToolIterations?: number;
   maxInputTokens?: number;
   /** Session continuation */
   continueSession?: boolean;
@@ -330,6 +332,13 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
         });
       }
     },
+    onGuardrail: (ev) => {
+      if (format === "text") {
+        process.stderr.write(`\x1b[33mkimiflare: ${ev.message}\x1b[0m\n`);
+      } else if (format === "stream-json") {
+        emitStreamJson("warning", { message: ev.message, guardrail: ev.kind });
+      }
+    },
     onWarning: (msg) => {
       if (format === "text") {
         process.stderr.write(`\x1b[33mkimiflare: ${msg}\x1b[0m\n`);
@@ -377,6 +386,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       signal: controller.signal,
       codeMode: opts.codeMode,
       continueOnLimit: opts.continueOnLimit,
+      maxTotalToolIterations: opts.maxTotalToolIterations,
       maxInputTokens: opts.maxInputTokens,
       coauthor:
         opts.coauthor !== false
