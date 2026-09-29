@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
 import { logger } from "../util/logger.js";
 import { getUserAgent } from "../util/version.js";
+import { interactiveCommandHint, userShellCommandsEnabled } from "../agent/user-shell.js";
 
 interface Args {
   command: string;
@@ -368,6 +369,9 @@ async function runBash(args: Args, ctx: ToolContext): Promise<ToolOutput> {
         GIT_EDITOR: "true",
       },
     });
+    // No one can type into this process: close stdin so commands that wait
+    // for input fail fast instead of hanging until the timeout.
+    child.stdin?.end();
     let stdout = "";
     let stderr = "";
     let killedByTimeout = false;
@@ -421,6 +425,15 @@ async function runBash(args: Args, ctx: ToolContext): Promise<ToolOutput> {
       if (stdout) parts.push(`--- stdout ---\n${stdout.trimEnd()}`);
       if (stderr) parts.push(`--- stderr ---\n${stderr.trimEnd()}`);
       if (!stdout && !stderr) parts.push("(no output)");
+      if (userShellCommandsEnabled() && !killedByAbort) {
+        const hint = interactiveCommandHint({
+          command: args.command,
+          exitCode: code,
+          timedOut: killedByTimeout,
+          output: `${stdout}\n${stderr}`,
+        });
+        if (hint) parts.push(hint);
+      }
       const raw = parts.join("\n");
       resolve({
         content: raw,

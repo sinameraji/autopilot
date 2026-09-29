@@ -112,6 +112,14 @@ import { runCompact as runCompactImpl } from "./agent/run-compact.js";
 import { distillSessionPlan } from "./agent/distill.js";
 import { resolvePlanForFresh } from "./agent/plan-resolver.js";
 import { writeToClipboard } from "./util/clipboard.js";
+import { enableUserShellCommands } from "./agent/user-shell.js";
+import {
+  formatBangContext,
+  isTerminalHandedOff,
+  parseBangCommand,
+  registerInkInstance,
+  runBangCommand,
+} from "./ui/bang-command.js";
 import {
   handleCommandDelete as handleCommandDeleteImpl,
   handleCommandSave as handleCommandSaveImpl,
@@ -325,6 +333,8 @@ function App({
       logger.info("sigint:fired", {
         hasHandler: sigintHandlerRef.current !== null,
       });
+      // A `!` command owns the terminal: Ctrl+C is for it, not for us.
+      if (isTerminalHandedOff()) return;
       sigintHandlerRef.current?.();
     };
     process.on("SIGINT", onSigint);
@@ -1368,6 +1378,50 @@ function App({
     [setEvents, setShowRemoteDashboard],
   );
 
+  // `! <command>`: run it in the user's terminal, show the output, and share
+  // it with the model as context for the next turn.
+  const runUserShellCommand = useCallback(
+    async (command: string, display: string, queuedKey?: string) => {
+      if (queuedKey) {
+        setEvents((evts) =>
+          evts.map((e) => (e.kind === "user" && e.key === queuedKey ? { ...e, text: display, queued: false } : e)),
+        );
+      } else {
+        setEvents((e) => [...e, { kind: "user", key: mkKey(), text: display }]);
+      }
+      if (!command) {
+        setEvents((e) => [
+          ...e,
+          {
+            kind: "info",
+            key: mkKey(),
+            text: "usage: ! <command> — runs in your terminal (logins and prompts work); the output is shared with the agent",
+          },
+        ]);
+        return;
+      }
+      const result = await runBangCommand(command, process.cwd());
+      const id = `bang_${mkKey()}`;
+      const status = result.signal ? `signal=${result.signal}` : `exit=${result.exitCode ?? "?"}`;
+      setEvents((e) => [
+        ...e,
+        {
+          kind: "tool",
+          key: id,
+          id,
+          name: "bash",
+          args: JSON.stringify({ command }),
+          status: result.exitCode === 0 ? "done" : "error",
+          result: `${status}\n${result.output ?? "(output not captured)"}`,
+          render: { title: `! ${command}`.slice(0, 120) },
+        },
+      ]);
+      messagesRef.current.push({ role: "user", content: sanitizeString(formatBangContext(result)) });
+      await saveSessionSafe();
+    },
+    [mkKey, saveSessionSafe],
+  );
+
   const processMessage = useCallback(
     async (text: string, displayText?: string, opts?: { queuedKey?: string }) => {
       if (!cfg) return;
@@ -1381,6 +1435,13 @@ function App({
       let overrideModel: string | undefined;
       let overrideEffort: ReasoningEffort | undefined;
       let display = displayText?.trim() || trimmed;
+
+      const bangCommand = parseBangCommand(trimmed);
+      if (bangCommand !== null) {
+        await runUserShellCommand(bangCommand, display, opts?.queuedKey);
+        endTurn();
+        return;
+      }
 
       if (trimmed.startsWith("/")) {
         const head = trimmed.split(/\s+/)[0]!.toLowerCase();
@@ -2318,7 +2379,7 @@ function App({
         },
       );
     },
-    [cfg, handleSlash, updateAssistant, updateTool, saveSessionSafe, updateResponseMeta, setShowPlanCompletePicker],
+    [cfg, handleSlash, updateAssistant, updateTool, saveSessionSafe, updateResponseMeta, setShowPlanCompletePicker, runUserShellCommand],
   );
 
   useEffect(() => {
@@ -2717,7 +2778,12 @@ function App({
                 query={picker.query}
               />
             )}
-          <Box marginTop={1}>
+          {parseBangCommand(input) !== null && (
+            <Box marginTop={1}>
+              <Text dimColor>! shell command — runs in your terminal (logins and prompts work); output is shared with the agent</Text>
+            </Box>
+          )}
+          <Box marginTop={parseBangCommand(input) !== null ? 0 : 1}>
             <Text color={theme.prompt ?? theme.accent}>› </Text>
             <CustomTextInput
               value={input}
@@ -2782,6 +2848,8 @@ export async function renderApp(
   lspScope: "project" | "global" = "global",
   lspProjectPath: string | null = null,
 ) {
+  // The TUI is the only host that supports `!` commands (see agent/user-shell.ts).
+  enableUserShellCommands();
   const instance = render(
     <App
       initialCfg={cfg}
@@ -2802,5 +2870,7 @@ export async function renderApp(
       exitOnCtrlC: false,
     },
   );
+  registerInkInstance(instance);
   await instance.waitUntilExit();
+  registerInkInstance(null);
 }
