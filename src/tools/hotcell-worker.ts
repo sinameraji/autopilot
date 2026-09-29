@@ -67,9 +67,12 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     const repo = await getCleanRepository(cwd);
     const cellName = "autopilot-" + workerId;
     const checkoutAndInstall = [
-      `git fetch origin ${shellQuote(repo.commit)}`,
-      `git -C /workspace checkout --detach ${shellQuote(repo.commit)}`,
-      "cd /workspace && npm ci --no-audit --no-fund --loglevel=error && npm run build",
+      'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
+      'test -n "$GIT_DIR"',
+      'REPO_ROOT="${GIT_DIR%/.git}"',
+      `git -C "$REPO_ROOT" fetch origin ${shellQuote(repo.commit)}`,
+      `git -C "$REPO_ROOT" checkout --detach ${shellQuote(repo.commit)}`,
+      'cd "$REPO_ROOT" && npm ci --no-audit --no-fund --loglevel=error && npm run build',
     ].join(" && ");
     const created = await execute(command, [
       "create", "-n", "1", "--name", cellName, "--repo", repo.url,
@@ -112,9 +115,12 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     // host key is never passed; Hotcell injects its revocable gateway token.
     const encodedPrompt = Buffer.from(prompt, "utf8").toString("base64");
     const shellCommand = [
+      'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
+      'test -n "$GIT_DIR"',
+      'REPO_ROOT="${GIT_DIR%/.git}"',
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `node /workspace/bin/autopilot.mjs --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+      `cd "$REPO_ROOT" && node "$REPO_ROOT/bin/autopilot.mjs" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
     ].join("; ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,

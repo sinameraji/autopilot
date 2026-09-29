@@ -119,12 +119,13 @@ describe("Hotcell worker helpers", () => {
     const createArgs = calls[0]!.args;
     assert.equal(createArgs[createArgs.indexOf("--ref") + 1], repo.ref);
     const setup = createArgs[createArgs.indexOf("--setup") + 1]!;
-    assert.ok(setup.includes(`git fetch origin '${repo.commit}'`));
-    assert.ok(setup.includes(`git -C /workspace checkout --detach '${repo.commit}'`));
+    assert.ok(setup.includes('find /workspace -mindepth 2 -maxdepth 5 -name .git'));
+    assert.ok(setup.includes(`git -C "$REPO_ROOT" fetch origin '${repo.commit}'`));
+    assert.ok(setup.includes(`git -C "$REPO_ROOT" checkout --detach '${repo.commit}'`));
     assert.ok(setup.includes("npm ci --no-audit --no-fund --loglevel=error"));
     assert.ok(!setup.includes("npm link"));
     const command = calls[1]!.args[2]!;
-    assert.match(command, /node \/workspace\/bin\/autopilot\.mjs/);
+    assert.ok(command.includes('cd "$REPO_ROOT" && node "$REPO_ROOT/bin/autopilot.mjs"'));
     assert.match(command, /--model 'openai\/gpt-6-luna'/);
     assert.match(command, /--worker-profile research/);
     assert.ok(!command.includes("Inspect the repository"), "mission should not be interpolated as shell text");
