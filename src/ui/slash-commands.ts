@@ -213,6 +213,10 @@ const handleClear: Handler = (ctx) => {
   ctx.pendingToolCallsRef.current.clear();
   ctx.usageRef.current = null;
   ctx.turnCounterRef.current = 0;
+  // Finished events are printed once via <Static> and aren't part of Ink's
+  // live output, so emptying `events` no longer blanks the screen. Clear the
+  // visible screen ourselves; scrollback is left alone on purpose.
+  if (process.stdout.isTTY) process.stdout.write("\x1b[2J\x1b[H");
   setEvents([]);
   ctx.setUsage(null);
   ctx.setSessionUsage(null);
