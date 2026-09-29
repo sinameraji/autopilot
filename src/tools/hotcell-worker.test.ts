@@ -122,7 +122,9 @@ describe("Hotcell worker helpers", () => {
     assert.ok(setup.includes(`git fetch origin '${repo.commit}'`));
     assert.ok(setup.includes(`git -C /workspace checkout --detach '${repo.commit}'`));
     assert.ok(setup.includes("npm ci --no-audit --no-fund --loglevel=error"));
+    assert.ok(!setup.includes("npm link"));
     const command = calls[1]!.args[2]!;
+    assert.match(command, /node \/workspace\/bin\/autopilot\.mjs/);
     assert.match(command, /--model 'openai\/gpt-6-luna'/);
     assert.match(command, /--worker-profile research/);
     assert.ok(!command.includes("Inspect the repository"), "mission should not be interpolated as shell text");
@@ -290,6 +292,20 @@ describe("Hotcell worker helpers", () => {
     assert.equal(result.status, "budget_exhausted");
     assert.equal(result.partialResult, true);
     assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
+  });
+
+  it("surfaces sanitized stderr for worker process failures", async () => {
+    const cwd = await makeRepo();
+    const result = await runHotcellWorker({
+      task: "Research",
+      model: "openai/gpt-6-luna",
+      budgetUsd: 0.25,
+      cwd,
+      processRunner: fakeRunner({ workerCode: 1, workerStderr: "autopilot: command not found OPENROUTER_API_KEY=do-not-leak" }),
+    });
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /autopilot: command not found/);
+    assert.doesNotMatch(result.error ?? "", /do-not-leak|OPENROUTER_API_KEY/);
   });
 
   it("maps Hotcell gateway spend-cap responses distinctly", async () => {

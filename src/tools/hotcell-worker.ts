@@ -69,7 +69,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     const checkoutAndInstall = [
       `git fetch origin ${shellQuote(repo.commit)}`,
       `git -C /workspace checkout --detach ${shellQuote(repo.commit)}`,
-      "cd /workspace && npm ci --no-audit --no-fund --loglevel=error && npm run build && npm link",
+      "cd /workspace && npm ci --no-audit --no-fund --loglevel=error && npm run build",
     ].join(" && ");
     const created = await execute(command, [
       "create", "-n", "1", "--name", cellName, "--repo", repo.url,
@@ -114,7 +114,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     const shellCommand = [
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `autopilot --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+      `node /workspace/bin/autopilot.mjs --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
     ].join("; ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,
@@ -126,6 +126,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     const tokensUsed = typeof json?.usage?.totalTokens === "number" ? json.usage.totalTokens : 0;
     const budgetExhausted = execution.code === 42;
     const diagnostic = `${execution.stdout}\n${execution.stderr}`.toLowerCase();
+    const executionDiagnostic = sanitizeHotcellDiagnostic(execution.stderr);
     const spendExhausted = /(?:http\s*)?402|spend cap|spending limit/.test(diagnostic);
     const status = execution.timedOut
       ? "timed_out"
@@ -159,7 +160,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
               : execution.outputLimitExceeded ? "Worker output exceeded the 1 MB result limit."
               : /unknown model|model.{0,30}(?:not found|invalid|unavailable|unsupported)/i.test(diagnostic) ? "The requested model is unavailable in the Hotcell OpenRouter gateway."
               : /no openrouter api key|openrouter.{0,30}(?:key|gateway).{0,30}(?:missing|not configured)/i.test(diagnostic) ? "Hotcell OpenRouter gateway credentials are not configured. Run `hotcell keys add openrouter` on the daemon host."
-              : `Worker process exited with code ${execution.code}.`,
+              : `Worker process exited with code ${execution.code}${executionDiagnostic ? `: ${executionDiagnostic}` : "."}`,
           }
         : {}),
     };
