@@ -65,12 +65,26 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
 
   try {
     const repo = await getCleanRepository(cwd);
+    const cellName = "autopilot-" + workerId;
+    const checkoutAndInstall = [
+      `git fetch origin ${shellQuote(repo.commit)}`,
+      `git -C /workspace checkout --detach ${shellQuote(repo.commit)}`,
+      "cd /workspace && npm ci --no-audit --no-fund --loglevel=error && npm run build && npm link",
+    ].join(" && ");
     const created = await execute(command, [
-      "create", "-n", "1", "--name", "autopilot-worker", "--repo", repo.url,
-      "--ref", repo.commit, "--egress", "--egress-spend-cap", String(options.budgetUsd),
-      "--memory", "1024", "--cpus", "2", "--setup", "npm install --global autopilot-ai",
-    ], { cwd, signal: options.signal, timeoutMs: 120_000 });
+      "create", "-n", "1", "--name", cellName, "--repo", repo.url,
+      "--ref", repo.ref, "--egress", "--egress-spend-cap", String(options.budgetUsd),
+      "--memory", "1024", "--cpus", "2", "--setup", checkoutAndInstall,
+    ], { cwd, signal: options.signal, timeoutMs: 300_000 });
     cellId = parseCellId(created.stdout);
+    if (!cellId && (created.code !== 0 || created.timedOut || created.aborted)) {
+      try {
+        const cells = await execute(command, ["ls"], { cwd, timeoutMs: 10_000 });
+        cellId = parseNamedCellId(cells.stdout, cellName);
+      } catch {
+        // Best effort: the create command can fail after the daemon records the cell.
+      }
+    }
     if (created.timedOut || created.aborted) {
       result = terminalResult(
         workerId,
@@ -81,7 +95,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       );
       return result;
     }
-    if (created.code !== 0) throw new Error(`Hotcell setup failed (exit ${created.code}). Check that the daemon, OpenRouter gateway route, and repository access are configured.`);
+    if (created.code !== 0) throw new Error(formatSetupFailure(created));
     if (!cellId) throw new Error("Hotcell created a sandbox but did not return a recognizable cell ID.");
     if (/no providers configured|providers:\s*\(none\)/i.test(created.stdout)) {
       result = terminalResult(workerId, options.task, "failed", "Hotcell has no OpenRouter gateway route. Run `hotcell keys add openrouter` on the daemon host, then retry.", model);
@@ -180,16 +194,18 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   return result!;
 }
 
-export async function getCleanRepository(cwd: string): Promise<{ url: string; commit: string }> {
+export async function getCleanRepository(cwd: string): Promise<{ url: string; commit: string; ref: string }> {
   const root = (await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })).stdout.trim();
   const status = (await execFileAsync("git", ["status", "--porcelain"], { cwd: root })).stdout;
   if (status.trim()) throw new Error("Hotcell workers require a clean Git checkout; commit or stash local changes first.");
   const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+  const ref = (await execFileAsync("git", ["branch", "--show-current"], { cwd: root })).stdout.trim();
+  if (!ref) throw new Error("Hotcell workers require a named branch so the daemon can clone before pinning the exact commit.");
   const url = (await execFileAsync("git", ["config", "--get", "remote.origin.url"], { cwd: root })).stdout.trim();
   if (!/^(https:\/\/|git@|ssh:\/\/)/i.test(url) || /:\/\/[^/]*@/.test(url)) {
     throw new Error("Hotcell workers require a credential-free HTTPS or SSH origin URL that the Hotcell daemon can clone.");
   }
-  return { url, commit };
+  return { url, commit, ref };
 }
 
 export function parseCellId(output: string): string | undefined {
@@ -198,6 +214,28 @@ export function parseCellId(output: string): string | undefined {
   const labeled = output.match(/(?:sandbox|cell)(?:\s+id)?\s*[:= ]\s*([a-z0-9][a-z0-9_-]{7,79})/i)?.[1];
   if (labeled) return labeled;
   return output.split(/\r?\n/).map((line) => line.trim()).reverse().find((line) => /^[a-z0-9][a-z0-9_-]{7,79}$/i.test(line));
+}
+
+export function parseNamedCellId(output: string, name: string): string | undefined {
+  for (const line of output.split(/\r?\n/)) {
+    const columns = line.trim().split(/\s+/);
+    if (columns[1] === name && /^[a-z0-9][a-z0-9_-]{7,79}$/i.test(columns[0] ?? "")) return columns[0];
+  }
+  return undefined;
+}
+
+function formatSetupFailure(result: HotcellProcessResult): string {
+  const detail = sanitizeHotcellDiagnostic(`${result.stderr}\n${result.stdout}`);
+  return `Hotcell setup failed (exit ${result.code})${detail ? `: ${detail}` : ". Check that the daemon, repository access, and gateway route are configured."}`;
+}
+
+function sanitizeHotcellDiagnostic(text: string): string {
+  return text
+    .replace(/\b(?:sk-or-v1-|sk-ant-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{8,}\b/gi, "[REDACTED]")
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+    .replace(/\b[A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?TOKEN|SECRET|PASSWORD)\s*[:=]\s*[^\s,;]+/gi, "[REDACTED]")
+    .trim()
+    .slice(-1_500);
 }
 
 export function shellQuote(value: string): string {

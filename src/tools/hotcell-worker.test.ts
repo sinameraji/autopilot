@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import {
   getCleanRepository,
   parseCellId,
+  parseNamedCellId,
   parseHotcellStats,
   runHotcellWorker,
   shellQuote,
@@ -32,22 +33,26 @@ async function makeRepo(): Promise<string> {
 
 function fakeRunner(options: {
   createOutput?: string;
+  createCode?: number;
+  createStderr?: string;
   createTimedOut?: boolean;
   workerCode?: number;
   workerStderr?: string;
   cleanupCode?: number;
+  listOutput?: string;
   onExec?: (signal?: AbortSignal) => void;
   calls?: Array<{ args: string[]; options: { cwd: string; signal?: AbortSignal; timeoutMs: number } }>;
 } = {}): HotcellProcessRunner {
   return async (_executable, args, runOptions): Promise<HotcellProcessResult> => {
     options.calls?.push({ args, options: runOptions });
     if (args[0] === "create") return {
-      code: 0,
+      code: options.createCode ?? 0,
       stdout: options.createOutput ?? `Created sandbox ${cellId}\n`,
-      stderr: "",
+      stderr: options.createStderr ?? "",
       aborted: options.createTimedOut ?? false,
       timedOut: options.createTimedOut,
     };
+    if (args[0] === "ls") return { code: 0, stdout: options.listOutput ?? "", stderr: "", aborted: false };
     if (args[0] === "exec") {
       options.onExec?.(runOptions.signal);
       return {
@@ -73,6 +78,8 @@ describe("Hotcell worker helpers", () => {
   it("parses cell IDs, Hotcell metrics, and safely quotes shell values", () => {
     assert.equal(parseCellId(`created ${cellId}`), cellId);
     assert.equal(parseCellId("Created sandbox hc_ab12cd34ef56\nOPENROUTER_BASE_URL=http://gateway"), "hc_ab12cd34ef56");
+    assert.equal(parseNamedCellId("ID NAME IMAGE STATUS\n12345678 autopilot-worker image error", "autopilot-worker"), "12345678");
+    assert.equal(parseNamedCellId("ID NAME IMAGE STATUS\n12345678 unrelated image error", "autopilot-worker"), undefined);
     assert.deepEqual(parseHotcellStats("LLM: 2 calls, 1,000 in + 500 out tokens, $0.13\nCost: 0.140000"), {
       tokensUsed: 1500,
       costUsd: 0.14,
@@ -108,10 +115,48 @@ describe("Hotcell worker helpers", () => {
     assert.ok(calls[0]!.args.includes("--egress-spend-cap"));
     assert.ok(calls[0]!.args.includes("0.25"));
     assert.ok(calls[0]!.args.includes("--ref"));
+    const repo = await getCleanRepository(cwd);
+    const createArgs = calls[0]!.args;
+    assert.equal(createArgs[createArgs.indexOf("--ref") + 1], repo.ref);
+    const setup = createArgs[createArgs.indexOf("--setup") + 1]!;
+    assert.ok(setup.includes(`git fetch origin '${repo.commit}'`));
+    assert.ok(setup.includes(`git -C /workspace checkout --detach '${repo.commit}'`));
+    assert.ok(setup.includes("npm ci --no-audit --no-fund --loglevel=error"));
     const command = calls[1]!.args[2]!;
     assert.match(command, /--model 'openai\/gpt-6-luna'/);
     assert.match(command, /--worker-profile research/);
     assert.ok(!command.includes("Inspect the repository"), "mission should not be interpolated as shell text");
+    assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
+  });
+
+  it("cleans a named cell after setup failure and redacts diagnostics", async () => {
+    const cwd = await makeRepo();
+    const calls: Array<{ args: string[]; options: { cwd: string; signal?: AbortSignal; timeoutMs: number } }> = [];
+    let cellName = "";
+    const runner: HotcellProcessRunner = async (_executable, args, options) => {
+      calls.push({ args, options });
+      if (args[0] === "create") {
+        cellName = args[args.indexOf("--name") + 1]!;
+        return { code: 1, stdout: "", stderr: "setup failed OPENROUTER_API_KEY=do-not-leak", aborted: false };
+      }
+      if (args[0] === "ls") {
+        return { code: 0, stdout: `ID NAME IMAGE STATUS\n${cellId} ${cellName} image error`, stderr: "", aborted: false };
+      }
+      if (args[0] === "rm") return { code: 0, stdout: "", stderr: "", aborted: false };
+      return { code: 1, stdout: "", stderr: "unexpected command", aborted: false };
+    };
+    const result = await runHotcellWorker({
+      task: "Research",
+      model: "openai/gpt-6-luna",
+      budgetUsd: 0.25,
+      cwd,
+      processRunner: runner,
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.error ?? "", /setup failed/);
+    assert.doesNotMatch(result.error ?? "", /do-not-leak|OPENROUTER_API_KEY/);
+    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "ls", "rm"]);
     assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
   });
 
