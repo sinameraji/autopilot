@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.3.0](https://github.com/sinameraji/autopilot/compare/v1.2.2...v1.3.0) (2026-09-29)
+
+
+### Features
+
+* **agent:** add effort-aware subagent routing ([#664](https://github.com/sinameraji/autopilot/issues/664)) ([72bcb2c](https://github.com/sinameraji/autopilot/commit/72bcb2c9f5487a123603d8c9c1762f45e3435b29))
+* **ui:** add `!` shell commands and teach the agent when to suggest them ([#665](https://github.com/sinameraji/autopilot/issues/665)) ([6c57ab7](https://github.com/sinameraji/autopilot/commit/6c57ab758ccd36f0e2f598bf40f7c7815d1cdcdf))
+* **worker:** add opt-in Hotcell research backend ([#659](https://github.com/sinameraji/autopilot/issues/659)) ([5e520a3](https://github.com/sinameraji/autopilot/commit/5e520a39f83b2be02ec55f0c1b5d77a56f3a7bf0))
+
 ## [1.2.2](https://github.com/sinameraji/autopilot/compare/v1.2.1...v1.2.2) (2026-09-29)
 
 
