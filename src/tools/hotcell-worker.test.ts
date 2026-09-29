@@ -125,8 +125,8 @@ describe("Hotcell worker helpers", () => {
     assert.ok(command.includes(`git -C "$REPO_ROOT" fetch --quiet origin '${repo.commit}'`));
     assert.ok(command.includes(`git -C "$REPO_ROOT" checkout --quiet --detach '${repo.commit}'`));
     assert.ok(command.includes("npm ci --no-audit --no-fund --loglevel=error 1>&2"));
-    assert.ok(command.includes("npm run build 1>&2"));
-    assert.ok(command.includes('node "$REPO_ROOT/bin/autopilot.mjs"'));
+    assert.ok(!command.includes("npm run build"), "runtime uses the source CLI so optional native bundling is not required");
+    assert.ok(command.includes('node --import tsx "$REPO_ROOT/src/index.tsx"'));
     assert.match(command, /--model 'openai\/gpt-6-luna'/);
     assert.match(command, /--worker-profile research/);
     assert.ok(!command.includes("Inspect the repository"), "mission should not be interpolated as shell text");

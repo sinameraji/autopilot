@@ -114,10 +114,9 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
       'cd "$REPO_ROOT"',
       "npm ci --no-audit --no-fund --loglevel=error 1>&2",
-      "npm run build 1>&2",
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `node "$REPO_ROOT/bin/autopilot.mjs" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+      `node --import tsx "$REPO_ROOT/src/index.tsx" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
     ].join(" && ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,
