@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
+import Spinner from "./spinner.js";
 import type { Task } from "../tools/registry.js";
 import { useTheme } from "./theme-context.js";
 import type { Theme } from "./theme.js";
