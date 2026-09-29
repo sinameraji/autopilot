@@ -294,6 +294,10 @@ autopilot
 
 The harness never starts a worker directly. The coordinator remains responsible for defining independent missions and synthesizing results. Jev is consulted only for substantial but ambiguous candidates, receives at most 1,200 characters of redacted task text (no chat history, project files, system prompt, or tool output), and has a 4-second timeout; any failure falls back to local sequential work. Clear routine or sequential tasks do not call Jev. Every `spawn_worker` call still requires its normal tool permission and obeys provider, read-only, spend, concurrency, and timeout limits—even in `auto` mode.
 
+## Running shell commands yourself
+
+Type `!` followed by a command (for example `! gh auth login`) to run it in your own terminal, inside the session. Logins, password prompts and interactive programs work because the command gets the real TTY. The output is added to the conversation so the agent can see it. The agent's own `bash` tool has no terminal, so autopilot suggests `! <command>` when something needs you: a login, a `sudo` password, an SSH passphrase, or a secret you'd rather not paste into chat. On macOS and Linux the output is captured with `script(1)`; elsewhere the command still runs but its output isn't captured.
+
 ## Keyboard shortcuts
 
 | Shortcut | Action |

@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import type { ToolSpec } from "../tools/registry.js";
 import { systemPromptForMode, type Mode } from "../mode.js";
 import type { ChatMessage } from "./messages.js";
+import { USER_SHELL_PROMPT_SECTION, userShellCommandsEnabled } from "./user-shell.js";
 
 export interface SystemPromptOpts {
   cwd: string;
@@ -122,6 +123,8 @@ If the user asks what model you are, answer with exactly: \`${opts.model}\`. Thi
     : "";
 
   const tools = `Tools available:\n${toolsBlock}`;
+  // Only the interactive TUI supports `!` commands; never advertise them elsewhere.
+  const userShellBlock = userShellCommandsEnabled() ? `\n\n${USER_SHELL_PROMPT_SECTION}` : "";
 
   const ctx = loadContextFile(opts.cwd);
   const contextBlock = ctx
@@ -152,7 +155,11 @@ If the user asks what model you are, answer with exactly: \`${opts.model}\`. Thi
     ? `\n\n## Subagent policy for this turn\n\n${opts.delegationDirective}`
     : "";
 
-  return identity + "\n\n" + env + "\n\n" + tools + lspBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock + delegationBlock;
+  return identity + "
+
+" + env + "
+
+" + tools + lspBlock + userShellBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock + delegationBlock;
 }
 
 /** Build a single concatenated system prompt for backward compatibility. */
