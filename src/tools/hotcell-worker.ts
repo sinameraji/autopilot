@@ -66,18 +66,10 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   try {
     const repo = await getCleanRepository(cwd);
     const cellName = "autopilot-" + workerId;
-    const checkoutAndInstall = [
-      'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
-      'test -n "$GIT_DIR"',
-      'REPO_ROOT="${GIT_DIR%/.git}"',
-      `git -C "$REPO_ROOT" fetch origin ${shellQuote(repo.commit)}`,
-      `git -C "$REPO_ROOT" checkout --detach ${shellQuote(repo.commit)}`,
-      'cd "$REPO_ROOT" && npm ci --no-audit --no-fund --loglevel=error && npm run build',
-    ].join(" && ");
     const created = await execute(command, [
       "create", "-n", "1", "--name", cellName, "--repo", repo.url,
       "--ref", repo.ref, "--egress", "--egress-spend-cap", String(options.budgetUsd),
-      "--memory", "1024", "--cpus", "2", "--setup", checkoutAndInstall,
+      "--memory", "1024", "--cpus", "2",
     ], { cwd, signal: options.signal, timeoutMs: 300_000 });
     cellId = parseCellId(created.stdout);
     if (!cellId) {
@@ -118,10 +110,15 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
       'test -n "$GIT_DIR"',
       'REPO_ROOT="${GIT_DIR%/.git}"',
+      `git -C "$REPO_ROOT" fetch origin ${shellQuote(repo.commit)}`,
+      `git -C "$REPO_ROOT" checkout --detach ${shellQuote(repo.commit)}`,
+      'cd "$REPO_ROOT"',
+      "npm ci --no-audit --no-fund --loglevel=error 1>&2",
+      "npm run build 1>&2",
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `cd "$REPO_ROOT" && node "$REPO_ROOT/bin/autopilot.mjs" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
-    ].join("; ");
+      `node "$REPO_ROOT/bin/autopilot.mjs" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+    ].join(" && ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,
     });
