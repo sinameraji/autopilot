@@ -155,11 +155,7 @@ If the user asks what model you are, answer with exactly: \`${opts.model}\`. Thi
     ? `\n\n## Subagent policy for this turn\n\n${opts.delegationDirective}`
     : "";
 
-  return identity + "
-
-" + env + "
-
-" + tools + lspBlock + userShellBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock + delegationBlock;
+  return identity + "\n\n" + env + "\n\n" + tools + lspBlock + userShellBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock + delegationBlock;
 }
 
 /** Build a single concatenated system prompt for backward compatibility. */
