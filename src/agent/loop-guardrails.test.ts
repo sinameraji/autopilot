@@ -4,6 +4,7 @@ import { runAgentTurn, AgentLoopError, type AgentTurnOpts, type GuardrailEvent }
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ChatMessage } from "./messages.js";
 import type { HooksManager } from "../hooks/manager.js";
+import type { ToolSpec } from "../tools/registry.js";
 
 type Step = { tool: string; args: Record<string, unknown> } | { text: string };
 
@@ -89,7 +90,7 @@ function baseOpts(
     openrouterApiKey: "sk-or-test",
     model: "test/model",
     messages,
-    tools: [],
+    tools: [PROBE_TOOL],
     executor,
     cwd: "/tmp",
     signal: new AbortController().signal,
@@ -110,6 +111,16 @@ function assertNoDanglingToolCalls(messages: ChatMessage[]): void {
 }
 
 const SAME = { tool: "probe", args: { q: "same" } };
+
+// The loop blocks calls to tools the turn doesn't advertise, so the scripted
+// `probe` calls need a matching spec (execution goes through fakeExecutor).
+const PROBE_TOOL: ToolSpec = {
+  name: "probe",
+  description: "Test probe.",
+  parameters: { type: "object", properties: {}, required: [] },
+  needsPermission: false,
+  run: async () => "ok",
+};
 
 describe("runAgentTurn guardrails (unattended)", () => {
   let originalFetch: typeof globalThis.fetch;
