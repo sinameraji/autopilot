@@ -149,4 +149,107 @@ describe("runAgentTurn", () => {
     // No tool result should have been appended because abort happened before execution.
     assert.strictEqual(messages.filter((m) => m.role === "tool").length, 0);
   });
+
+  it("blocks an unadvertised worker tool call before executor invocation", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "Explain this function." },
+    ];
+    let fetchCalls = 0;
+    let workerRuns = 0;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      const events = fetchCalls === 1
+        ? [
+            { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_worker", type: "function", function: { name: "spawn_worker", arguments: JSON.stringify({ mode: "plan", task: "research" }) } }] } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [
+            { choices: [{ delta: { content: "I will handle this locally." } }] },
+            { choices: [{ finish_reason: "stop" }] },
+          ];
+      const encoder = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const executor = {
+      list: () => [{ name: "spawn_worker" }],
+      run: async () => {
+        workerRuns++;
+        throw new Error("unadvertised worker call must not reach the executor");
+      },
+    } as unknown as ToolExecutor;
+
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [],
+      executor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callbacks: {
+        askPermission: async () => "allow",
+        onLoopDetected: async () => "synthesize",
+      },
+    });
+
+    assert.equal(workerRuns, 0);
+    assert.ok(fetchCalls >= 2);
+    assert.ok(messages.some((message) => message.role === "tool" && /not available under this turn's policy/.test(String(message.content))));
+  });
+
+  it("keeps Code Mode's synthetic execute_code tool available to the loop", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "Print a short result." },
+    ];
+    let fetchCalls = 0;
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      const events = fetchCalls === 1
+        ? [
+            { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_code", type: "function", function: { name: "execute_code", arguments: JSON.stringify({ code: "console.log('code-mode-ok')" }) } }] } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [
+            { choices: [{ delta: { content: "Done." } }] },
+            { choices: [{ finish_reason: "stop" }] },
+          ];
+      const encoder = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const executor = {
+      list: () => [],
+      run: async () => { throw new Error("execute_code must use the sandbox path"); },
+    } as unknown as ToolExecutor;
+
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [],
+      executor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      codeMode: true,
+      callbacks: { askPermission: async () => "allow" },
+    });
+
+    assert.equal(fetchCalls, 2);
+    assert.ok(messages.some((message) => message.role === "tool" && !/not available under this turn's policy/.test(String(message.content))));
+  });
 });

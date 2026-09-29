@@ -23,6 +23,8 @@ export interface SystemPromptOpts {
   mcpContext?: string;
   /** When true (default), instruct the model to prefer PRs over direct pushes. */
   preferPullRequests?: boolean;
+  /** Per-turn harness guidance about subagent use. */
+  delegationDirective?: string;
 }
 
 const CONTEXT_FILENAMES = ["KIMI.md", "KIMIFLARE.md", "AGENT.md"];
@@ -146,8 +148,11 @@ If the user asks what model you are, answer with exactly: \`${opts.model}\`. Thi
   const mcpContextBlock = opts.mcpContext
     ? `\n\n## MCP Context\n\nThe following MCP server information was pre-computed by the coordinator.\n\n${opts.mcpContext}`
     : "";
+  const delegationBlock = opts.delegationDirective
+    ? `\n\n## Subagent policy for this turn\n\n${opts.delegationDirective}`
+    : "";
 
-  return identity + "\n\n" + env + "\n\n" + tools + lspBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock;
+  return identity + "\n\n" + env + "\n\n" + tools + lspBlock + contextBlock + modeBlock + skillsBlock + memoryBlock + lspContextBlock + mcpContextBlock + delegationBlock;
 }
 
 /** Build a single concatenated system prompt for backward compatibility. */

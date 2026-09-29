@@ -281,10 +281,18 @@ autopilot
 | `/mcp list` / `/mcp reload` | Manage MCP servers |
 | `/reasoning` | Toggle chain-of-thought display |
 | `/model` | Pick a model from OpenRouter's catalog (or `/model <id>`, `/model list [filter]`) |
+| `/jev` | Ask Jev for a typed, scoped one-shot decision |
+| `/subagents off\|suggest\|auto` | Set the harness's subagent routing policy (default: `suggest`) |
 | `/key` | Show your OpenRouter key's spend and credit (`/key set <key>`, `/key clear`) |
 | `/cost` | Show OpenRouter-confirmed cost by session, day, month and all time |
 | `/update` | Check for updates |
 | `/help` | List all commands |
+
+### Subagent routing
+
+`/subagents suggest` is the default. `off` disables harness-initiated suggestions; `suggest` recommends a worker for likely parallel work but tells the coordinator to ask before dispatch; `auto` lets the coordinator call `spawn_worker` when confidence is high. Explicit requests to use agents or work without them take precedence over this automatic policy. `/subagents auto` is also available through `KIMIFLARE_SUBAGENT_POLICY=auto` or `subagentPolicy: "auto"` in config.
+
+The harness never starts a worker directly. The coordinator remains responsible for defining independent missions and synthesizing results. Jev is consulted only for substantial but ambiguous candidates, receives at most 1,200 characters of redacted task text (no chat history, project files, system prompt, or tool output), and has a 4-second timeout; any failure falls back to local sequential work. Clear routine or sequential tasks do not call Jev. Every `spawn_worker` call still requires its normal tool permission and obeys provider, read-only, spend, concurrency, and timeout limits—even in `auto` mode.
 
 ## Keyboard shortcuts
 

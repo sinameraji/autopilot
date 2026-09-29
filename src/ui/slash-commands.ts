@@ -22,6 +22,7 @@ import { askJev, presentJevAnswer, type JevQuestion } from "../agent/jev.js";
 import { buildJevContext, formatJevContextReceipt } from "../agent/jev-context.js";
 import { checkOpenRouterKey, looksLikeOpenRouterKey, OPENROUTER_KEYS_URL } from "../models/openrouter.js";
 import type { Mode } from "../mode.js";
+import type { SubagentPolicy } from "../intent/subagent-policy.js";
 import type { DailyUsage } from "../usage-tracker.js";
 import {
   carryOverSessionBaseline,
@@ -463,6 +464,40 @@ const handleShell: Handler = (ctx, _rest, arg) => {
       text: `shell: ${cfg.shell ?? "auto"} (${detected.shell} ${detected.args.join(" ")})`,
     },
   ]);
+  return true;
+};
+
+const handleSubagents: Handler = (ctx, _rest, arg) => {
+  const { cfg, setCfg, setEvents, mkKey, busy } = ctx;
+  const policy = arg as SubagentPolicy;
+  if (!arg || arg === "help") {
+    setEvents((events) => [...events, {
+      kind: "info",
+      key: mkKey(),
+      text: `subagent policy: ${cfg?.subagentPolicy ?? "suggest"}\nusage: /subagents off|suggest|auto\n\noff disables harness suggestions; suggest (default) asks before any worker call; auto lets the coordinator dispatch on strong evidence. Explicit user instructions still win. Every spawn_worker call remains permission-gated and budget-capped.`,
+    }]);
+    return true;
+  }
+  if (busy) {
+    setEvents((events) => [...events, { kind: "info", key: mkKey(), text: "can't change /subagents while the agent is working" }]);
+    return true;
+  }
+  if (policy !== "off" && policy !== "suggest" && policy !== "auto") {
+    setEvents((events) => [...events, { kind: "error", key: mkKey(), text: "usage: /subagents off|suggest|auto" }]);
+    return true;
+  }
+  if (!cfg) {
+    setEvents((events) => [...events, { kind: "error", key: mkKey(), text: "configure an OpenRouter key or custom endpoint before changing subagent policy" }]);
+    return true;
+  }
+  const next = { ...cfg, subagentPolicy: policy };
+  setCfg(next);
+  void saveConfig(next).catch(() => {});
+  setEvents((events) => [...events, {
+    kind: "info",
+    key: mkKey(),
+    text: `subagent policy set to ${policy}${policy === "auto" ? " (worker tool calls still require permission)" : ""}`,
+  }]);
   return true;
 };
 
@@ -1896,6 +1931,7 @@ const handlers: Record<string, Handler> = {
   "/shell": handleShell,
   "/model": handleModel,
   "/jev": handleJev,
+  "/subagents": handleSubagents,
   "/key": handleKey,
   "/settings": handleSettings,
   "/mode": handleMode,

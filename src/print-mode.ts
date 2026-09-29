@@ -20,12 +20,14 @@ import { encodeImageFile, isImagePath } from "./util/image.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { glob } from "./util/glob.js";
 import { evaluatePermissionRules } from "./permissions-evaluator.js";
+import { classifyIntent } from "./intent/classify.js";
+import { allowsSubagentDispatch, resolveSubagentGuidance } from "./intent/subagent-policy.js";
 import type { KimiConfig, PermissionRules, ReasoningEffort } from "./config.js";
 
 export type PrintFormat = "text" | "json" | "stream-json";
 
 export interface PrintModeOpts
-  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider"> {
+  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider" | "subagentPolicy"> {
   model: string;
   reasoningEffort?: ReasoningEffort;
   prompt: string;
@@ -195,10 +197,9 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   const cwd = opts.dir ? resolve(opts.dir) : process.cwd();
 
   // M6.1: print mode loads the same hooks as the TUI.
-  const workerTools = getWorkerTools(opts.workerProfile);
+  const baseWorkerTools = getWorkerTools(opts.workerProfile);
   const { HooksManager } = await import("./hooks/manager.js");
   const hooks = new HooksManager(cwd);
-  const executor = new ToolExecutor(workerTools, { hooks });
 
   // Resolve session
   const { sessionFile, isNew } = await resolveSession(opts);
@@ -206,19 +207,32 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     sessionFile.title = opts.title;
   }
 
+  const intent = classifyIntent(opts.prompt);
+  const delegationGuidance = await resolveSubagentGuidance({
+    prompt: opts.prompt,
+    tier: intent.tier,
+    policy: opts.subagentPolicy ?? "suggest",
+    apiKey: opts.openrouterApiKey,
+    customEndpoint: Boolean(opts.baseUrl),
+  });
+  const workerTools = baseWorkerTools.filter(
+    (tool) => tool.name !== "spawn_worker" || allowsSubagentDispatch(delegationGuidance.kind),
+  );
+  const executor = new ToolExecutor(workerTools, { hooks });
+
   // Build messages
   const messages: ChatMessage[] = [];
   if (isNew || sessionFile.messages.length === 0) {
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests, delegationDirective: delegationGuidance.directive }),
     });
   } else {
     // Continue: load existing messages, filter out old system prompts, keep context
     const nonSystem = sessionFile.messages.filter((m) => m.role !== "system");
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests, delegationDirective: delegationGuidance.directive }),
     });
     messages.push(...nonSystem);
   }
@@ -383,6 +397,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       ...auth,
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
+      delegationDirective: delegationGuidance.directive,
       sessionId: sessionFile.id,
       messages,
       tools: workerTools,
