@@ -38,6 +38,8 @@ import { usePermissionController } from "./ui/use-permission-controller.js";
 import { ResumePicker } from "./ui/resume-picker.js";
 import { CheckpointPicker } from "./ui/checkpoint-picker.js";
 import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
+import { QueuePlanPicker } from "./ui/queue-plan-picker.js";
+import { createQueueBatch, type QueuedPrompt } from "./agent/queue-batch.js";
 import { TaskList } from "./ui/task-list.js";
 import { WorkerList } from "./ui/worker-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
@@ -257,7 +259,8 @@ function App({
     hasFullscreenModal,
     hasAnyModal,
   } = modals;
-  const [queue, setQueue] = useState<Array<{ full: string; display: string; key: string }>>([]);
+  const [queue, setQueue] = useState<QueuedPrompt[]>([]);
+  const [queuePlanDraft, setQueuePlanDraft] = useState<QueuedPrompt[] | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [draftInput, setDraftInput] = useState("");
@@ -913,6 +916,7 @@ function App({
         resumeSessions !== null ||
         checkpointSession !== null ||
         planOptions !== null ||
+        queuePlanDraft !== null ||
         showThemePicker;
       if (!modalOpen && !isAbortingRef.current && now - lastEscapeAtRef.current > 500) {
         // Multi-agent cancel path: workers are in flight but there is no
@@ -1423,7 +1427,7 @@ function App({
   );
 
   const processMessage = useCallback(
-    async (text: string, displayText?: string, opts?: { queuedKey?: string }) => {
+    async (text: string, displayText?: string, opts?: { queuedKeys?: string[]; userPromptForHooks?: string }) => {
       if (!cfg) return;
       let trimmed = text.trim();
       if (!trimmed) return;
@@ -1438,7 +1442,7 @@ function App({
 
       const bangCommand = parseBangCommand(trimmed);
       if (bangCommand !== null) {
-        await runUserShellCommand(bangCommand, display, opts?.queuedKey);
+        await runUserShellCommand(bangCommand, display, opts?.queuedKeys?.[0]);
         endTurn();
         return;
       }
@@ -1521,11 +1525,12 @@ function App({
         }
       }
 
-      if (opts?.queuedKey) {
+      if (opts?.queuedKeys && opts.queuedKeys.length > 0) {
+        const queuedKeys = new Set(opts.queuedKeys);
         setEvents((evts) =>
           evts.map((e) =>
-            e.kind === "user" && e.key === opts.queuedKey
-              ? { ...e, text: display, images: images.length > 0 ? images : undefined, queued: false }
+            e.kind === "user" && queuedKeys.has(e.key)
+              ? { ...e, images: images.length > 0 ? images : e.images, queued: false }
               : e,
           ),
         );
@@ -1556,7 +1561,7 @@ function App({
             event: "UserPromptSubmit",
             session_id: sessionIdRef.current,
             cwd: process.cwd(),
-            prompt: display,
+            prompt: opts?.userPromptForHooks ?? display,
             tier: classification.tier,
           },
           null,
@@ -2383,18 +2388,53 @@ function App({
   );
 
   useEffect(() => {
-    if (!busy && queue.length > 0 && supervisorRef.current.phase === "idle") {
+    if (!busy && queuePlanDraft === null && queue.length > 0 && supervisorRef.current.phase === "idle") {
       const next = queue[0]!;
       setQueue((q) => q.slice(1));
-      processMessage(next.full, next.display, { queuedKey: next.key });
+      processMessage(next.full, next.display, {
+        queuedKeys: next.sourceKeys ?? [next.key],
+        ...(next.batchPrompts ? { userPromptForHooks: next.batchPrompts.join("\n\n") } : {}),
+      });
     }
-  }, [busy, queue, processMessage]);
+  }, [busy, queue, queuePlanDraft, processMessage]);
+
+  const handleQueuePlanPick = useCallback(
+    (choice: "group" | "separate" | null) => {
+      if (choice === "group" && queuePlanDraft) {
+        const batch = createQueueBatch(queuePlanDraft);
+        if (batch) {
+          setQueue([batch]);
+          setEvents((events) => [
+            ...events,
+            { kind: "info", key: mkKey(), text: `${batch.sourceKeys?.length ?? queuePlanDraft.length} queued follow-ups grouped into one coordinated turn.` },
+          ]);
+        }
+      }
+      setQueuePlanDraft(null);
+    },
+    [queuePlanDraft],
+  );
 
   const submit = useCallback(
     (full: string, display?: string) => {
       const trimmedFull = full.trim();
       if (!trimmedFull) return;
       const trimmedDisplay = (display ?? full).trim() || trimmedFull;
+
+      if (/^\/queue\s+plan$/i.test(trimmedFull)) {
+        const historyEntry = trimmedDisplay;
+        setHistory((h) => (h.length > 0 && h[h.length - 1] === historyEntry ? h : [...h, historyEntry]));
+        setInput("");
+        setHistoryIndex(-1);
+        if (queue.length < 2) {
+          setEvents((events) => [...events, { kind: "info", key: mkKey(), text: "Queue planning needs at least two queued chat prompts." }]);
+        } else if (!createQueueBatch(queue)) {
+          setEvents((events) => [...events, { kind: "info", key: mkKey(), text: "Queue planning only groups chat prompts; slash commands and ! shell commands stay in the FIFO queue." }]);
+        } else {
+          setQueuePlanDraft([...queue]);
+        }
+        return;
+      }
 
       const historyEntry = trimmedDisplay;
 
@@ -2413,7 +2453,7 @@ function App({
       setHistoryIndex(-1);
       processMessage(trimmedFull, trimmedDisplay !== trimmedFull ? trimmedDisplay : undefined);
     },
-    [processMessage],
+    [processMessage, queue],
   );
   submitRef.current = submit;
 
@@ -2722,6 +2762,8 @@ function App({
           />
         ) : showPlanCompletePicker ? (
           <PlanCompletePicker onPick={handlePlanCompletePick} />
+        ) : queuePlanDraft !== null ? (
+          <QueuePlanPicker prompts={queuePlanDraft} onPick={handleQueuePlanPick} />
         ) : (
           <Box flexDirection="column" marginTop={1}>
             {(activeWorkers.length > 0 || coordinatorNarration) && (
@@ -2741,6 +2783,11 @@ function App({
                     ⏳ {q.display}
                   </Text>
                 ))}
+                {queue.length > 1 && (
+                  <Text color={theme.info.color}>
+                    Type <Text bold>/queue plan</Text> to review and coordinate these follow-ups together.
+                  </Text>
+                )}
               </Box>
             )}
             <StatusBar
