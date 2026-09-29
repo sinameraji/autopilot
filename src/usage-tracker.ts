@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -8,6 +8,7 @@ import type { ResponseMeta } from "./agent/client.js";
 import { calculateCost } from "./pricing.js";
 import { fetchWithNetworkRetry, openRouterHeaders, openRouterUrl } from "./models/openrouter.js";
 import { RETENTION } from "./storage-limits.js";
+import { recoverJsonPrefix, withFileLock, writeFileAtomic } from "./util/atomic-file.js";
 
 const LOG_VERSION = 1;
 
@@ -151,26 +152,37 @@ function cutoffDate(daysBack: number): string {
 }
 
 async function loadLog(): Promise<UsageLog> {
+  let raw: string;
   try {
-    const raw = await readFile(usagePath(), "utf8");
-    const parsed = JSON.parse(raw) as UsageLog;
-    if (parsed.version === LOG_VERSION) return parsed;
+    raw = await readFile(usagePath(), "utf8");
   } catch {
-    /* no file or unreadable */
+    return { version: LOG_VERSION, days: [], sessions: [] };
   }
+  let parsed: UsageLog | undefined;
+  try {
+    parsed = JSON.parse(raw) as UsageLog;
+  } catch {
+    // Unparseable file (e.g. left by an older build's non-atomic write). Keep
+    // a copy and salvage what we can instead of starting from an empty log,
+    // which the next save would write over the user's whole cost history.
+    await rename(usagePath(), `${usagePath()}.corrupt-${Date.now()}`).catch(() => undefined);
+    parsed = recoverJsonPrefix(raw) as UsageLog | undefined;
+  }
+  if (parsed && parsed.version === LOG_VERSION) return parsed;
   return { version: LOG_VERSION, days: [], sessions: [] };
 }
 
 async function saveLog(log: UsageLog): Promise<void> {
-  await mkdir(usageDir(), { recursive: true });
-  await writeFile(usagePath(), JSON.stringify(log, null, 2), "utf8");
+  await writeFileAtomic(usagePath(), JSON.stringify(log, null, 2));
 }
 
-/** Serialize all read-modify-write operations on usage.json so concurrent
- *  recordUsage / reconcile calls don't clobber each other's edits. */
+/** Serialize all read-modify-write operations on usage.json and history.jsonl.
+ *  The promise chain orders calls within this process; the file lock orders
+ *  them across processes, since several autopilot sessions share these files. */
 let writeChain: Promise<unknown> = Promise.resolve();
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = writeChain.then(fn, fn);
+  const locked = () => withFileLock(`${usagePath()}.lock`, fn);
+  const next = writeChain.then(locked, locked);
   writeChain = next.catch(() => undefined);
   return next;
 }
@@ -209,8 +221,7 @@ async function upsertHistoryDay(day: DailyUsage): Promise<void> {
     entries.push(day);
   }
   const lines = entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
-  await mkdir(usageDir(), { recursive: true });
-  await writeFile(historyPath(), lines, "utf8");
+  await writeFileAtomic(historyPath(), lines);
 }
 
 function getOrCreateDay(log: UsageLog, date: string): DailyUsage {

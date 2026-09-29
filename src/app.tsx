@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Box, Text, useApp, useInput, useWindowSize, render } from "ink";
-import Spinner from "ink-spinner";
+import Spinner from "./ui/spinner.js";
 
 import { runAgentTurn, AgentLoopError, type GuardrailEvent } from "./agent/loop.js";
 import type { ResponseMeta } from "./agent/client.js";
@@ -1907,9 +1907,21 @@ function App({
         // Clear task list so it doesn't linger into the next turn
         clearTaskTracking();
 
-        // Mark any still-running tools as interrupted
+        // Settle everything the turn left in motion. Unsettled events keep
+        // themselves and everything after them in Ink's live tree, and their
+        // spinners animate forever, so a turn must never end with any.
         setEvents((evts) =>
-          evts.map((e) => (e.kind === "tool" && e.status === "running" ? { ...e, status: "error" as const, result: "(stopped)" } : e)),
+          evts.some((e) => (e.kind === "assistant" && e.streaming) || (e.kind === "tool" && (e.status === "running" || e.status === "queued")))
+            ? evts.map((e) =>
+                e.kind === "tool" && e.status === "running"
+                  ? { ...e, status: "error" as const, result: "(stopped)" }
+                  : e.kind === "tool" && e.status === "queued"
+                    ? { ...e, status: "cancelled" as const }
+                    : e.kind === "assistant" && e.streaming
+                      ? { ...e, streaming: false }
+                      : e,
+              )
+            : evts,
         );
       };
 

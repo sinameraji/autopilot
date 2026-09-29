@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
+import Spinner from "./spinner.js";
 import type { Usage } from "../agent/messages.js";
 import type { ResponseMeta } from "../agent/client.js";
 import { useTheme } from "./theme-context.js";

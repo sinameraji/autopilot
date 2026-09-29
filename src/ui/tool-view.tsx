@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
+import Spinner from "./spinner.js";
 import { DiffView } from "./diff-view.js";
 import { collapsePathsInText } from "../util/paths.js";
 import { useTheme } from "./theme-context.js";

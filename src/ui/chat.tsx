@@ -1,6 +1,6 @@
-import React from "react";
-import { Box, Text } from "ink";
-import Spinner from "ink-spinner";
+import React, { useRef } from "react";
+import { Box, Static, Text } from "ink";
+import Spinner from "./spinner.js";
 import { ToolView, type ToolEventState } from "./tool-view.js";
 import { MD } from "./markdown.js";
 import { useTheme } from "./theme-context.js";
@@ -55,6 +55,36 @@ function toolSignature(name: string, args: string): string {
   return `${name}:${args}`;
 }
 
+/** An event is settled once nothing about it will change on screen. */
+export function isSettled(e: ChatEvent): boolean {
+  if (e.kind === "assistant") return !e.streaming;
+  if (e.kind === "tool") return e.status !== "running" && e.status !== "queued";
+  if (e.kind === "user") return !e.queued;
+  return true;
+}
+
+export function firstUnsettledIndex(events: ChatEvent[]): number {
+  const i = events.findIndex((e) => !isSettled(e));
+  return i === -1 ? events.length : i;
+}
+
+/**
+ * <Static> only prints items past the count it has already printed. When the
+ * event list is replaced (/clear, /resume, compaction), remount it by bumping
+ * its key so the new list prints from the start instead of being skipped.
+ */
+function useStaticGeneration(events: ChatEvent[]): number {
+  const ref = useRef({ generation: 0, length: 0, firstKey: undefined as string | undefined });
+  const firstKey = events[0]?.key;
+  const r = ref.current;
+  if (events.length < r.length || (r.firstKey !== undefined && firstKey !== r.firstKey)) {
+    r.generation++;
+  }
+  r.length = events.length;
+  r.firstKey = firstKey;
+  return r.generation;
+}
+
 export const ChatView = React.memo(function ChatView({ events, showReasoning, verbose, intentTier }: Props) {
   const theme = useTheme();
 
@@ -80,29 +110,42 @@ export const ChatView = React.memo(function ChatView({ events, showReasoning, ve
     }
   }
 
-  return (
-    <Box flexDirection="column">
-      {events.map((e, i) => {
-        const prev = events[i - 1];
-        const showSeparator = !!(
-          prev &&
-          ((e.kind === "user" && prev.kind !== "user") ||
-            (e.kind === "assistant" && prev.kind !== "assistant" && prev.kind !== "tool"))
-        );
-        return (
-          <Box key={e.key} flexDirection="column">
-            {showSeparator && (
-              <Box marginY={1}>
-                <Text color={theme.info.color}>
-                  {"─".repeat(40)}
-                </Text>
-              </Box>
-            )}
-            <EventView evt={e} showReasoning={showReasoning} verbose={verbose} repeatedSigs={repeatedSigs} intentTier={intentTier} isLastAssistant={i === lastAssistantIndex} />
+  const renderEvent = (e: ChatEvent, i: number) => {
+    const prev = events[i - 1];
+    const showSeparator = !!(
+      prev &&
+      ((e.kind === "user" && prev.kind !== "user") ||
+        (e.kind === "assistant" && prev.kind !== "assistant" && prev.kind !== "tool"))
+    );
+    return (
+      <Box key={e.key} flexDirection="column">
+        {showSeparator && (
+          <Box marginY={1}>
+            <Text color={theme.info.color}>
+              {"─".repeat(40)}
+            </Text>
           </Box>
-        );
-      })}
-    </Box>
+        )}
+        <EventView evt={e} showReasoning={showReasoning} verbose={verbose} repeatedSigs={repeatedSigs} intentTier={intentTier} isLastAssistant={i === lastAssistantIndex} />
+      </Box>
+    );
+  };
+
+  // Everything before the first unsettled event is final: Ink prints it once
+  // through <Static> and never lays it out again. Only the tail stays in the
+  // live tree, so each re-render costs the same at minute 1 and at hour 27.
+  const split = firstUnsettledIndex(events);
+  const generation = useStaticGeneration(events);
+
+  return (
+    <>
+      <Static key={generation} items={events.slice(0, split)}>
+        {(e, i) => renderEvent(e, i)}
+      </Static>
+      <Box flexDirection="column">
+        {events.slice(split).map((e, j) => renderEvent(e, split + j))}
+      </Box>
+    </>
   );
 });
 
