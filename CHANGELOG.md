@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.2](https://github.com/sinameraji/autopilot/compare/v1.2.1...v1.2.2) (2026-09-29)
+
+
+### Bug Fixes
+
+* **agent:** never pause unattended runs on loop or iteration-cap guardrails ([#661](https://github.com/sinameraji/autopilot/issues/661)) ([db94c23](https://github.com/sinameraji/autopilot/commit/db94c232ddf300c64d0e148bd412702ab921867c))
+
+
+### Performance Improvements
+
+* **ui:** stop idle sessions from burning CPU ([#663](https://github.com/sinameraji/autopilot/issues/663)) ([654c6f2](https://github.com/sinameraji/autopilot/commit/654c6f27330f96028de2bb3698a12ce91a41dc68))
+
 ## [1.2.1](https://github.com/sinameraji/autopilot/compare/v1.2.0...v1.2.1) (2026-09-26)
 
 
