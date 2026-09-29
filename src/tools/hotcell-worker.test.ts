@@ -122,8 +122,8 @@ describe("Hotcell worker helpers", () => {
     assert.ok(!createArgs.includes("--setup"), "mandatory setup runs in exec so errors are not swallowed by Hotcell's best-effort setup hook");
     const command = calls[1]!.args[2]!;
     assert.ok(command.includes('find /workspace -mindepth 2 -maxdepth 5 -name .git'));
-    assert.ok(command.includes(`git -C "$REPO_ROOT" fetch origin '${repo.commit}'`));
-    assert.ok(command.includes(`git -C "$REPO_ROOT" checkout --detach '${repo.commit}'`));
+    assert.ok(command.includes(`git -C "$REPO_ROOT" fetch --quiet origin '${repo.commit}'`));
+    assert.ok(command.includes(`git -C "$REPO_ROOT" checkout --quiet --detach '${repo.commit}'`));
     assert.ok(command.includes("npm ci --no-audit --no-fund --loglevel=error 1>&2"));
     assert.ok(command.includes("npm run build 1>&2"));
     assert.ok(command.includes('node "$REPO_ROOT/bin/autopilot.mjs"'));
