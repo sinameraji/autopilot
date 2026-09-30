@@ -30,6 +30,10 @@ export interface ToolContext {
   model?: string;
   /** Optional override for the durable managed-jobs database (primarily for embedding/tests). */
   jobsDbPath?: string;
+  /** Run identifier for durable tool-boundary journaling in unattended runs. */
+  runId?: string;
+  /** Optional override for the durable run/event/timer database. */
+  runsDbPath?: string;
   /** When false (default), the bash tool blocks `git push` to the repository's
    *  default branch and directs the model to open a PR instead. */
   allowDirectPush?: boolean;

@@ -22,6 +22,7 @@ import { makeExpandArtifactTool } from "./expand-artifact.js";
 import { jobStartTool, jobStatusTool, jobLogsTool, jobCancelTool } from "./jobs.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { RunStore } from "../runs/store.js";
 
 export const ALL_TOOLS: ToolSpec[] = [
   { ...readTool, isReadOnly: true },
@@ -384,9 +385,21 @@ export class ToolExecutor {
       }
     }
 
+    let runStore: RunStore | null = null;
+    let intentRecorded = false;
+    let toolCompleted = false;
     try {
+      if (ctx.runId) {
+        runStore = new RunStore(ctx.runsDbPath);
+        runStore.recordToolIntent(ctx.runId, call.id, call.name, args);
+        intentRecorded = true;
+      }
       const result = await tool.run(args as never, ctx);
+      toolCompleted = true;
       const normalized = normalizeToolOutput(result);
+      if (runStore && ctx.runId) {
+        runStore.recordToolResult(ctx.runId, call.id, call.name, { ok: true, content: normalized.content });
+      }
 
       // Notify LSP document sync bridge on write/edit
       if (onFileChange) {
@@ -450,8 +463,17 @@ export class ToolExecutor {
         recoverable: err.recoverable,
         suggestion: err.suggestion,
       };
+      if (runStore && ctx.runId && intentRecorded && !toolCompleted) {
+        try {
+          runStore.recordToolResult(ctx.runId, call.id, call.name, { ok: false, content: msg, errorCode: err.code });
+        } catch {
+          // Preserve the tool error; an unmatched intent is recovered as unknown.
+        }
+      }
       this.firePostToolUse(call, args, failure, ctx);
       return failure;
+    } finally {
+      runStore?.close();
     }
   }
 
