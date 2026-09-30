@@ -76,8 +76,8 @@ describe("RunStore", () => {
   }));
 
   it("reclaims an expired timer lease and completes it exactly once", async () => withFixture(({ dir, store }) => {
-    const run = store.createRun({ task: "Wait for approval", cwd: dir });
-    const timer = store.scheduleTimer({ runId: run.id, condition: "approval", wakeAt: 1 });
+    const run = store.createRun({ task: "Wait for time", cwd: dir });
+    const timer = store.scheduleTimer({ runId: run.id, condition: "time", wakeAt: 1 });
     assert.equal(store.claimDueTimers(1, 1, 10)[0]?.attempts, 1);
     assert.equal(store.claimDueTimers(10).length, 0);
     const reclaimed = store.claimDueTimers(11)[0];

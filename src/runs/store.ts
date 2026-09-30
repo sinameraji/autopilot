@@ -38,6 +38,7 @@ export interface RunTimer {
   condition: TimerCondition;
   jobId: string | null;
   wakeAt: number;
+  intervalMs: number;
   status: TimerStatus;
   attempts: number;
   maxAttempts: number;
@@ -65,6 +66,7 @@ interface TimerRow extends Record<string, unknown> {
   condition_type: TimerCondition;
   job_id: string | null;
   wake_at: number;
+  interval_ms: number;
   status: TimerStatus;
   attempts: number;
   max_attempts: number;
@@ -133,6 +135,7 @@ export class RunStore {
         condition_type TEXT NOT NULL,
         job_id TEXT,
         wake_at INTEGER NOT NULL,
+        interval_ms INTEGER NOT NULL DEFAULT 10000,
         status TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0,
         max_attempts INTEGER NOT NULL DEFAULT 5,
@@ -143,6 +146,10 @@ export class RunStore {
       CREATE INDEX IF NOT EXISTS idx_run_timers_due ON run_timers(status, wake_at);
       CREATE INDEX IF NOT EXISTS idx_run_timers_run ON run_timers(run_id, status);
     `);
+    const timerColumns = this.db.prepare("PRAGMA table_info(run_timers)").all() as Array<{ name: string }>;
+    if (!timerColumns.some((column) => column.name === "interval_ms")) {
+      this.db.exec("ALTER TABLE run_timers ADD COLUMN interval_ms INTEGER NOT NULL DEFAULT 10000");
+    }
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
 
@@ -266,6 +273,7 @@ export class RunStore {
     runId: string;
     condition: TimerCondition;
     wakeAt: number;
+    intervalMs?: number;
     jobId?: string;
     maxAttempts?: number;
   }): RunTimer {
@@ -275,19 +283,53 @@ export class RunStore {
     if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 100) {
       throw new Error("maxAttempts must be an integer from 1 through 100");
     }
+    const intervalMs = input.intervalMs ?? 10_000;
+    if (!Number.isInteger(intervalMs) || intervalMs < 1000 || intervalMs > 7 * 24 * 60 * 60 * 1000) {
+      throw new Error("intervalMs must be an integer from 1000 through 604800000");
+    }
     this.assertRunExists(input.runId);
     const id = randomUUID();
     const now = Date.now();
     this.db.prepare(`INSERT INTO run_timers
-      (id, run_id, condition_type, job_id, wake_at, status, max_attempts, created_at)
-      VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?)`)
-      .run(id, input.runId, input.condition, input.jobId ?? null, Math.trunc(input.wakeAt), maxAttempts, now);
+      (id, run_id, condition_type, job_id, wake_at, interval_ms, status, max_attempts, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'scheduled', ?, ?)`)
+      .run(id, input.runId, input.condition, input.jobId ?? null, Math.trunc(input.wakeAt), intervalMs, maxAttempts, now);
     return this.getTimer(id)!;
   }
 
   getTimer(id: string): RunTimer | undefined {
     const row = this.db.prepare("SELECT * FROM run_timers WHERE id = ?").get(id) as TimerRow | undefined;
     return row ? rowToTimer(row) : undefined;
+  }
+
+  nextTimerAt(): number | null {
+    const row = this.db.prepare(`SELECT MIN(CASE WHEN status = 'scheduled' THEN wake_at ELSE lease_until END) AS next_at
+      FROM run_timers WHERE status IN ('scheduled', 'claimed') AND condition_type IN ('time', 'job')`).get() as { next_at: number | null };
+    return row.next_at;
+  }
+
+  listFailedTimers(limit = 100): RunTimer[] {
+    const rows = this.db.prepare(`SELECT t.* FROM run_timers t
+      JOIN runs r ON r.id = t.run_id
+      WHERE t.status = 'failed' AND r.status = 'waiting'
+      ORDER BY t.wake_at LIMIT ?`)
+      .all(Math.max(1, Math.min(500, Math.trunc(limit)))) as TimerRow[];
+    return rows.map(rowToTimer);
+  }
+
+  /** Reschedule a successful job-status check without consuming failure retries. */
+  rescheduleTimer(id: string, wakeAt: number): RunTimer {
+    const transaction = this.db.transaction(() => {
+      const timer = this.getTimer(id);
+      if (!timer) throw new Error(`Timer not found: ${id}`);
+      if (timer.status !== "claimed" || timer.condition !== "job") {
+        throw new Error(`Timer ${id} is not a claimed job timer`);
+      }
+      this.db.prepare(`UPDATE run_timers SET status = 'scheduled', wake_at = ?, attempts = 0,
+        lease_until = NULL, last_error = NULL WHERE id = ?`).run(Math.trunc(wakeAt), id);
+      return this.getTimer(id)!;
+    });
+    return transaction.immediate();
   }
 
   /** Atomically lease timers due now; expired claims are safely retried. */
@@ -300,6 +342,7 @@ export class RunStore {
       const rows = this.db.prepare(`SELECT * FROM run_timers
         WHERE ((status = 'scheduled' AND wake_at <= ?)
            OR (status = 'claimed' AND lease_until <= ?))
+          AND condition_type IN ('time', 'job')
           AND attempts < max_attempts
         ORDER BY wake_at LIMIT ?`).all(now, now, cappedLimit) as TimerRow[];
       const update = this.db.prepare(`UPDATE run_timers SET status = 'claimed', attempts = attempts + 1, lease_until = ?
@@ -409,6 +452,7 @@ function rowToTimer(row: TimerRow): RunTimer {
     condition: row.condition_type,
     jobId: row.job_id,
     wakeAt: row.wake_at,
+    intervalMs: row.interval_ms,
     status: row.status,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
