@@ -2041,7 +2041,7 @@ function App({
           reasoningEffort: turnReasoningEffort,
           coauthor:
             cfg.coauthor !== false
-              ? { name: cfg.coauthorName || "kimiflare", email: cfg.coauthorEmail || "kimiflare@proton.me" }
+              ? { name: cfg.coauthorName || "autopilot", email: cfg.coauthorEmail || "kimiflare@proton.me" }
               : undefined,
           sessionId: ensureSessionId(),
           memoryManager: memoryManagerRef.current,

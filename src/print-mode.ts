@@ -411,7 +411,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       maxInputTokens: opts.maxInputTokens,
       coauthor:
         opts.coauthor !== false
-          ? { name: opts.coauthorName || "kimiflare", email: opts.coauthorEmail || "kimiflare@proton.me" }
+          ? { name: opts.coauthorName || "autopilot", email: opts.coauthorEmail || "kimiflare@proton.me" }
           : undefined,
       allowDirectPush: opts.allowDirectPush,
       preferPullRequests: opts.preferPullRequests,
