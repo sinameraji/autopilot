@@ -76,6 +76,10 @@ export interface AgentTurnOpts extends LlmAuth {
   reasoningEffort?: "low" | "medium" | "high";
   coauthor?: { name: string; email: string };
   sessionId?: string;
+  /** Durable unattended-run identity; enables tool boundary journaling. */
+  runId?: string;
+  /** Optional override for the durable run/event/timer database. */
+  runsDbPath?: string;
   githubToken?: string;
   /** Drop image_url parts from user messages older than this many turns. */
   keepLastImageTurns?: number;
@@ -920,6 +924,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               llmAuth: llmAuthOf(opts),
               model: opts.model,
               allowDirectPush: opts.allowDirectPush,
+              runId: opts.runId,
+              runsDbPath: opts.runsDbPath,
             },
             opts.onFileChange,
           );
@@ -1308,6 +1314,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             llmAuth: llmAuthOf(opts),
             model: opts.model,
             allowDirectPush: opts.allowDirectPush,
+            runId: opts.runId,
+            runsDbPath: opts.runsDbPath,
           },
           opts.onFileChange,
         );
