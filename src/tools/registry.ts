@@ -45,10 +45,20 @@ export interface ToolRender {
   diff?: { path: string; before: string; after: string };
 }
 
+export interface RunWaitRequest {
+  runId: string;
+  timerId: string;
+  condition: "time" | "job";
+  jobId?: string;
+  wakeAt: number;
+}
+
 export interface ToolOutput {
   content: string;
   rawBytes: number;
   reducedBytes: number;
+  /** Internal control signal: persist the wait and end this agent turn. */
+  waitRequest?: RunWaitRequest;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

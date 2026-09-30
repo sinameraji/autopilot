@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { JobManager } from "../jobs/manager.js";
 import { RunStore } from "./store.js";
 import { ToolExecutor } from "../tools/executor.js";
+import { waitForTool } from "../tools/wait-for.js";
 import type { ToolSpec } from "../tools/registry.js";
 
 const allow = async () => "allow" as const;
@@ -44,6 +46,38 @@ describe("run tool-boundary journal", () => {
     }
   });
 
+  it("schedules a supervisor re-check when waiting on an active managed job", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-run-job-wait-"));
+    const runsDbPath = join(dir, "runs.db");
+    const jobsDbPath = join(dir, "jobs.db");
+    const store = new RunStore(runsDbPath);
+    const jobs = new JobManager(jobsDbPath);
+    try {
+      const run = store.createRun({ task: "Wait for the command", cwd: dir });
+      store.transition(run.id, "running");
+      const job = jobs.start({ command: "sleep 30", cwd: dir, shell: "bash", shellArgs: ["-lc"] });
+      const executor = new ToolExecutor([waitForTool]);
+      const result = await executor.run(
+        { id: "call-job-wait", name: "wait_for", arguments: JSON.stringify({ job_id: job.id, poll_interval_ms: 1000 }) },
+        allow,
+        { cwd: dir, runId: run.id, runsDbPath, jobsDbPath },
+      );
+
+      assert.equal(result.waitRequest?.condition, "job");
+      assert.equal(result.waitRequest?.jobId, job.id);
+      const timer = store.getTimer(result.waitRequest!.timerId);
+      assert.equal(timer?.condition, "job");
+      assert.equal(timer?.jobId, job.id);
+      assert.equal(store.getRun(run.id)?.status, "waiting");
+    } finally {
+      const record = jobs.get(jobs.list({ cwd: dir })[0]?.id ?? "");
+      if (record && ["starting", "running"].includes(record.status)) jobs.cancel(record.id);
+      jobs.close();
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("records a failure result when an executed tool throws", async () => {
     const dir = mkdtempSync(join(tmpdir(), "autopilot-run-journal-"));
     const dbPath = join(dir, "runs.db");
@@ -69,6 +103,34 @@ describe("run tool-boundary journal", () => {
       const events = store.listEvents(run.id);
       assert.equal(events.at(-1)?.type, "tool_result");
       assert.equal(events.at(-1)?.metadata.ok, false);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists wait_for and yields the run before another model turn", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-run-wait-"));
+    const dbPath = join(dir, "runs.db");
+    const store = new RunStore(dbPath);
+    try {
+      const run = store.createRun({ task: "Wait without polling", cwd: dir });
+      store.transition(run.id, "running");
+      const executor = new ToolExecutor([waitForTool]);
+      const result = await executor.run(
+        { id: "call-wait", name: "wait_for", arguments: '{"duration_ms":1000}' },
+        allow,
+        { cwd: dir, runId: run.id, runsDbPath: dbPath },
+      );
+
+      assert.equal(result.ok, true);
+      assert.equal(result.waitRequest?.runId, run.id);
+      assert.ok(result.waitRequest?.timerId);
+      assert.equal(store.getRun(run.id)?.status, "waiting");
+      assert.equal(store.getTimer(result.waitRequest!.timerId)?.status, "scheduled");
+      assert.deepEqual(store.listEvents(run.id).map((event) => event.type), [
+        "state", "state", "tool_intent", "tool_result", "state",
+      ]);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
