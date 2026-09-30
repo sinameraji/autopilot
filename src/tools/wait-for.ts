@@ -46,6 +46,7 @@ export const waitForTool: ToolSpec<WaitArgs> = {
     let condition: "job" | "time";
     let jobId: string | undefined;
     let wakeAt: number;
+    let intervalMs = DEFAULT_JOB_POLL_MS;
     if (hasJob) {
       jobId = args.job_id;
       const jobs = new JobManager(ctx.jobsDbPath);
@@ -59,8 +60,9 @@ export const waitForTool: ToolSpec<WaitArgs> = {
       if (!Number.isInteger(interval) || interval < 1000 || interval > 300000) {
         throw new Error("poll_interval_ms must be an integer from 1000 through 300000");
       }
+      intervalMs = interval;
       condition = "job";
-      wakeAt = now + interval;
+      wakeAt = now + intervalMs;
     } else if (hasDuration) {
       const duration = args.duration_ms!;
       if (!Number.isInteger(duration) || duration < 1000 || duration > MAX_WAIT_MS) {
@@ -79,7 +81,7 @@ export const waitForTool: ToolSpec<WaitArgs> = {
 
     const runs = new RunStore(ctx.runsDbPath);
     try {
-      const timer = runs.scheduleTimer({ runId: ctx.runId, condition, jobId, wakeAt });
+      const timer = runs.scheduleTimer({ runId: ctx.runId, condition, jobId, wakeAt, intervalMs });
       const content = condition === "job"
         ? `Yielding run ${ctx.runId} until the supervisor re-checks job ${jobId} at ${new Date(wakeAt).toISOString()}. Timer ${timer.id}.`
         : `Yielding run ${ctx.runId} until ${new Date(wakeAt).toISOString()}. Timer ${timer.id}.`;

@@ -4,6 +4,8 @@ export * from "./types.js";
 export { createDefaultPermissionHandler } from "./permissions.js";
 export { startRpcServer } from "./rpc.js";
 export { RunStore } from "../runs/store.js";
+export { RunWakeScheduler } from "../runs/wake-scheduler.js";
+export type { RunWakeEvent, RunWakeSchedulerOptions } from "../runs/wake-scheduler.js";
 export type { RunRecord, RunEvent, RunTimer, RunStatus, RunEventType, TimerCondition, TimerStatus } from "../runs/store.js";
 export { resolveSdkConfig, loadConfig, saveConfig, DEFAULT_MODEL, DEFAULT_REASONING_EFFORT } from "./config.js";
 export type { KimiConfig } from "./config.js";
