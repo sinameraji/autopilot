@@ -126,13 +126,20 @@ type Write = typeof process.stdout.write;
  * buffering) until the stream's highWaterMark fills. Node restarts the read
  * by itself (`Socket#_read` → `readStart`) the next time a consumer reads.
  */
-function stopReading(stdin: NodeJS.ReadStream): void {
+export function stopReading(stdin: NodeJS.ReadStream): void {
   stdin.pause();
-  const handle = (stdin as unknown as { _handle?: { reading?: boolean; readStop?: () => number } })._handle;
+  const stream = stdin as unknown as {
+    _handle?: { reading?: boolean; readStop?: () => number };
+    _readableState?: { reading?: boolean };
+  };
   try {
-    if (handle?.reading && handle.readStop) {
-      handle.readStop();
-      handle.reading = false;
+    if (stream._handle?.reading && stream._handle.readStop) {
+      stream._handle.readStop();
+      stream._handle.reading = false;
+      // Keep Node's Readable state in sync with the stopped libuv handle.
+      // Otherwise reattaching Ink's `readable` listener leaves `reading` true,
+      // suppressing _read() forever and making the prompt appear frozen.
+      if (stream._readableState) stream._readableState.reading = false;
     }
   } catch {
     // best-effort: worst case the parent competes for a few keystrokes

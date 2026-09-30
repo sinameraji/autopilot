@@ -5,6 +5,7 @@ import {
   formatBangContext,
   parseBangCommand,
   scriptInvocation,
+  stopReading,
   truncateMiddle,
 } from "./bang-command.js";
 
@@ -39,6 +40,32 @@ describe("scriptInvocation", () => {
 
   it("returns null where script(1) isn't available", () => {
     assert.strictEqual(scriptInvocation("dir", "cmd.exe", "x.log", "win32"), null);
+  });
+});
+
+describe("stopReading", () => {
+  it("clears Node's readable-state latch when stopping the TTY handle", () => {
+    let readStopped = false;
+    const stdin = {
+      pause() {},
+      _handle: {
+        reading: true,
+        readStop() {
+          readStopped = true;
+          return 0;
+        },
+      },
+      _readableState: { reading: true },
+    } as unknown as NodeJS.ReadStream;
+
+    stopReading(stdin);
+
+    assert.strictEqual(readStopped, true);
+    assert.strictEqual((stdin as unknown as { _handle: { reading: boolean } })._handle.reading, false);
+    assert.strictEqual(
+      (stdin as unknown as { _readableState: { reading: boolean } })._readableState.reading,
+      false,
+    );
   });
 });
 
