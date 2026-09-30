@@ -28,6 +28,8 @@ export interface ToolContext {
   llmAuth?: import("../agent/llm-auth.js").LlmAuth;
   /** Model id for tools that need to call an LLM. */
   model?: string;
+  /** Optional override for the durable managed-jobs database (primarily for embedding/tests). */
+  jobsDbPath?: string;
   /** When false (default), the bash tool blocks `git push` to the repository's
    *  default branch and directs the model to open a PR instead. */
   allowDirectPush?: boolean;
