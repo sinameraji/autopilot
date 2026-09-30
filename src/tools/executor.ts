@@ -1,4 +1,4 @@
-import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
+import type { ToolSpec, ToolContext, ToolOutput, RunWaitRequest } from "./registry.js";
 import { wrapAsToolError, type ToolErrorCode } from "./tool-error.js";
 import type { HooksManager } from "../hooks/manager.js";
 import { readTool } from "./read.js";
@@ -20,6 +20,7 @@ import { ToolArtifactStore } from "./artifact-store.js";
 import { reduceToolOutput, DEFAULT_REDUCER_CONFIG } from "./reducer.js";
 import { makeExpandArtifactTool } from "./expand-artifact.js";
 import { jobStartTool, jobStatusTool, jobLogsTool, jobCancelTool } from "./jobs.js";
+import { waitForTool } from "./wait-for.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { RunStore } from "../runs/store.js";
@@ -51,6 +52,7 @@ export const ALL_TOOLS: ToolSpec[] = [
   jobStatusTool,
   jobLogsTool,
   jobCancelTool,
+  waitForTool,
 ];
 
 export const RESEARCH_WORKER_TOOL_NAMES = new Set([
@@ -230,6 +232,8 @@ export interface ToolResult {
   recoverable?: boolean;
   /** Optional one-line UI hint describing how to recover. */
   suggestion?: string;
+  /** Durable wait signal that ends the current agent turn after persisting state. */
+  waitRequest?: RunWaitRequest;
 }
 
 /** Cap on `result.content` bytes carried in the PostToolUse hook
@@ -400,6 +404,12 @@ export class ToolExecutor {
       if (runStore && ctx.runId) {
         runStore.recordToolResult(ctx.runId, call.id, call.name, { ok: true, content: normalized.content });
       }
+      if (normalized.waitRequest) {
+        if (!ctx.runId || normalized.waitRequest.runId !== ctx.runId || !runStore) {
+          throw new Error("wait_for yield signal does not match an active durable run");
+        }
+        runStore.transition(ctx.runId, "waiting", `timer:${normalized.waitRequest.timerId}`);
+      }
 
       // Notify LSP document sync bridge on write/edit
       if (onFileChange) {
@@ -446,6 +456,7 @@ export class ToolExecutor {
         rawBytes: reduced.rawBytes,
         reducedBytes: reduced.reducedBytes,
         artifactId: reduced.artifactId,
+        ...(normalized.waitRequest ? { waitRequest: normalized.waitRequest } : {}),
       };
       this.firePostToolUse(call, args, success, ctx);
       return success;
