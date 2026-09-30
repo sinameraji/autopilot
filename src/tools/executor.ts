@@ -19,6 +19,7 @@ import { presentPlanOptionsTool } from "./plan-options.js";
 import { ToolArtifactStore } from "./artifact-store.js";
 import { reduceToolOutput, DEFAULT_REDUCER_CONFIG } from "./reducer.js";
 import { makeExpandArtifactTool } from "./expand-artifact.js";
+import { jobStartTool, jobStatusTool, jobLogsTool, jobCancelTool } from "./jobs.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
@@ -45,6 +46,10 @@ export const ALL_TOOLS: ToolSpec[] = [
   memoryForgetTool,
   spawnWorkerTool,
   { ...presentPlanOptionsTool, isReadOnly: true },
+  jobStartTool,
+  jobStatusTool,
+  jobLogsTool,
+  jobCancelTool,
 ];
 
 export const RESEARCH_WORKER_TOOL_NAMES = new Set([
