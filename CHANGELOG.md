@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/sinameraji/autopilot/compare/v1.8.0...v1.9.0) (2026-10-01)
+
+
+### Features
+
+* **init:** generate AGENTS.md project context ([8d147ab](https://github.com/sinameraji/autopilot/commit/8d147ab95d8c5cd6dbc4ded8c588173a7cc7d4a4))
+* **init:** generate AGENTS.md project context ([ed784d2](https://github.com/sinameraji/autopilot/commit/ed784d2357ebd73e79035a88a716a05c40409a40))
+
 ## [1.8.0](https://github.com/sinameraji/autopilot/compare/v1.7.1...v1.8.0) (2026-10-01)
 
 
