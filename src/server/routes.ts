@@ -12,6 +12,7 @@ import { runAgentTurn } from "../agent/loop.js";
 import type { AgentCallbacks } from "../agent/loop.js";
 import { buildSystemPrompt } from "../agent/system-prompt.js";
 import { ToolExecutor, ALL_TOOLS } from "../tools/executor.js";
+import type { PermissionDecision, PermissionRequest } from "../tools/executor.js";
 import type { ChatMessage, ContentPart } from "../agent/messages.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "../sessions.js";
 import { logger } from "../util/logger.js";
@@ -26,6 +27,8 @@ import { RunStore } from "../runs/store.js";
 import { RunWorktreeManager, type RunWorktree } from "../runs/worktrees.js";
 import { RunWakeScheduler, type RunWakeEvent } from "../runs/wake-scheduler.js";
 import type { RunRecord } from "../runs/store.js";
+import { AsterApi } from "./aster-api.js";
+import { redactLikelySecrets } from "./aster-tools.js";
 
 interface ActiveSession {
   sessionFile: SessionFile;
@@ -38,6 +41,11 @@ interface ActiveSession {
   maxRuntimeMs?: number;
   controller?: AbortController;
   running?: boolean;
+  conversationId?: string;
+  workspaceRoot?: string;
+  askAsterPermission?: (request: PermissionRequest) => Promise<PermissionDecision>;
+  publishAsterEvent?: (type: string, data: Record<string, unknown>) => void;
+  finishAsterTurn?: (status: "completed" | "failed" | "cancelled", reason?: string) => void;
 }
 
 const activeSessions = new Map<string, ActiveSession>();
@@ -127,6 +135,30 @@ async function buildUserMessage(prompt: string, files: string[], cwd: string): P
 }
 
 export function setupRoutes(config: KimiConfig) {
+  const asterApi = new AsterApi(config, {
+    startTurn: (turn) => {
+      const active: ActiveSession = {
+        sessionFile: turn.sessionFile,
+        messages: turn.messages,
+        executor: turn.executor,
+        sseClients: new Set(),
+        runId: turn.runId,
+        allowedTools: turn.allowedTools,
+        maxToolIterations: turn.maxToolIterations,
+        maxRuntimeMs: turn.maxRuntimeMs,
+        conversationId: turn.conversation.id,
+        workspaceRoot: turn.conversation.worktreePath,
+        askAsterPermission: turn.askPermission,
+        publishAsterEvent: turn.publishEvent,
+        finishAsterTurn: turn.finish,
+      };
+      activeSessions.set(turn.sessionFile.id, active);
+      activeRuns.set(turn.runId, active);
+      launchAgentTurnForSession(active, config, false);
+    },
+    cancelRun: (runId) => activeRuns.get(runId)?.controller?.abort(new Error("cancelled_by_aster_client")),
+  });
+
   const wakeScheduler = new RunWakeScheduler({
     onWake: async (event: RunWakeEvent) => {
       const store = new RunStore();
@@ -170,6 +202,11 @@ export function setupRoutes(config: KimiConfig) {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const method = req.method ?? "GET";
     const pathname = url.pathname;
+
+    if (pathname.startsWith("/api/v1/")) {
+      await asterApi.handle(req, res);
+      return;
+    }
 
     try {
       // Health check
@@ -573,6 +610,7 @@ export function setupRoutes(config: KimiConfig) {
     }
     activeRuns.clear();
     activeSessions.clear();
+    asterApi.close();
   }
 
   return { handleRequest, cleanup };
@@ -581,7 +619,10 @@ export function setupRoutes(config: KimiConfig) {
 function launchAgentTurnForSession(active: ActiveSession, config: KimiConfig, allowAll: boolean): void {
   void runAgentTurnForSession(active, config, allowAll).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
-    logger.error("server: agent turn startup failed", { sessionId: active.sessionFile.id, error: message });
+    logger.error("server: agent turn startup failed", {
+      sessionId: active.sessionFile.id,
+      error: active.conversationId ? "aster_agent_start_failed" : redactLikelySecrets(message),
+    });
     active.running = false;
     active.controller = undefined;
     if (!active.runId) return;
@@ -590,7 +631,7 @@ function launchAgentTurnForSession(active: ActiveSession, config: KimiConfig, al
       try {
         const run = store.getRun(active.runId);
         if (run && ["queued", "running", "waiting"].includes(run.status)) {
-          store.transition(run.id, "failed", `server_turn_start_failed:${message}`.slice(0, 500));
+          store.transition(run.id, "failed", active.conversationId ? "aster_agent_start_failed" : `server_turn_start_failed:${redactLikelySecrets(message)}`.slice(0, 500));
           store.cancelTimersForRun(run.id);
         }
       } finally {
@@ -599,7 +640,7 @@ function launchAgentTurnForSession(active: ActiveSession, config: KimiConfig, al
     } catch (storeError) {
       logger.error("server: failed to record agent startup failure", {
         runId: active.runId,
-        error: storeError instanceof Error ? storeError.message : String(storeError),
+        error: active.conversationId ? "aster_run_state_update_failed" : storeError instanceof Error ? redactLikelySecrets(storeError.message) : "unknown",
       });
     }
   });
@@ -621,6 +662,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
     if (!run || run.status !== "running") {
       runStore.close();
       active.running = false;
+      active.finishAsterTurn?.("failed", "run_not_active");
       return;
     }
     const elapsed = run.startedAt ? Date.now() - run.startedAt : 0;
@@ -631,11 +673,15 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
 
   const callbacks: AgentCallbacks = {
     onTextDelta: (delta) => {
+      if (active.publishAsterEvent) active.publishAsterEvent("assistant.delta", { delta: redactLikelySecrets(delta) });
       for (const client of active.sseClients) {
         client.send("assistant.delta", { delta });
       }
     },
     onToolCallFinalized: (call) => {
+      if (active.publishAsterEvent) {
+        active.publishAsterEvent("tool.activity", { tool: call.function.name, activity: "proposed" });
+      }
       for (const client of active.sseClients) {
         client.send("tool.call", {
           id: call.id,
@@ -645,6 +691,9 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       }
     },
     onToolResult: (result) => {
+      if (active.publishAsterEvent) {
+        active.publishAsterEvent("tool.activity", { tool: result.name, activity: result.ok ? "completed" : "failed", ok: result.ok });
+      }
       for (const client of active.sseClients) {
         client.send("tool.result", {
           toolCallId: result.tool_call_id,
@@ -655,6 +704,14 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       }
     },
     onUsage: (usage) => {
+      if (active.publishAsterEvent) {
+        active.publishAsterEvent("usage", {
+          promptTokens: usage.prompt_tokens,
+          completionTokens: usage.completion_tokens,
+          totalTokens: usage.total_tokens,
+          ...(usage.cost !== undefined ? { costUsd: usage.cost } : {}),
+        });
+      }
       for (const client of active.sseClients) {
         client.send("usage.update", {
           promptTokens: usage.prompt_tokens,
@@ -673,6 +730,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       if (result.budgetExceededReason) throw new Error(result.budgetExceededReason);
     },
     onWarning: (msg) => {
+      if (active.publishAsterEvent) active.publishAsterEvent("status", { detail: redactLikelySecrets(msg) });
       for (const client of active.sseClients) {
         client.send("warning", { message: msg });
       }
@@ -680,9 +738,11 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
     onRunYield: (request) => {
       if (!runStore || !active.runId || request.runId !== active.runId) return;
       runStore.transition(active.runId, "waiting", `timer:${request.timerId}`);
+      active.publishAsterEvent?.("status", { status: "waiting", condition: request.condition, wakeAt: request.wakeAt });
       yielded = true;
     },
-    askPermission: async ({ tool, args }) => {
+    askPermission: async ({ tool, args, sessionKey }) => {
+      if (active.askAsterPermission) return active.askAsterPermission({ tool, args, sessionKey });
       if (active.runId) {
         if (active.allowedTools?.has(tool.name)) return "allow";
         return "deny";
@@ -770,12 +830,14 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       const current = runStore.getRun(active.runId);
       if (current?.status === "running" && !yielded) runStore.transition(active.runId, "completed");
     }
+    active.finishAsterTurn?.("completed");
 
     for (const client of active.sseClients) {
       client.send("session.completed", { sessionId: sessionFile.id });
     }
   } catch (err) {
-    const message = (err as Error).message;
+    const rawMessage = (err as Error).message;
+    const message = active.conversationId ? "aster_agent_turn_failed" : redactLikelySecrets(rawMessage);
     logger.error("server: agent turn failed", { sessionId: sessionFile.id, error: message });
     if (runStore && active.runId) {
       const current = runStore.getRun(active.runId);
@@ -785,6 +847,11 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
           : message;
         runStore.transition(active.runId, "failed", reason);
       }
+    }
+    if (active.finishAsterTurn) {
+      const runStatus = active.runId ? runStore?.getRun(active.runId)?.status : undefined;
+      const finalStatus = runStatus === "cancelled" ? "cancelled" : runStatus === "completed" ? "completed" : "failed";
+      active.finishAsterTurn(finalStatus, finalStatus === "failed" ? "agent_turn_failed" : undefined);
     }
     for (const client of active.sseClients) {
       client.send("error", { message, sessionId: sessionFile.id });
