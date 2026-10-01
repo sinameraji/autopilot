@@ -1,4 +1,5 @@
 import { Command, Option } from "commander";
+import { logger } from "./util/logger.js";
 import { loadConfig, DEFAULT_MODEL, type KimiConfig } from "./config.js";
 import { resolveLspConfig } from "./util/lsp-config.js";
 import { checkForUpdate } from "./util/update-check.js";
@@ -28,7 +29,8 @@ program
   .option("--max-input-tokens <n>", "cumulative prompt token budget; exits 42 when exhausted (print mode only)", (v) => parseInt(v, 10))
   .option("--emit-events", "emit Camouflage NDJSON events to stdout; requires -p (for initial prompt)")
   .option("--multi-turn", "with --emit-events: keep reading stdin for UserInputSubmitted follow-ups after the initial turn")
-  .option("--ui <name>", "interface: ink (default) or camouflage (experimental inline renderer). Also KIMIFLARE_UI.")
+  // Hidden escape hatch: `--ui ink` (or KIMIFLARE_UI=ink) runs the old UI.
+  .addOption(new Option("--ui <name>", "interface: camouflage (default) or ink").hideHelp())
   .option("--mode <mode>", "run mode: interactive (default), print, rpc")
   .option("-c, --continue", "continue the most recent session in the current working directory (print mode only)")
   .option("-S, --session <id>", "resume a specific session by id (print mode only)")
@@ -411,26 +413,26 @@ async function main() {
   // alt-screen and flash for a fraction of a second.
   const logoText = renderLogo(getAppVersion(), opts.model ?? cfg?.model);
 
-  // UI engine: Ink by default. `--ui camouflage`, KIMIFLARE_UI=camouflage or
-  // `/ui camouflage` (saved as uiEngine)
-  // runs the experimental Camouflage inline renderer; it needs credentials,
-  // so first-run setup always goes through Ink.
-  const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? cfg?.uiEngine ?? "ink").toLowerCase();
-  if (uiEngine === "camouflage" && cfg) {
+  // UI engine: Camouflage for everyone. A saved `uiEngine` is ignored;
+  // only the hidden `--ui ink` / KIMIFLARE_UI=ink picks Ink. First-run setup
+  // (no credentials yet) goes through Ink, and so does any machine where the
+  // renderer can't start (no prebuilt binary for the platform).
+  const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? "camouflage").toLowerCase();
+  if (uiEngine !== "ink" && cfg) {
     const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
-    const { runCamouflageView } = await import("./camouflage-view.js");
+    const { runCamouflageView, CamouflageUnavailable } = await import("./camouflage-view.js");
     const { renderAppWithBridge } = await import("./app.js");
-    await runCamouflageView({
-      cfg: { ...cfg, model },
-      version: getAppVersion(),
-      runApp: (bridge) => renderAppWithBridge({ ...cfg, model }, bridge, updateResult, lspScope, lspProjectPath),
-    });
-    process.exit(0);
-  }
-  if (uiEngine === "camouflage") {
-    console.error("autopilot: --ui camouflage needs a model provider key (OpenRouter or Requesty); run `autopilot auth openrouter` or `autopilot auth requesty` to set one up.");
-  } else if (uiEngine !== "ink") {
-    console.error(`autopilot: unknown --ui "${uiEngine}"; using ink.`);
+    try {
+      await runCamouflageView({
+        cfg: { ...cfg, model },
+        version: getAppVersion(),
+        runApp: (bridge) => renderAppWithBridge({ ...cfg, model }, bridge, updateResult, lspScope, lspProjectPath),
+      });
+      process.exit(0);
+    } catch (err) {
+      if (!(err instanceof CamouflageUnavailable)) throw err;
+      logger.warn("camouflage.unavailable", { error: err.message });
+    }
   }
   console.log(logoText);
   // React Ink UI.

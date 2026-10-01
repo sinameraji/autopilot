@@ -150,9 +150,8 @@ export interface KimiConfig {
   /** Shell override for the bash tool. "auto" (default) detects the platform, or specify "bash", "cmd", "powershell", or an absolute path. */
   shell?: string;
   /**
-   * Deprecated/ignored. React Ink is always used. Camouflage UI access is
-   * temporarily disabled, so `--ui`, `KIMIFLARE_UI`, and this field have no
-   * effect. Kept in the type so existing configs do not break on load.
+   * Deprecated/ignored: Camouflage is always used (the hidden `--ui ink`
+   * picks Ink for one run). Kept so existing configs still load.
    */
   uiEngine?: "ink" | "camouflage";
   /** Worker endpoint URL for spawning standalone research/executor workers. */

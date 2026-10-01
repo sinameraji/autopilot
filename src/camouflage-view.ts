@@ -54,12 +54,16 @@ interface CamouflageSdk {
   form(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; values?: Record<string, string>; cancelled: boolean }>;
 }
 
+/** The renderer couldn't start (not installed, no binary for this
+ *  platform); nothing has been drawn, so the caller can fall back to Ink. */
+export class CamouflageUnavailable extends Error {}
+
 async function loadSdk(): Promise<CamouflageSdk> {
   const sdk = (await import("camouflage-tui").catch((err) => {
-    throw new Error(`camouflage-tui is not installed (${(err as Error).message}). Reinstall autopilot, or use --ui ink.`);
+    throw new CamouflageUnavailable(`camouflage-tui is not installed (${(err as Error).message})`);
   })) as unknown as Partial<CamouflageSdk>;
   if (typeof sdk.permission !== "function" || typeof sdk.mount !== "function" || typeof sdk.selectList !== "function") {
-    throw new Error("the installed camouflage-tui is too old for --ui camouflage. Update autopilot, or use --ui ink.");
+    throw new CamouflageUnavailable("the installed camouflage-tui is too old");
   }
   return sdk as CamouflageSdk;
 }
@@ -74,12 +78,18 @@ export interface CamouflageViewOpts {
 export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void> {
   const sdk = await loadSdk();
   const restoreConsole = captureConsole();
-  const cam = await sdk.mount({
-    ui: "inline",
-    appTitle: "autopilot",
-    inheritStderr: false,
-    ...(process.env.CAMOUFLAGE_BIN ? { bin: process.env.CAMOUFLAGE_BIN } : {}),
-  });
+  let cam: CamouflageHandle;
+  try {
+    cam = await sdk.mount({
+      ui: "inline",
+      appTitle: "autopilot",
+      inheritStderr: false,
+      ...(process.env.CAMOUFLAGE_BIN ? { bin: process.env.CAMOUFLAGE_BIN } : {}),
+    });
+  } catch (err) {
+    restoreConsole();
+    throw new CamouflageUnavailable((err as Error).message);
+  }
   cam.on("stderr", (chunk: string) => logger.warn("camouflage.stderr", { chunk }));
 
   const cwd = process.cwd();
@@ -87,7 +97,7 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     title: `autopilot ${opts.version}`,
     detail: [
       [shortModel(opts.cfg.model), shortPath(cwd), gitBranch(cwd)].filter(Boolean).join(" · "),
-      "/ for commands · @ to mention files · shift+tab to switch modes",
+      `/ for commands · @ to mention files${opts.cfg.modesEnabled ? " · shift+tab to switch modes" : ""}`,
     ],
     accent: "orange",
     assistant_label: "autopilot",
@@ -531,7 +541,7 @@ class View implements AppBridge {
         return want(`commandWizard-${s.commandWizard.mode}-${s.commandWizard.initial?.name ?? ""}`, () => this.commandEditor(s));
       default:
         this.cam.send("RuntimeError", {
-          message: `${modalName(modal)} isn't available in the Camouflage UI yet. Run \`autopilot --ui ink\` for it.`,
+          message: `${modalName(modal)} isn't available here yet.`,
           severity: "warn",
         });
         a.closeModal(modal);
