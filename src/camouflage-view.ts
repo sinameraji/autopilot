@@ -148,6 +148,8 @@ class View implements AppBridge {
   echoed: string[] = [];
   /** Per-event state already sent, keyed by ChatEvent.key. */
   private sent = new Map<string, { text: number; done: boolean }>();
+  /** Reasoning characters already sent, per open assistant stream. */
+  private reasoningSent = new Map<string, number>();
   /** Events before this index are fully sent and won't change. */
   private settled = 0;
   private firstKey: string | undefined;
@@ -224,11 +226,18 @@ class View implements AppBridge {
       }
       case "assistant": {
         if (!prev) this.cam.send("AssistantStreamStarted", { stream_id: e.key });
+        // Reasoning streams first; the renderer shows it on Ctrl+R.
+        const thought = this.reasoningSent.get(e.key) ?? 0;
+        if (e.reasoning.length > thought) {
+          this.cam.send("AssistantReasoningDelta", { stream_id: e.key, token: e.reasoning.slice(thought) });
+          this.reasoningSent.set(e.key, e.reasoning.length);
+        }
         const already = prev?.text ?? 0;
         if (e.text.length > already && e.text.startsWith(e.text.slice(0, already))) {
           this.cam.send("AssistantTokenDelta", { stream_id: e.key, token: e.text.slice(already) });
         }
         if (!e.streaming) {
+          this.reasoningSent.delete(e.key);
           this.cam.send("AssistantMessageCompleted", { stream_id: e.key, text: e.text });
           return this.mark(e.key, e.text.length, true);
         }
