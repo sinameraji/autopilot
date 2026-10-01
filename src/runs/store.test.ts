@@ -44,6 +44,9 @@ describe("RunStore", () => {
       assert.equal(run?.repositoryRoot, null);
       assert.equal(run?.worktreePath, null);
       assert.equal(run?.branch, null);
+      assert.equal(run?.maxTotalTokens, 1_000_000);
+      assert.equal(run?.maxCostUsd, 5);
+      assert.equal(run?.totalPromptTokens, 0);
     } finally {
       migrated.close();
     }
@@ -68,6 +71,51 @@ describe("RunStore", () => {
 
     const restarted = reopen();
     assert.deepEqual(restarted.getRun(run.id), run);
+  }));
+
+  it("aggregates tokens and cost across generations and fails at a ceiling", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Bound usage", cwd: dir, maxTotalTokens: 100, maxCostUsd: 1 });
+    store.transition(run.id, "running");
+    const first = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 10, costUsd: 0.2 });
+    assert.equal(first.budgetExceededReason, null);
+    assert.equal(first.run.totalPromptTokens, 10);
+    assert.equal(first.run.totalCompletionTokens, 10);
+    assert.equal(first.run.totalCostUsd, 0.2);
+
+    const second = store.recordUsage(run.id, { promptTokens: 40, completionTokens: 40, costUsd: 0.5 });
+    assert.equal(second.budgetExceededReason, "max_total_tokens_exceeded");
+    assert.equal(second.run.status, "failed");
+    assert.equal(second.run.stopReason, "max_total_tokens_exceeded");
+    assert.equal(second.run.totalCostUsd, 0.7);
+    assert.deepEqual(store.listEvents(run.id).map((event) => event.type), ["state", "state", "usage", "usage", "state"]);
+  }));
+
+  it("fails when authoritative cumulative cost reaches its ceiling", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Stop at cost cap", cwd: dir, maxTotalTokens: 1000, maxCostUsd: 0.05 });
+    store.transition(run.id, "running");
+    const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5, costUsd: 0.05 });
+    assert.equal(result.budgetExceededReason, "max_cost_usd_exceeded");
+    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.totalCostUsd, 0.05);
+  }));
+
+  it("fails closed when a configured cost ceiling has no authoritative cost", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Require billed cost", cwd: dir, maxCostUsd: 1 });
+    store.transition(run.id, "running");
+    const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5 });
+    assert.equal(result.budgetExceededReason, "cost_unavailable");
+    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.costUnknownResponses, 1);
+  }));
+
+  it("allows usage without cost only when the cost ceiling is explicitly disabled", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Token-only budget", cwd: dir, maxTotalTokens: 100, maxCostUsd: null });
+    store.transition(run.id, "running");
+    const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5 });
+    assert.equal(result.budgetExceededReason, null);
+    assert.equal(result.run.status, "running");
+    assert.equal(result.run.maxCostUsd, null);
+    assert.equal(result.run.costUnknownResponses, 1);
   }));
 
   it("persists run state and tool boundary hashes without raw input/output", async () => withFixture(({ dir, store }) => {

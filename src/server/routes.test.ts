@@ -67,6 +67,20 @@ describe("unattended run HTTP routes", () => {
         body: JSON.stringify({ task: "inspect", cwd: dir, maxToolIterations: 0 }),
       });
       assert.equal(invalidLimit.status, 400);
+
+      const invalidTokenBudget = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect", cwd: dir, maxTotalTokens: 0 }),
+      });
+      assert.equal(invalidTokenBudget.status, 400);
+
+      const invalidCostBudget = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect", cwd: dir, maxCostUsd: 0 }),
+      });
+      assert.equal(invalidCostBudget.status, 400);
     } finally {
       routes.cleanup();
       await close(server);
