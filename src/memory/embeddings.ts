@@ -1,6 +1,7 @@
 import { getUserAgent } from "../util/version.js";
 import { openRouterHeaders, openRouterUrl } from "../models/openrouter.js";
-import type { LlmAuth } from "../agent/llm-auth.js";
+import { requestyHeaders, requestyUrl } from "../models/requesty.js";
+import { usesRequesty, type LlmAuth } from "../agent/llm-auth.js";
 import { resolveCustomEndpoint } from "../agent/custom-endpoint.js";
 
 export interface EmbedOpts extends LlmAuth {
@@ -11,6 +12,8 @@ export interface EmbedOpts extends LlmAuth {
 /** Same bge-base-en-v1.5 model Workers AI served, so vectors in existing
  *  memory databases stay comparable after the move to OpenRouter. */
 export const DEFAULT_EMBEDDING_MODEL = "baai/bge-base-en-v1.5";
+/** Requesty does not serve bge-base-en-v1.5; its default is an OpenAI embedding model. */
+export const REQUESTY_EMBEDDING_MODEL = "openai/text-embedding-3-small";
 const MAX_EMBED_CHARS = 2000; // ≈ the 512-token context of bge-base-en-v1.5
 
 function truncateForEmbedding(text: string): string {
@@ -86,7 +89,9 @@ function parseOpenAiEmbeddingResponse(json: unknown): Float32Array[] {
 }
 
 export async function fetchEmbeddings(opts: EmbedOpts): Promise<Float32Array[]> {
-  const model = opts.model ?? DEFAULT_EMBEDDING_MODEL;
+  const custom = opts.customEndpoint ?? resolveCustomEndpoint();
+  const requesty = !custom && usesRequesty(opts);
+  const model = opts.model ?? (requesty ? REQUESTY_EMBEDDING_MODEL : DEFAULT_EMBEDDING_MODEL);
   const texts = opts.texts.map(truncateForEmbedding);
 
   if (texts.length === 0) {
@@ -94,13 +99,15 @@ export async function fetchEmbeddings(opts: EmbedOpts): Promise<Float32Array[]> 
   }
 
   // Same routing rule as chat (see llm-auth.ts): a custom endpoint wins,
-  // otherwise OpenRouter with the user's key.
-  const custom = opts.customEndpoint ?? resolveCustomEndpoint();
+  // otherwise OpenRouter with the user's key, otherwise Requesty.
   let url: string;
   let headers: Record<string, string>;
   if (custom) {
     url = `${custom.baseUrl.replace(/\/+$/, "").replace(/\/chat\/completions$/, "")}/embeddings`;
     headers = { "User-Agent": getUserAgent(), ...(custom.apiKey ? { Authorization: `Bearer ${custom.apiKey}` } : {}) };
+  } else if (requesty && opts.requestyApiKey) {
+    url = requestyUrl("embeddings");
+    headers = requestyHeaders(opts.requestyApiKey);
   } else {
     if (!opts.openrouterApiKey) throw new Error("embeddings: no OpenRouter API key configured");
     url = openRouterUrl("embeddings");

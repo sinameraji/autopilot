@@ -18,6 +18,7 @@ export interface ExtractorContext {
   /** LLM opts for synthesis (credentials + model). */
   llmOpts?: {
     openrouterApiKey?: string;
+    requestyApiKey?: string;
     customEndpoint?: CustomEndpoint;
     model: string;
     provider?: OpenRouterProviderPrefs;
@@ -91,6 +92,7 @@ async function callLlm(
   if (!llmOpts) return "";
   const events = runKimi({
     openrouterApiKey: llmOpts.openrouterApiKey,
+    requestyApiKey: llmOpts.requestyApiKey,
     customEndpoint: llmOpts.customEndpoint,
     model: llmOpts.model,
     messages,

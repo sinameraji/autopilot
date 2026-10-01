@@ -27,7 +27,7 @@ import type { KimiConfig, PermissionRules, ReasoningEffort } from "./config.js";
 export type PrintFormat = "text" | "json" | "stream-json";
 
 export interface PrintModeOpts
-  extends Pick<KimiConfig, "openrouterApiKey" | "baseUrl" | "apiKey" | "openrouterProvider" | "subagentPolicy"> {
+  extends Pick<KimiConfig, "openrouterApiKey" | "requestyApiKey" | "baseUrl" | "apiKey" | "openrouterProvider" | "subagentPolicy"> {
   model: string;
   reasoningEffort?: ReasoningEffort;
   prompt: string;

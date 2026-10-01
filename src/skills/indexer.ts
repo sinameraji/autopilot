@@ -87,6 +87,7 @@ export async function indexSkills(opts: IndexerOpts): Promise<{
       try {
         const embeddings = await fetchEmbeddings({
           openrouterApiKey: opts.openrouterApiKey,
+          requestyApiKey: opts.requestyApiKey,
           customEndpoint: opts.customEndpoint,
           model: opts.embeddingModel,
           texts: inputs,

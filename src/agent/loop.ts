@@ -1616,6 +1616,7 @@ function validateToolArguments(raw: string): string {
 function llmAuthOf(opts: LlmAuth): LlmAuth {
   return {
     ...(opts.openrouterApiKey ? { openrouterApiKey: opts.openrouterApiKey } : {}),
+    ...(opts.requestyApiKey ? { requestyApiKey: opts.requestyApiKey } : {}),
     ...(opts.customEndpoint ? { customEndpoint: opts.customEndpoint } : {}),
     ...(opts.provider ? { provider: opts.provider } : {}),
   };
