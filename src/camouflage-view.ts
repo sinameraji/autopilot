@@ -21,7 +21,9 @@ import type { ChatEvent } from "./ui/chat.js";
 import type { ToolEventState } from "./ui/tool-view.js";
 import type { Cfg } from "./app.js";
 import { BUILTIN_COMMANDS } from "./commands/builtins.js";
-import { listModels } from "./models/registry.js";
+import { featuredModels, listModels, type ModelEntry } from "./models/registry.js";
+import { formatContext, formatModelPrice } from "./ui/model-picker.js";
+import { CATEGORIES, SINGLE_COMMANDS } from "./ui/help-menu.js";
 import { MODES, type Mode } from "./mode.js";
 import { logger } from "./util/logger.js";
 
@@ -34,6 +36,8 @@ interface CamouflageSdk {
   mount(opts: Record<string, unknown>): Promise<CamouflageHandle>;
   permission(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ choice: "allow_once" | "allow_session" | "deny" }>;
   selectList(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; value?: string; cancelled: boolean }>;
+  confirm(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; value?: boolean; cancelled: boolean }>;
+  form(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; values?: Record<string, string>; cancelled: boolean }>;
 }
 
 async function loadSdk(): Promise<CamouflageSdk> {
@@ -73,9 +77,6 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     ],
     accent: "orange",
     assistant_label: "autopilot",
-  });
-  cam.send("SlashCommandsRegistered", {
-    commands: BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint })),
   });
   const files = listFiles(cwd);
   if (files.length > 0) {
@@ -140,6 +141,7 @@ class View implements AppBridge {
   private todos = "";
   private permission: unknown = null;
   private openPrompt: string | null = null;
+  private commandsKey = "";
 
   constructor(
     private cam: CamouflageHandle,
@@ -151,6 +153,7 @@ class View implements AppBridge {
   }
 
   sync(s: AppSnapshot): void {
+    this.syncCommands(s.customCommands);
     this.syncEvents(s.events);
     this.syncStatus(s);
     const todos = JSON.stringify(s.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })));
@@ -160,6 +163,17 @@ class View implements AppBridge {
     }
     this.syncPermission(s);
     this.syncPrompts(s);
+  }
+
+  /** Built-in plus the user's custom commands, re-sent when they change. */
+  private syncCommands(custom: { name: string; description?: string }[]): void {
+    const key = custom.map((c) => `${c.name}:${c.description ?? ""}`).join("|");
+    if (key === this.commandsKey && this.commandsKey !== "") return;
+    this.commandsKey = key || "(none)";
+    const builtin = BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint }));
+    const names = new Set(builtin.map((c) => c.name));
+    const mine = custom.filter((c) => !names.has(c.name)).map((c) => ({ name: c.name, description: c.description ? `${c.description} (custom)` : "Custom command" }));
+    this.cam.send("SlashCommandsRegistered", { commands: [...builtin, ...mine] });
   }
 
   private syncEvents(events: ChatEvent[]): void {
@@ -324,7 +338,15 @@ class View implements AppBridge {
           a.pickResume(null);
           return void this.cam.send("RuntimeError", { message: "No earlier conversations in this directory.", severity: "info" });
         }
-        const r = await this.select("Resume a conversation", sessions.map((x) => ({ value: x.id, label: x.title ?? x.firstPrompt, description: `${relTime(x.updatedAt)} · ${x.messageCount} messages` })));
+        const r = await this.select(
+          "Resume a conversation",
+          sessions.map((x) => ({
+            value: x.id,
+            label: truncateText(x.title ?? x.firstPrompt, 60),
+            columns: [relTime(x.updatedAt), `${x.messageCount} msgs`],
+            keywords: `${x.firstPrompt} ${x.id}`,
+          })),
+        );
         a.pickResume(sessions.find((x) => x.id === r) ?? null);
       });
     }
@@ -347,8 +369,8 @@ class View implements AppBridge {
     switch (modal) {
       case "model":
         return want("model", async () => {
-          const models = listModels();
-          const r = await this.select("Select a model", models.map((m) => ({ value: m.id, label: m.id, description: m.name })), s.model);
+          const models = pickableModels();
+          const r = await this.select("Select a model", modelOptions(models, s.model), s.model, "Context · price per Mtok (input / output / cached) · type to search all models");
           a.pickModel(models.find((m) => m.id === r) ?? null);
         });
       case "mode":
@@ -366,13 +388,84 @@ class View implements AppBridge {
           a.pickPlanComplete((r as "auto" | "edit" | "continue" | null) ?? null);
         });
       case "help":
-        this.cam.send("ShowKeyValueView", {
-          id: "help",
-          title: "Commands",
-          items: BUILTIN_COMMANDS.map((c) => ({ label: `/${c.name}${c.argHint ? ` ${c.argHint}` : ""}`, value: c.description })),
-        });
         a.closeModal("help");
+        return want("help", async () => {
+          const r = await this.select("Help", helpOptions(s.customCommands), undefined, "Pick a command to run · type to search");
+          if (r) await this.runWithArgs(r);
+        });
+      case "theme":
+        return want("theme", async () => {
+          const r = await this.select(
+            "Theme",
+            s.themes.map((t) => ({ value: t.name, label: t.label })),
+            s.currentTheme,
+            "Applies to the Ink UI; Camouflage uses your terminal's colors",
+          );
+          a.pickTheme(r);
+        });
+      case "shell":
+        return want("shell", async () => {
+          const r = await this.select(
+            "Shell for the bash tool",
+            [
+              { value: "auto", label: "auto", description: "detect from environment" },
+              { value: "bash", label: "bash" },
+              { value: "cmd", label: "cmd.exe", description: "Windows" },
+              { value: "powershell", label: "PowerShell" },
+            ],
+            s.currentShell,
+          );
+          a.pickShell(r);
+        });
+      case "memory":
+        a.closeModal("memory");
+        return want("memory", async () => {
+          const r = await this.select("Memory", [
+            { value: s.memoryEnabled ? "/memory off" : "/memory on", label: s.memoryEnabled ? "Disable memory" : "Enable memory", state: s.memoryEnabled ? "on" : "off" },
+            { value: "/memory", label: "Show memory stats" },
+            { value: "/memory search <query>", label: "Search memories…" },
+            { value: "clear", label: "Clear all memories for this repo" },
+          ]);
+          if (r === "clear") {
+            const ok = await this.sdk.confirm(this.cam, { id: `confirm-${Date.now()}`, prompt: "Clear every memory for this repo?", yes_label: "Yes, clear everything", no_label: "No, keep my memories", default: "no" });
+            if (ok.value) a.runCommand("/memory clear");
+          } else if (r) {
+            await this.runWithArgs(r);
+          }
+        });
+      case "skills":
+        a.closeModal("skills");
+        return want("skills", async () => {
+          const r = await this.select("Skills", [
+            { value: "/skills list", label: "List skills" },
+            { value: "/skills add <name>", label: "Add a skill…" },
+            { value: "/skills edit <name>", label: "Edit a skill…" },
+            { value: "/skills enable <name>", label: "Enable a skill…" },
+            { value: "/skills disable <name>", label: "Disable a skill…" },
+            { value: "/skills delete <name>", label: "Delete a skill…" },
+          ]);
+          if (r) await this.runWithArgs(r);
+        });
+      case "commandList":
+        a.closeModal("commandList");
+        this.cam.send("ShowKeyValueView", {
+          id: "custom-commands",
+          title: s.customCommands.length > 0 ? "Custom commands" : "No custom commands yet. Create one with /command create.",
+          items: s.customCommands.map((c) => ({ label: `/${c.name}`, value: c.description ?? "" })),
+        });
         return;
+      case "commandPicker":
+        return want("commandPicker", async () => {
+          if (s.customCommands.length === 0) {
+            a.closeModal("commandPicker");
+            return void this.cam.send("RuntimeError", { message: "No custom commands yet. Create one with /command create.", severity: "info" });
+          }
+          const r = await this.select("Delete a custom command", s.customCommands.map((c) => ({ value: c.name, label: `/${c.name}`, description: c.description })));
+          if (!r) return a.closeModal("commandPicker");
+          const ok = await this.sdk.confirm(this.cam, { id: `confirm-${Date.now()}`, prompt: `Delete /${r}?`, default: "no" });
+          if (ok.value) a.deleteCommand(r);
+          else a.closeModal("commandPicker");
+        });
       default:
         this.cam.send("RuntimeError", {
           message: `${modalName(modal)} isn't available in the Camouflage UI yet. Run \`autopilot --ui ink\` for it.`,
@@ -382,18 +475,85 @@ class View implements AppBridge {
     }
   }
 
-  private async select(prompt: string, options: { value: string; label: string; description?: string }[], current?: string): Promise<string | null> {
+  /** Run a command; for templates like "/skills add <name>", ask for each
+   *  `<arg>` in a form first (Ink only lists those as text). */
+  private async runWithArgs(template: string): Promise<void> {
+    const args = [...template.matchAll(/<([^>]+)>/g)].map((m) => m[1]!);
+    if (args.length === 0) return this.actions?.runCommand(template);
+    const r = await this.sdk.form(this.cam, {
+      id: `args-${Date.now()}`,
+      title: template.replace(/\s*<[^>]+>/g, "").trim(),
+      fields: args.map((name) => ({ name, label: name.charAt(0).toUpperCase() + name.slice(1), required: true })),
+    });
+    if (r.cancelled || !r.values) return;
+    const values = r.values;
+    this.actions?.runCommand(template.replace(/<([^>]+)>/g, (_m, name: string) => values[name] ?? ""));
+  }
+
+  private async select(prompt: string, options: PickOption[], current?: string, subtitle?: string): Promise<string | null> {
     const r = await this.sdk.selectList(this.cam, {
       id: `pick-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       prompt,
       options,
       ...(current ? { default: current } : {}),
+      ...(subtitle ? { subtitle } : {}),
     });
     return r.cancelled || r.value === undefined ? null : r.value;
   }
 }
 
 // ----- helpers ---------------------------------------------------------------
+
+type PickOption = { value: string; label: string; description?: string; section?: string; columns?: string[]; state?: "on" | "off"; keywords?: string };
+
+/** The Ink help menu's pages as sections, plus custom commands. */
+export function helpOptions(custom: { name: string; description?: string }[]): PickOption[] {
+  const out: PickOption[] = [];
+  for (const cat of CATEGORIES) {
+    for (const c of cat.commands) {
+      if (!c.command.startsWith("/")) continue;
+      out.push({ value: c.command, label: c.command, description: c.description, section: cat.label });
+    }
+  }
+  for (const c of SINGLE_COMMANDS) out.push({ value: c.command, label: c.command, description: c.description, section: "General" });
+  for (const c of custom) out.push({ value: `/${c.name}`, label: `/${c.name}`, description: c.description, section: "Custom commands" });
+  return out;
+}
+
+/** The Ink model picker's set: tool-capable models, no `:batch` variants. */
+function pickableModels(): ModelEntry[] {
+  return listModels().filter((m) => m.supports.tools && !m.id.endsWith(":batch"));
+}
+
+/**
+ * The Ink model picker's layout: the current model (if it isn't featured),
+ * then "Best & latest" (featuredModels), then every other model, which Ink
+ * reaches by searching. Context and price as columns.
+ */
+export function modelOptions(models: ModelEntry[], current: string): PickOption[] {
+  const featured = featuredModels(models);
+  const featuredIds = new Set(featured.map((m) => m.id));
+  const row = (m: ModelEntry, section: string): PickOption => ({
+    value: m.id,
+    label: m.id,
+    section,
+    columns: [formatContext(m.contextWindow), formatModelPrice(m.pricing)],
+    keywords: m.name ?? "",
+  });
+  const out: PickOption[] = [];
+  const cur = models.find((m) => m.id === current);
+  if (cur && !featuredIds.has(cur.id)) out.push(row(cur, "Current"));
+  for (const m of featured) out.push(row(m, "Best & latest — ranked by agentic + coding benchmarks"));
+  for (const m of models) {
+    if (!featuredIds.has(m.id) && m.id !== cur?.id) out.push(row(m, "All models"));
+  }
+  return out;
+}
+
+function truncateText(s: string, max: number): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
 
 /**
  * Entries of the folder a path mention points into, as tokens prefixed with

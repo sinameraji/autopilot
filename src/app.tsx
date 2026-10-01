@@ -2591,6 +2591,21 @@ function App({
       runCommand: (cmd) => {
         void handleSlash(cmd);
       },
+      pickTheme: (name) => handleThemePick(themeList().find((t) => t.name === name) ?? null),
+      pickShell: (shell) => {
+        if (shell && cfg) {
+          const next = { ...cfg, shell: shell === "auto" ? undefined : shell };
+          setCfg(next);
+          void saveConfig(next).catch(() => {});
+          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `shell set to ${shell}` }]);
+        }
+        modals.setShowShellPicker(false);
+      },
+      deleteCommand: (name) => {
+        const cmd = customCommandsRef.current.find((c) => c.name === name);
+        modals.setCommandPicker(null);
+        if (cmd) void handleCommandDelete(cmd);
+      },
       exit,
     });
     bridge.sync({
@@ -2606,6 +2621,11 @@ function App({
       resumeSessions,
       checkpoints: checkpointSession ? { session: checkpointSession, list: checkpointList } : null,
       planOptions,
+      customCommands: customCommandsRef.current.map((c) => ({ name: c.name, description: c.description })),
+      themes: themeList().map((t) => ({ name: t.name, label: t.label })),
+      currentTheme: cfg?.theme ?? DEFAULT_THEME_NAME,
+      currentShell: cfg?.shell ?? "auto",
+      memoryEnabled: !!cfg?.memoryEnabled,
     });
   });
 

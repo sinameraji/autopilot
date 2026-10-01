@@ -3,7 +3,8 @@ import assert from "node:assert";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listMentionDir, toolRow, toolSummary } from "./camouflage-view.js";
+import { helpOptions, listMentionDir, modelOptions, toolRow, toolSummary } from "./camouflage-view.js";
+import { listModels } from "./models/registry.js";
 
 describe("listMentionDir", () => {
   it("lists the folder being typed, folders first, prefixed as typed", async () => {
@@ -30,5 +31,28 @@ describe("tool rows", () => {
     assert.equal(toolSummary("grep", true, false, ""), "No matches");
     assert.equal(toolSummary("bash", false, false, "\nboom: failed\n"), "boom: failed");
     assert.match(toolSummary("edit", false, true, "Permission denied"), /declined/);
+  });
+});
+
+describe("modelOptions", () => {
+  it("matches the Ink picker: current, then best & latest, then the rest, with columns", () => {
+    const models = listModels().filter((m) => m.supports.tools);
+    const current = models[models.length - 1]!.id;
+    const opts = modelOptions(models, current);
+    assert.equal(opts.length, models.length, "every model is reachable");
+    assert.ok(opts.every((o) => o.columns?.length === 2), "context and price columns");
+    const sections = [...new Set(opts.map((o) => o.section))];
+    assert.ok(sections.some((x) => x?.startsWith("Best & latest")));
+    if (sections[0] === "Current") assert.equal(opts[0]!.value, current);
+  });
+});
+
+describe("helpOptions", () => {
+  it("lists the Ink help pages as sections, with custom commands last", () => {
+    const opts = helpOptions([{ name: "ship", description: "Ship it" }]);
+    const sections = [...new Set(opts.map((o) => o.section))];
+    assert.deepEqual(sections.slice(0, 3), ["Mode", "Session", "Memory"]);
+    assert.ok(opts.some((o) => o.value === "/memory search <query>"), "argument templates are pickable");
+    assert.deepEqual(opts[opts.length - 1], { value: "/ship", label: "/ship", description: "Ship it", section: "Custom commands" });
   });
 });

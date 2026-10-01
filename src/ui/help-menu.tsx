@@ -16,7 +16,7 @@ interface Props {
   onCommand: (command: string) => void;
 }
 
-type Page =
+export type Page =
   | "main"
   | "mode"
   | "session"
@@ -30,19 +30,19 @@ type Page =
   | "commands"
   | "custom";
 
-interface CommandItem {
+export interface CommandItem {
   command: string;
   description: string;
   selectable?: boolean;
 }
 
-interface Category {
+export interface Category {
   key: Page;
   label: string;
   commands: CommandItem[];
 }
 
-const CATEGORIES: Category[] = [
+export const CATEGORIES: Category[] = [
   {
     key: "mode",
     label: "Mode",
@@ -153,7 +153,7 @@ const CATEGORIES: Category[] = [
   },
 ];
 
-const SINGLE_COMMANDS: CommandItem[] = [
+export const SINGLE_COMMANDS: CommandItem[] = [
   { command: "/reasoning", description: "toggle show/hide model reasoning" },
   { command: "/help", description: "show this menu" },
   { command: "/exit", description: "exit autopilot (formerly kimiflare)" },
