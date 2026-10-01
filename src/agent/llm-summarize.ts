@@ -5,6 +5,7 @@ import type { ChatMessage } from "./messages.js";
 
 export interface CompactOpts {
   openrouterApiKey?: string;
+  requestyApiKey?: string;
   customEndpoint?: CustomEndpoint;
   model: string;
   messages: ChatMessage[];
@@ -89,6 +90,7 @@ export async function summarizeMessagesViaLlm(opts: CompactOpts): Promise<Compac
   let summary = "";
   const events = runKimi({
     openrouterApiKey: opts.openrouterApiKey,
+    requestyApiKey: opts.requestyApiKey,
     customEndpoint: opts.customEndpoint,
     model: opts.model,
     messages: [

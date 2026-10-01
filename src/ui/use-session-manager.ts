@@ -70,6 +70,7 @@ export interface SessionManagerDeps {
     model: string;
     autoFreshSuggestionTurns?: number;
     openrouterApiKey?: string;
+    requestyApiKey?: string;
     baseUrl?: string;
     apiKey?: string;
     openrouterProvider?: import("../agent/client.js").OpenRouterProviderPrefs;
