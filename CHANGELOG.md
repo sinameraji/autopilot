@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.10.1](https://github.com/sinameraji/autopilot/compare/v1.10.0...v1.10.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** ! commands get the real terminal under Camouflage ([69f33f1](https://github.com/sinameraji/autopilot/commit/69f33f1fbb35439d1e3b2da4a2d920bc747a72b1))
+* **ui:** ! commands get the real terminal under Camouflage ([08831b4](https://github.com/sinameraji/autopilot/commit/08831b4d7d0d69504e493b991d170278d6b1a6a6))
+
 ## [1.10.0](https://github.com/sinameraji/autopilot/compare/v1.9.0...v1.10.0) (2026-10-01)
 
 
