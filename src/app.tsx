@@ -2737,6 +2737,7 @@ function App({
       commandWizard: modals.commandWizard,
       commandPickerMode: modals.commandPicker?.mode ?? null,
       changelogImageRepo,
+      modesEnabled,
       multiAgent: {
         multiAgentEnabled: cfg?.multiAgentEnabled,
         workerEndpoint: cfg?.workerEndpoint,
