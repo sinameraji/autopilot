@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { RunWorktree } from "./worktrees.js";
 
 export type RunStatus = "queued" | "running" | "waiting" | "needs_input" | "completed" | "failed" | "cancelled" | "interrupted_unknown";
 export type RunEventType = "state" | "tool_intent" | "tool_result";
@@ -13,6 +14,10 @@ export interface RunRecord {
   id: string;
   sessionId: string | null;
   cwd: string;
+  sourceCwd: string | null;
+  repositoryRoot: string | null;
+  worktreePath: string | null;
+  branch: string | null;
   task: string;
   status: RunStatus;
   stopReason: string | null;
@@ -54,6 +59,10 @@ interface RunRow extends Record<string, unknown> {
   id: string;
   session_id: string | null;
   cwd: string;
+  source_cwd: string | null;
+  repository_root: string | null;
+  worktree_path: string | null;
+  branch: string | null;
   task: string;
   status: RunStatus;
   stop_reason: string | null;
@@ -115,6 +124,10 @@ export class RunStore {
         id TEXT PRIMARY KEY,
         session_id TEXT,
         cwd TEXT NOT NULL,
+        source_cwd TEXT,
+        repository_root TEXT,
+        worktree_path TEXT,
+        branch TEXT,
         task TEXT NOT NULL,
         status TEXT NOT NULL,
         stop_reason TEXT,
@@ -164,6 +177,10 @@ export class RunStore {
     if (!runColumnNames.has("allowed_tools_json")) this.db.exec("ALTER TABLE runs ADD COLUMN allowed_tools_json TEXT NOT NULL DEFAULT '[]'");
     if (!runColumnNames.has("max_tool_iterations")) this.db.exec("ALTER TABLE runs ADD COLUMN max_tool_iterations INTEGER NOT NULL DEFAULT 100");
     if (!runColumnNames.has("max_runtime_ms")) this.db.exec("ALTER TABLE runs ADD COLUMN max_runtime_ms INTEGER NOT NULL DEFAULT 28800000");
+    if (!runColumnNames.has("source_cwd")) this.db.exec("ALTER TABLE runs ADD COLUMN source_cwd TEXT");
+    if (!runColumnNames.has("repository_root")) this.db.exec("ALTER TABLE runs ADD COLUMN repository_root TEXT");
+    if (!runColumnNames.has("worktree_path")) this.db.exec("ALTER TABLE runs ADD COLUMN worktree_path TEXT");
+    if (!runColumnNames.has("branch")) this.db.exec("ALTER TABLE runs ADD COLUMN branch TEXT");
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
 
@@ -172,9 +189,11 @@ export class RunStore {
   }
 
   createRun(input: {
+    id?: string;
     task: string;
     cwd: string;
     sessionId?: string;
+    worktree?: RunWorktree;
     allowedTools?: string[];
     maxToolIterations?: number;
     maxRuntimeMs?: number;
@@ -194,13 +213,16 @@ export class RunStore {
     if (!Number.isInteger(maxRuntimeMs) || maxRuntimeMs < 1000 || maxRuntimeMs > 7 * 24 * 60 * 60 * 1000) {
       throw new Error("maxRuntimeMs must be an integer from 1000 through 604800000");
     }
-    const id = randomUUID();
+    const id = input.id ?? input.worktree?.runId ?? randomUUID();
+    if (!id.trim()) throw new Error("id must not be empty");
+    if (input.worktree && input.worktree.runId !== id) throw new Error("worktree runId must match run id");
     const now = Date.now();
+    const worktree = input.worktree;
     const create = this.db.transaction(() => {
       this.db.prepare(`INSERT INTO runs
-        (id, session_id, cwd, task, status, allowed_tools_json, max_tool_iterations, max_runtime_ms, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`)
-        .run(id, input.sessionId ?? null, input.cwd, task, JSON.stringify(allowedTools), maxToolIterations, maxRuntimeMs, now, now);
+        (id, session_id, cwd, source_cwd, repository_root, worktree_path, branch, task, status, allowed_tools_json, max_tool_iterations, max_runtime_ms, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`)
+        .run(id, input.sessionId ?? null, worktree?.cwd ?? input.cwd, worktree?.sourceCwd ?? null, worktree?.repositoryRoot ?? null, worktree?.worktreePath ?? null, worktree?.branch ?? null, task, JSON.stringify(allowedTools), maxToolIterations, maxRuntimeMs, now, now);
       this.appendEvent(id, "state", null, null, { status: "queued" }, now);
     });
     create.immediate();
@@ -481,6 +503,10 @@ function rowToRun(row: RunRow): RunRecord {
     id: row.id,
     sessionId: row.session_id,
     cwd: row.cwd,
+    sourceCwd: row.source_cwd,
+    repositoryRoot: row.repository_root,
+    worktreePath: row.worktree_path,
+    branch: row.branch,
     task: row.task,
     status: row.status,
     stopReason: row.stop_reason,

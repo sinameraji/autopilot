@@ -3,6 +3,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { URL } from "node:url";
 import type { KimiConfig } from "../config.js";
 import { DEFAULT_MODEL } from "../config.js";
@@ -17,11 +18,12 @@ import { logger } from "../util/logger.js";
 import { createSseStream, type SseClient } from "./sse.js";
 import { getOpenApiSpec } from "./openapi.js";
 import { evaluatePermissionRules } from "../permissions-evaluator.js";
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { encodeImageFile, isImagePath } from "../util/image.js";
 import { glob } from "../util/glob.js";
 import { RunStore } from "../runs/store.js";
+import { RunWorktreeManager, type RunWorktree } from "../runs/worktrees.js";
 import { RunWakeScheduler, type RunWakeEvent } from "../runs/wake-scheduler.js";
 import type { RunRecord } from "../runs/store.js";
 
@@ -230,6 +232,19 @@ export function setupRoutes(config: KimiConfig) {
         const allowedTools = Array.isArray(body.allowedTools)
           ? [...new Set(body.allowedTools as string[])]
           : [];
+        if (body.worktree !== undefined && typeof body.worktree !== "boolean") {
+          badRequest(res, "worktree must be a boolean");
+          return;
+        }
+        const useWorktree = body.worktree !== false;
+        if (body.cwd !== undefined && typeof body.cwd !== "string") {
+          badRequest(res, "cwd must be a string");
+          return;
+        }
+        if (useWorktree && typeof body.cwd !== "string") {
+          badRequest(res, "cwd is required when worktree is enabled; provide a path in a Git repository or set worktree to false");
+          return;
+        }
         const maxToolIterations = body.maxToolIterations ?? 100;
         if (!Number.isInteger(maxToolIterations) || (maxToolIterations as number) < 1 || (maxToolIterations as number) > 5000) {
           badRequest(res, "maxToolIterations must be an integer from 1 through 5000");
@@ -265,9 +280,21 @@ export function setupRoutes(config: KimiConfig) {
         const executor = new ToolExecutor(tools);
         const { makeSessionId } = await import("../sessions.js");
         const sessionId = makeSessionId(task);
+        const runId = randomUUID();
+        const worktreeManager = new RunWorktreeManager();
+        let worktree: RunWorktree | undefined;
+        if (useWorktree) {
+          try {
+            worktree = await worktreeManager.create(runId, cwd);
+          } catch (error) {
+            badRequest(res, error instanceof Error ? error.message : "Unable to create run worktree");
+            return;
+          }
+        }
+        const runCwd = worktree?.cwd ?? cwd;
         const sessionFile: SessionFile = {
           id: sessionId,
-          cwd,
+          cwd: runCwd,
           model,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -275,26 +302,38 @@ export function setupRoutes(config: KimiConfig) {
           title: task.slice(0, 80),
         };
         const messages: ChatMessage[] = [
-          { role: "system", content: buildSystemPrompt({ cwd, tools, model, preferPullRequests: config.preferPullRequests }) },
+          { role: "system", content: buildSystemPrompt({ cwd: runCwd, tools, model, preferPullRequests: config.preferPullRequests }) },
           { role: "system", content: `This is an unattended run. Only these tools are authorized: ${[...allowedTools, "wait_for"].join(", ")}. Do not request or attempt any other tool.` },
           { role: "user", content: task },
         ];
         sessionFile.messages = messages;
-        await saveSession(sessionFile);
-        const store = new RunStore();
         let run: RunRecord;
         try {
-          run = store.createRun({
-            task,
-            cwd,
-            sessionId,
-            allowedTools,
-            maxToolIterations: maxToolIterations as number,
-            maxRuntimeMs: maxRuntimeMs as number,
-          });
-          store.transition(run.id, "running");
-        } finally {
-          store.close();
+          await saveSession(sessionFile);
+          const store = new RunStore();
+          try {
+            run = store.createRun({
+              id: runId,
+              task,
+              cwd: runCwd,
+              sessionId,
+              worktree,
+              allowedTools,
+              maxToolIterations: maxToolIterations as number,
+              maxRuntimeMs: maxRuntimeMs as number,
+            });
+            store.transition(run.id, "running");
+          } finally {
+            store.close();
+          }
+        } catch (error) {
+          await unlink(resolve(sessionsDir(), `${sessionId}.json`)).catch(() => {});
+          if (worktree) {
+            await worktreeManager.discard(worktree).catch((cleanupError) => {
+              logger.warn("server: failed to clean up uninitialized run worktree", { error: String(cleanupError), runId });
+            });
+          }
+          throw error;
         }
         const active: ActiveSession = {
           sessionFile,
@@ -309,7 +348,12 @@ export function setupRoutes(config: KimiConfig) {
         activeSessions.set(sessionId, active);
         activeRuns.set(run.id, active);
         launchAgentTurnForSession(active, config, false);
-        json(res, 202, { runId: run.id, sessionId, status: "running" });
+        json(res, 202, {
+          runId: run.id,
+          sessionId,
+          status: "running",
+          ...(run.branch ? { branch: run.branch, worktreePath: run.worktreePath } : {}),
+        });
         return;
       }
       if (runPathMatch) {

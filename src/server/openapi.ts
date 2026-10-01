@@ -44,7 +44,8 @@ export function getOpenApiSpec(): string {
               required: ["task"],
               properties: {
                 task: { type: "string", maxLength: 20000 },
-                cwd: { type: "string" },
+                cwd: { type: "string", description: "Existing path inside a Git repository; required when worktree is true. With worktree false, defaults to the server working directory." },
+                worktree: { type: "boolean", default: true, description: "Create a per-run Git branch/worktree; set false for non-Git jobs." },
                 model: { type: "string" },
                 allowedTools: { type: "array", items: { type: "string" }, description: "Explicit tool permission allowlist; wait_for is always available." },
                 maxToolIterations: { type: "integer", minimum: 1, maximum: 5000 },

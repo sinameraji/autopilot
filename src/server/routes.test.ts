@@ -33,17 +33,38 @@ describe("unattended run HTTP routes", () => {
       });
       assert.equal(malformed.status, 400);
 
+      const invalidWorktree = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect", worktree: "yes" }),
+      });
+      assert.equal(invalidWorktree.status, 400);
+
+      const missingWorktreeCwd = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect" }),
+      });
+      assert.equal(missingWorktreeCwd.status, 400);
+
+      const nonGitCwd = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect", cwd: dir }),
+      });
+      assert.equal(nonGitCwd.status, 400);
+
       const unknownTool = await fetch(`${baseUrl}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task: "inspect", allowedTools: ["unknown_tool"] }),
+        body: JSON.stringify({ task: "inspect", cwd: dir, allowedTools: ["unknown_tool"] }),
       });
       assert.equal(unknownTool.status, 400);
 
       const invalidLimit = await fetch(`${baseUrl}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task: "inspect", maxToolIterations: 0 }),
+        body: JSON.stringify({ task: "inspect", cwd: dir, maxToolIterations: 0 }),
       });
       assert.equal(invalidLimit.status, 400);
     } finally {
