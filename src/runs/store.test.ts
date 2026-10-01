@@ -14,11 +14,22 @@ interface Fixture {
 
 describe("RunStore", () => {
   it("persists run state and tool boundary hashes without raw input/output", async () => withFixture(({ dir, store }) => {
-    const run = store.createRun({ task: "Build the feature", cwd: dir, sessionId: "session-1" });
+    const run = store.createRun({
+      task: "Build the feature",
+      cwd: dir,
+      sessionId: "session-1",
+      allowedTools: ["bash"],
+      maxToolIterations: 12,
+      maxRuntimeMs: 30_000,
+    });
     assert.equal(run.status, "queued");
+    assert.deepEqual(run.allowedTools, ["bash"]);
+    assert.equal(run.maxToolIterations, 12);
+    assert.equal(run.maxRuntimeMs, 30_000);
     store.transition(run.id, "running");
     store.recordToolIntent(run.id, "call-1", "bash", { command: "echo secret-token" });
     store.recordToolResult(run.id, "call-1", "bash", { ok: true, content: "secret-output" });
+    assert.equal(store.countToolIterations(run.id), 1);
 
     const events = store.listEvents(run.id);
     assert.deepEqual(events.map((event) => event.type), ["state", "state", "tool_intent", "tool_result"]);
@@ -95,6 +106,16 @@ describe("RunStore", () => {
     const expired = store.getTimer(timer.id);
     assert.equal(expired?.status, "failed");
     assert.match(expired?.lastError ?? "", /maximum attempts/);
+  }));
+
+  it("cancels every pending timer for an explicitly cancelled run", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Stop waiting", cwd: dir });
+    const scheduled = store.scheduleTimer({ runId: run.id, condition: "time", wakeAt: 1000 });
+    const claimed = store.scheduleTimer({ runId: run.id, condition: "time", wakeAt: 100 });
+    store.claimDueTimers(100);
+    assert.equal(store.cancelTimersForRun(run.id), 2);
+    assert.equal(store.getTimer(scheduled.id)?.status, "cancelled");
+    assert.equal(store.getTimer(claimed.id)?.status, "cancelled");
   }));
 
   it("rejects invalid state transitions and job timers without job IDs", async () => withFixture(({ dir, store }) => {

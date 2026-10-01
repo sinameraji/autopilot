@@ -101,6 +101,12 @@ export class RunWakeScheduler {
       this.store.cancelTimer(timer.id);
       return;
     }
+    const runStartedAt = run.startedAt ?? run.createdAt;
+    if (now - runStartedAt >= run.maxRuntimeMs) {
+      this.store.transition(run.id, "failed", "max_runtime_exceeded");
+      this.store.cancelTimer(timer.id);
+      return;
+    }
 
     let jobStatus: JobStatus | "not_found" | undefined;
     if (timer.condition === "job") {

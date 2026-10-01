@@ -16,6 +16,9 @@ export interface RunRecord {
   task: string;
   status: RunStatus;
   stopReason: string | null;
+  allowedTools: string[];
+  maxToolIterations: number;
+  maxRuntimeMs: number;
   createdAt: number;
   updatedAt: number;
   startedAt: number | null;
@@ -54,6 +57,9 @@ interface RunRow extends Record<string, unknown> {
   task: string;
   status: RunStatus;
   stop_reason: string | null;
+  allowed_tools_json: string;
+  max_tool_iterations: number;
+  max_runtime_ms: number;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -112,6 +118,9 @@ export class RunStore {
         task TEXT NOT NULL,
         status TEXT NOT NULL,
         stop_reason TEXT,
+        allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+        max_tool_iterations INTEGER NOT NULL DEFAULT 100,
+        max_runtime_ms INTEGER NOT NULL DEFAULT 28800000,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         started_at INTEGER,
@@ -150,6 +159,11 @@ export class RunStore {
     if (!timerColumns.some((column) => column.name === "interval_ms")) {
       this.db.exec("ALTER TABLE run_timers ADD COLUMN interval_ms INTEGER NOT NULL DEFAULT 10000");
     }
+    const runColumns = this.db.prepare("PRAGMA table_info(runs)").all() as Array<{ name: string }>;
+    const runColumnNames = new Set(runColumns.map((column) => column.name));
+    if (!runColumnNames.has("allowed_tools_json")) this.db.exec("ALTER TABLE runs ADD COLUMN allowed_tools_json TEXT NOT NULL DEFAULT '[]'");
+    if (!runColumnNames.has("max_tool_iterations")) this.db.exec("ALTER TABLE runs ADD COLUMN max_tool_iterations INTEGER NOT NULL DEFAULT 100");
+    if (!runColumnNames.has("max_runtime_ms")) this.db.exec("ALTER TABLE runs ADD COLUMN max_runtime_ms INTEGER NOT NULL DEFAULT 28800000");
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
 
@@ -157,17 +171,36 @@ export class RunStore {
     this.db.close();
   }
 
-  createRun(input: { task: string; cwd: string; sessionId?: string }): RunRecord {
+  createRun(input: {
+    task: string;
+    cwd: string;
+    sessionId?: string;
+    allowedTools?: string[];
+    maxToolIterations?: number;
+    maxRuntimeMs?: number;
+  }): RunRecord {
     const task = input.task.trim();
     if (!task) throw new Error("task must not be empty");
     if (!input.cwd) throw new Error("cwd must not be empty");
+    const allowedTools = [...new Set(input.allowedTools ?? [])];
+    if (allowedTools.some((name) => typeof name !== "string" || !name.trim())) {
+      throw new Error("allowedTools must contain non-empty tool names");
+    }
+    const maxToolIterations = input.maxToolIterations ?? 100;
+    if (!Number.isInteger(maxToolIterations) || maxToolIterations < 1 || maxToolIterations > 5000) {
+      throw new Error("maxToolIterations must be an integer from 1 through 5000");
+    }
+    const maxRuntimeMs = input.maxRuntimeMs ?? 8 * 60 * 60 * 1000;
+    if (!Number.isInteger(maxRuntimeMs) || maxRuntimeMs < 1000 || maxRuntimeMs > 7 * 24 * 60 * 60 * 1000) {
+      throw new Error("maxRuntimeMs must be an integer from 1000 through 604800000");
+    }
     const id = randomUUID();
     const now = Date.now();
     const create = this.db.transaction(() => {
       this.db.prepare(`INSERT INTO runs
-        (id, session_id, cwd, task, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 'queued', ?, ?)`)
-        .run(id, input.sessionId ?? null, input.cwd, task, now, now);
+        (id, session_id, cwd, task, status, allowed_tools_json, max_tool_iterations, max_runtime_ms, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`)
+        .run(id, input.sessionId ?? null, input.cwd, task, JSON.stringify(allowedTools), maxToolIterations, maxRuntimeMs, now, now);
       this.appendEvent(id, "state", null, null, { status: "queued" }, now);
     });
     create.immediate();
@@ -240,6 +273,12 @@ export class RunStore {
       metadata: JSON.parse(row.metadata_json as string) as Record<string, unknown>,
       createdAt: row.created_at as number,
     }));
+  }
+
+  countToolIterations(runId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM run_events WHERE run_id = ? AND event_type = 'tool_intent'")
+      .get(runId) as { count: number };
+    return row.count;
   }
 
   /**
@@ -381,6 +420,13 @@ export class RunStore {
     });
   }
 
+  cancelTimersForRun(runId: string): number {
+    this.assertRunExists(runId);
+    const result = this.db.prepare("UPDATE run_timers SET status = 'cancelled', lease_until = NULL WHERE run_id = ? AND status IN ('scheduled', 'claimed')")
+      .run(runId);
+    return result.changes;
+  }
+
   cancelTimer(id: string): RunTimer {
     return this.updateTimer(id, (timer) => {
       if (timer.status === "completed" || timer.status === "failed") return;
@@ -438,6 +484,9 @@ function rowToRun(row: RunRow): RunRecord {
     task: row.task,
     status: row.status,
     stopReason: row.stop_reason,
+    allowedTools: JSON.parse(row.allowed_tools_json) as string[],
+    maxToolIterations: row.max_tool_iterations,
+    maxRuntimeMs: row.max_runtime_ms,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,
