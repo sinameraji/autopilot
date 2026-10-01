@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.5.0](https://github.com/sinameraji/autopilot/compare/v1.4.0...v1.5.0) (2026-10-01)
+
+
+### Features
+
+* **jobs:** add durable managed background jobs ([#673](https://github.com/sinameraji/autopilot/issues/673)) ([2085302](https://github.com/sinameraji/autopilot/commit/2085302812dfec5efdb58ed4b7542d968a669cac))
+* **requesty:** land gateway changes from [#655](https://github.com/sinameraji/autopilot/issues/655) ([80a8af9](https://github.com/sinameraji/autopilot/commit/80a8af9691a8ae361407bb84f6ba737ac1875404))
+* **server:** add authenticated durable run APIs ([#681](https://github.com/sinameraji/autopilot/issues/681)) ([4f652eb](https://github.com/sinameraji/autopilot/commit/4f652eb2654006b4ad85d04a55d46735fe00503f))
+* **ui:** bring back --ui camouflage on the new inline renderer ([#672](https://github.com/sinameraji/autopilot/issues/672)) ([b02b31d](https://github.com/sinameraji/autopilot/commit/b02b31d5ecebc7d7a59345e35b48694e2a2d6f0e))
+* update autopilot logo ([#679](https://github.com/sinameraji/autopilot/issues/679)) ([268a630](https://github.com/sinameraji/autopilot/commit/268a6309d51ad6aa4f81f611a5af3513b51ce7c6))
+
+
+### Bug Fixes
+
+* rename default co-author to autopilot ([#680](https://github.com/sinameraji/autopilot/issues/680)) ([65a920a](https://github.com/sinameraji/autopilot/commit/65a920aa811a1bdd9506a05d6694aa10c95d8430))
+* **requesty:** cover code paths added on main since [#655](https://github.com/sinameraji/autopilot/issues/655) branched ([d95dca4](https://github.com/sinameraji/autopilot/commit/d95dca4ed5df1a014b3133192e429286f093a009))
+* **ui:** restore input after ! commands ([#675](https://github.com/sinameraji/autopilot/issues/675)) ([1fdb155](https://github.com/sinameraji/autopilot/commit/1fdb155111a9f3813c78d75796d7c02d7162da16))
+
 ## [1.4.0](https://github.com/sinameraji/autopilot/compare/v1.3.0...v1.4.0) (2026-09-29)
 
 
