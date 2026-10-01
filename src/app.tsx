@@ -94,6 +94,7 @@ import { FilePicker, type FilePickerItem } from "./ui/file-picker.js";
 import { SlashPicker } from "./ui/slash-picker.js";
 import { usePickerController } from "./ui/use-picker-controller.js";
 import { useModalHost } from "./ui/use-modal-host.js";
+import type { AppBridge, AppModal } from "./ui/app-bridge.js";
 import { ModalHost } from "./ui/modal-host.js";
 import { PlanCompletePicker } from "./ui/plan-complete-picker.js";
 import type { PlanCompleteChoice } from "./ui/plan-complete-picker.js";
@@ -155,11 +156,14 @@ function App({
   initialUpdateResult,
   initialLspScope,
   initialLspProjectPath,
+  bridge,
 }: {
   initialCfg: Cfg | null;
   initialUpdateResult?: UpdateCheckResult;
   initialLspScope: "project" | "global";
   initialLspProjectPath: string | null;
+  /** Render through another view (e.g. Camouflage) instead of Ink. */
+  bridge?: AppBridge;
 }) {
   const { exit } = useApp();
   const { columns } = useWindowSize();
@@ -2486,30 +2490,7 @@ function App({
     });
   }, [usage, modelContextLimit, busy, runCompact]);
 
-  if (!cfg) {
-    return (
-      <ThemeProvider theme={theme}>
-        <Onboarding
-          onCancel={() => exit()}
-          onDone={async (newCfg) => {
-            setCfg(newCfg);
-            setEvents((e) => [
-              ...e,
-              { kind: "info", key: mkKey(), text: "configuration saved — welcome to autopilot (formerly kimiflare)!" },
-            ]);
-          }}
-        />
-      </ThemeProvider>
-    );
-  }
-
-  if (planOptions !== null) {
-    return (
-      <ThemeProvider theme={theme}>
-        <Box flexDirection="column">
-          <PlanOptionsPicker
-            options={planOptions}
-            onPick={(option) => {
+  function handlePlanOptionPick(option: PlanOption | null) {
               setPlanOptions(null);
               planOptionsRef.current = null;
               if (option) {
@@ -2533,7 +2514,127 @@ function App({
                   },
                 ]);
               }
-            }}
+  }
+
+  // ── Alternative view (Camouflage) ─────────────────────────────────────
+  // Report what's on screen after every render, and keep the view's
+  // actions pointing at this render's handlers.
+  useEffect(() => {
+    if (!bridge) return;
+    const open: AppModal[] = [];
+    if (modals.showModelPicker) open.push("model");
+    if (modals.showModePicker) open.push("mode");
+    if (modals.showThemePicker) open.push("theme");
+    if (modals.showUiPicker) open.push("ui");
+    if (modals.showHelpMenu) open.push("help");
+    if (modals.showMemoryPicker) open.push("memory");
+    if (modals.showSkillsPicker) open.push("skills");
+    if (modals.showShellPicker) open.push("shell");
+    if (modals.showPlanCompletePicker) open.push("planComplete");
+    if (modals.showCommandList) open.push("commandList");
+    if (modals.commandWizard) open.push("commandWizard");
+    if (modals.commandPicker) open.push("commandPicker");
+    if (modals.showLspWizard) open.push("lspWizard");
+    if (modals.showRemoteDashboard) open.push("remoteDashboard");
+    if (modals.showInboxModal) open.push("inbox");
+    if (modals.showMultiAgentModal) open.push("multiAgent");
+    if (modals.showHooksDashboard) open.push("hooksDashboard");
+    if (modals.showChangelogImagePicker) open.push("changelogImage");
+    bridge.connect({
+      submit: (text) => submitRef.current(text),
+      interrupt: () => {
+        if (multiAgentAbortRef.current) {
+          multiAgentAbortRef.current.abort();
+          return;
+        }
+        if (busyRef.current || supervisorRef.current.isRunning) runInterruptTurn(interruptDepsRef.current!);
+      },
+      cycleMode: () => {
+        if (modesEnabled) setMode((m) => nextMode(m));
+      },
+      decidePermission,
+      pickModel: handleModelPick,
+      pickMode: (m) => {
+        setShowModePicker(false);
+        if (m) {
+          setMode(m);
+          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: `mode: ${m}` }]);
+        }
+      },
+      pickResume: handleResumePick,
+      pickCheckpoint: handleCheckpointPick,
+      pickPlanOption: handlePlanOptionPick,
+      pickPlanComplete: handlePlanCompletePick,
+      closeModal: (m) => {
+        const close: Record<AppModal, () => void> = {
+          model: () => setShowModelPicker(false),
+          mode: () => setShowModePicker(false),
+          theme: () => modals.setShowThemePicker(false),
+          ui: () => modals.setShowUiPicker(false),
+          help: () => modals.setShowHelpMenu(false),
+          memory: () => modals.setShowMemoryPicker(false),
+          skills: () => modals.setShowSkillsPicker(false),
+          shell: () => modals.setShowShellPicker(false),
+          planComplete: () => handlePlanCompletePick(null),
+          commandList: () => modals.setShowCommandList(false),
+          commandWizard: () => modals.setCommandWizard(null),
+          commandPicker: () => modals.setCommandPicker(null),
+          lspWizard: () => modals.setShowLspWizard(false),
+          remoteDashboard: () => modals.setShowRemoteDashboard(false),
+          inbox: () => modals.setShowInboxModal(false),
+          multiAgent: () => modals.setShowMultiAgentModal(false),
+          hooksDashboard: () => modals.setShowHooksDashboard(false),
+          changelogImage: () => modals.setShowChangelogImagePicker(false),
+        };
+        close[m]();
+      },
+      runCommand: (cmd) => {
+        void handleSlash(cmd);
+      },
+      exit,
+    });
+    bridge.sync({
+      events,
+      busy,
+      mode,
+      model: cfg?.model ?? "",
+      usage,
+      sessionUsage,
+      tasks,
+      permission: perm ? { tool: perm.tool, args: perm.args } : null,
+      modals: open,
+      resumeSessions,
+      checkpoints: checkpointSession ? { session: checkpointSession, list: checkpointList } : null,
+      planOptions,
+    });
+  });
+
+  if (bridge) return null;
+
+  if (!cfg) {
+    return (
+      <ThemeProvider theme={theme}>
+        <Onboarding
+          onCancel={() => exit()}
+          onDone={async (newCfg) => {
+            setCfg(newCfg);
+            setEvents((e) => [
+              ...e,
+              { kind: "info", key: mkKey(), text: "configuration saved — welcome to autopilot (formerly kimiflare)!" },
+            ]);
+          }}
+        />
+      </ThemeProvider>
+    );
+  }
+
+  if (planOptions !== null) {
+    return (
+      <ThemeProvider theme={theme}>
+        <Box flexDirection="column">
+          <PlanOptionsPicker
+            options={planOptions}
+            onPick={handlePlanOptionPick}
           />
         </Box>
       </ThemeProvider>
@@ -2887,6 +2988,49 @@ function App({
     </Box>
     </ThemeProvider>
   );
+}
+
+/**
+ * Run App headless behind a bridge (e.g. the Camouflage view): App's logic
+ * runs as usual but Ink draws nothing and reads no keys; the bridge owns the
+ * terminal.
+ */
+export async function renderAppWithBridge(
+  cfg: Cfg,
+  bridge: AppBridge,
+  updateResult?: UpdateCheckResult,
+  lspScope: "project" | "global" = "global",
+  lspProjectPath: string | null = null,
+) {
+  enableUserShellCommands();
+  const { PassThrough, Writable } = await import("node:stream");
+  // Ink's useInput needs a raw-mode-capable stdin; give it one that never
+  // produces keys, so the renderer alone reads the terminal.
+  const stdin = Object.assign(new PassThrough(), {
+    isTTY: true,
+    setRawMode: () => stdin,
+    ref: () => stdin,
+    unref: () => stdin,
+  });
+  const stdout = Object.assign(new Writable({ write: (_c, _e, cb) => cb() }), { columns: 100, rows: 40, isTTY: false });
+  const instance = render(
+    <App
+      initialCfg={cfg}
+      initialUpdateResult={updateResult}
+      initialLspScope={lspScope}
+      initialLspProjectPath={lspProjectPath}
+      bridge={bridge}
+    />,
+    {
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stdout as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+      interactive: false,
+    },
+  );
+  await instance.waitUntilExit();
 }
 
 export async function renderApp(

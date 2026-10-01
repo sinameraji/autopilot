@@ -416,9 +416,15 @@ async function main() {
   // so first-run setup always goes through Ink.
   const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? "ink").toLowerCase();
   if (uiEngine === "camouflage" && cfg) {
-    const { runCamouflageMode } = await import("./camouflage-mode.js");
-    await runCamouflageMode({ cfg, model: opts.model ?? cfg.model ?? DEFAULT_MODEL, version: getAppVersion() });
-    return;
+    const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
+    const { runCamouflageView } = await import("./camouflage-view.js");
+    const { renderAppWithBridge } = await import("./app.js");
+    await runCamouflageView({
+      cfg: { ...cfg, model },
+      version: getAppVersion(),
+      runApp: (bridge) => renderAppWithBridge({ ...cfg, model }, bridge, updateResult, lspScope, lspProjectPath),
+    });
+    process.exit(0);
   }
   if (uiEngine === "camouflage") {
     console.error("autopilot: --ui camouflage needs a model provider key (OpenRouter or Requesty); run `autopilot auth openrouter` or `autopilot auth requesty` to set one up.");
