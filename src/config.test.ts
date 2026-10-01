@@ -127,9 +127,15 @@ describe("loadConfig", () => {
     assert.strictEqual((await loadConfig())?.workerBackend, "remote");
   });
 
-  it("defaults subagent routing to suggest and supports persisted and env policy choices", async () => {
+  it("defaults subagent routing to auto, migrates the old implicit default, and preserves explicit choices", async () => {
     process.env.OPENROUTER_API_KEY = "sk-or-env";
+    assert.equal((await loadConfig())?.subagentPolicy, "auto");
+
+    await writeConfigFile({ openrouterApiKey: "sk-or-file", subagentPolicy: "suggest" });
+    assert.equal((await loadConfig())?.subagentPolicy, "auto");
+    await writeConfigFile({ openrouterApiKey: "sk-or-file", subagentPolicy: "suggest", subagentPolicyExplicit: true });
     assert.equal((await loadConfig())?.subagentPolicy, "suggest");
+
     await writeConfigFile({ openrouterApiKey: "sk-or-file", subagentPolicy: "off" });
     assert.equal((await loadConfig())?.subagentPolicy, "off");
     process.env.KIMIFLARE_SUBAGENT_POLICY = "auto";

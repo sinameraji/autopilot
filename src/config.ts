@@ -83,8 +83,10 @@ export interface KimiConfig {
   accountId?: string;
   apiToken?: string;
   reasoningEffort?: ReasoningEffort;
-  /** Harness subagent routing: off, suggest (default), or auto. Auto never bypasses tool permission or worker budgets. */
+  /** Harness subagent routing: off, auto (default; coordinator assesses substantial tasks), or suggest. Worker calls remain permission-gated and budget-limited. */
   subagentPolicy?: SubagentPolicy;
+  /** Set only when the user explicitly chose a policy; used to migrate the former implicit suggest default. */
+  subagentPolicyExplicit?: boolean;
   /**
    * Feature flag for the plan / edit / auto permission modes. Off by default:
    * every session runs in auto (tools run without per-call prompts) and the
@@ -350,7 +352,13 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     model: m(envModel ?? persisted.model) ?? (requesty ? REQUESTY_DEFAULT_MODEL : DEFAULT_MODEL),
     openrouterProvider: persisted.openrouterProvider,
     reasoningEffort: envEffort ?? persisted.reasoningEffort,
-    subagentPolicy: envSubagentPolicy ?? (persisted.subagentPolicy === "off" || persisted.subagentPolicy === "suggest" || persisted.subagentPolicy === "auto" ? persisted.subagentPolicy : "suggest"),
+    subagentPolicy: envSubagentPolicy ?? (
+      persisted.subagentPolicy === "suggest" && persisted.subagentPolicyExplicit !== true
+        ? "auto"
+        : persisted.subagentPolicy === "off" || persisted.subagentPolicy === "suggest" || persisted.subagentPolicy === "auto"
+          ? persisted.subagentPolicy
+          : "auto"
+    ),
     modesEnabled: persisted.modesEnabled,
     coauthor: envCoauthor?.enabled ?? persisted.coauthor ?? true,
     coauthorName: envCoauthor?.name ?? persisted.coauthorName,

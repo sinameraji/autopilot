@@ -1,6 +1,6 @@
 import { describe, it, afterEach, before, beforeEach, after } from "node:test";
 import assert from "node:assert";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callWorkerEndpoint, spawnWorkerTool } from "./spawn-worker.js";
@@ -72,6 +72,19 @@ describe("callWorkerEndpoint", () => {
     assert.strictEqual(calls, 1);
   });
 
+  it("enforces the timeout when a caller abort signal is also supplied", async () => {
+    let requestSignal: AbortSignal | undefined;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      requestSignal = init.signal as AbortSignal;
+      return await new Promise<Response>((_resolve, reject) => {
+        requestSignal!.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }) as typeof fetch;
+
+    await assert.rejects(() => callWorkerEndpoint("http://x", undefined, {}, new AbortController().signal, 20));
+    assert.ok(requestSignal?.aborted);
+  });
+
   it("sends the API key header when provided", async () => {
     let seenHeaders: Record<string, string> = {};
     globalThis.fetch = (async (_url: string, init: RequestInit) => {
@@ -92,6 +105,7 @@ describe("spawnWorkerTool on a Requesty-only session", () => {
     "REQUESTY_API_KEY",
     "KIMIFLARE_WORKER_BACKEND",
     "KIMIFLARE_WORKER_ENDPOINT",
+    "KIMIFLARE_WORKER_API_KEY",
     "KIMI_MODEL",
     "XDG_CONFIG_HOME",
   ] as const;
@@ -103,10 +117,11 @@ describe("spawnWorkerTool on a Requesty-only session", () => {
     configHome = await mkdtemp(join(tmpdir(), "kimiflare-spawn-worker-test-"));
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     for (const k of ENV_KEYS) delete process.env[k];
     process.env.XDG_CONFIG_HOME = configHome;
     process.env.REQUESTY_API_KEY = "rq-test";
+    await rm(join(configHome, "kimiflare"), { recursive: true, force: true });
   });
 
   after(async () => {
@@ -115,6 +130,33 @@ describe("spawnWorkerTool on a Requesty-only session", () => {
       else process.env[k] = saved[k];
     }
     await rm(configHome, { recursive: true, force: true });
+  });
+
+  it("uses the worker API key persisted by remote setup", async () => {
+    const configDir = join(configHome, "kimiflare");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "config.json"), JSON.stringify({
+      openrouterApiKey: "sk-or-test",
+      workerEndpoint: "http://worker.test",
+      workerApiKey: "persisted-secret",
+    }));
+    let seenApiKey: string | undefined;
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      seenApiKey = (init.headers as Record<string, string>)["X-Worker-Api-Key"];
+      return mockResponse(200, sample);
+    }) as unknown as typeof fetch;
+
+    await spawnWorkerTool.run({ mode: "plan", task: "research", model: "openai/gpt-4o-mini" }, { cwd: process.cwd() });
+    assert.equal(seenApiKey, "persisted-secret");
+  });
+
+  it("explains when the remote worker backend has no endpoint configured", async () => {
+    const out = await spawnWorkerTool.run({ mode: "plan", task: "research" }, { cwd: process.cwd() });
+    const text = typeof out === "string" ? out : out.content;
+    assert.equal(
+      text,
+      "Worker endpoint not configured. Set KIMIFLARE_WORKER_ENDPOINT or workerEndpoint in config, or set workerBackend to hotcell.",
+    );
   });
 
   it("refuses Hotcell workers before launching one", async () => {

@@ -475,7 +475,7 @@ const handleSubagents: Handler = (ctx, _rest, arg) => {
     setEvents((events) => [...events, {
       kind: "info",
       key: mkKey(),
-      text: `subagent policy: ${cfg?.subagentPolicy ?? "suggest"}\nusage: /subagents off|suggest|auto\n\noff disables harness suggestions; suggest (default) asks before any worker call; auto lets the coordinator dispatch on strong evidence. Explicit user instructions still win. Every spawn_worker call remains permission-gated and budget-capped.`,
+      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Remote setup: KIMIFLARE_WORKER_ENDPOINT (or workerEndpoint in config). Hotcell: KIMIFLARE_WORKER_BACKEND=hotcell; plan mode only.`,
     }]);
     return true;
   }
@@ -491,7 +491,7 @@ const handleSubagents: Handler = (ctx, _rest, arg) => {
     setEvents((events) => [...events, { kind: "error", key: mkKey(), text: "configure an OpenRouter key or custom endpoint before changing subagent policy" }]);
     return true;
   }
-  const next = { ...cfg, subagentPolicy: policy };
+  const next = { ...cfg, subagentPolicy: policy, subagentPolicyExplicit: true };
   setCfg(next);
   void saveConfig(next).catch(() => {});
   setEvents((events) => [...events, {

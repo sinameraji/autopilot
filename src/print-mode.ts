@@ -211,7 +211,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   const delegationGuidance = await resolveSubagentGuidance({
     prompt: opts.prompt,
     tier: intent.tier,
-    policy: opts.subagentPolicy ?? "suggest",
+    policy: opts.subagentPolicy ?? "auto",
     apiKey: opts.openrouterApiKey,
     customEndpoint: Boolean(opts.baseUrl),
   });
