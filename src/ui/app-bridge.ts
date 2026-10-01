@@ -59,6 +59,10 @@ export interface AppSnapshot {
   planOptions: PlanOption[] | null;
   /** The user's custom slash commands, for the `/` picker. */
   customCommands: { name: string; description?: string }[];
+  themes: { name: string; label: string }[];
+  currentTheme: string;
+  currentShell: string;
+  memoryEnabled: boolean;
 }
 
 export interface AppActions {
@@ -76,6 +80,10 @@ export interface AppActions {
   pickCheckpoint: (checkpointId: string | null) => void;
   pickPlanOption: (option: PlanOption | null) => void;
   pickPlanComplete: (choice: PlanCompleteChoice | null) => void;
+  pickTheme: (name: string | null) => void;
+  pickShell: (shell: string | null) => void;
+  /** Delete a custom command (after the view confirmed it). */
+  deleteCommand: (name: string) => void;
   /** Close a dialog the view can't show. */
   closeModal: (modal: AppModal) => void;
   /** Run a slash command (e.g. from a dialog). */

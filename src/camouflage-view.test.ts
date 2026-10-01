@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { listMentionDir, modelOptions, toolRow, toolSummary } from "./camouflage-view.js";
+import { helpOptions, listMentionDir, modelOptions, toolRow, toolSummary } from "./camouflage-view.js";
 import { listModels } from "./models/registry.js";
 
 describe("listMentionDir", () => {
@@ -44,5 +44,15 @@ describe("modelOptions", () => {
     const sections = [...new Set(opts.map((o) => o.section))];
     assert.ok(sections.some((x) => x?.startsWith("Best & latest")));
     if (sections[0] === "Current") assert.equal(opts[0]!.value, current);
+  });
+});
+
+describe("helpOptions", () => {
+  it("lists the Ink help pages as sections, with custom commands last", () => {
+    const opts = helpOptions([{ name: "ship", description: "Ship it" }]);
+    const sections = [...new Set(opts.map((o) => o.section))];
+    assert.deepEqual(sections.slice(0, 3), ["Mode", "Session", "Memory"]);
+    assert.ok(opts.some((o) => o.value === "/memory search <query>"), "argument templates are pickable");
+    assert.deepEqual(opts[opts.length - 1], { value: "/ship", label: "/ship", description: "Ship it", section: "Custom commands" });
   });
 });
