@@ -12,7 +12,7 @@
  * renderer binary.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -20,10 +20,24 @@ import type { AppActions, AppBridge, AppModal, AppSnapshot } from "./ui/app-brid
 import type { ChatEvent } from "./ui/chat.js";
 import type { ToolEventState } from "./ui/tool-view.js";
 import type { Cfg } from "./app.js";
-import { BUILTIN_COMMANDS } from "./commands/builtins.js";
+import { BUILTIN_COMMANDS, BUILTIN_COMMAND_NAMES } from "./commands/builtins.js";
+import type { CustomCommand, CommandSource } from "./commands/types.js";
+import type { ReasoningEffort } from "./config.js";
 import { featuredModels, listModels, type ModelEntry } from "./models/registry.js";
 import { formatContext, formatModelPrice } from "./ui/model-picker.js";
 import { CATEGORIES, SINGLE_COMMANDS } from "./ui/help-menu.js";
+import { FEEDBACK_WORKER_URL, openBrowser } from "./ui/app-helpers.js";
+import { deployCommute, teardownCommute, findExistingCommuteWorkers } from "./remote/deploy-commute.js";
+import type { MultiAgentSettings } from "./ui/multi-agent-modal.js";
+import { loadRemoteSessions, formatSessionLine, formatTokens } from "./ui/remote-dashboard.js";
+import { cancelRemoteSession } from "./remote/worker-client.js";
+import { PRESETS as LSP_PRESETS } from "./ui/lsp-wizard.js";
+import { getShellCommand } from "./tools/bash.js";
+import type { LspServerConfig } from "./config.js";
+import type { HookConfig, HookEvent } from "./hooks/types.js";
+import { RECOMMENDED_HOOKS } from "./hooks/recommended.js";
+import { setHookEnabled, appendHook, deriveHookId } from "./hooks/settings.js";
+import { EVENT_DESCRIPTIONS, EVENT_COMMAND_EXAMPLES, MATCHER_EXAMPLES } from "./ui/hooks-wizard.js";
 import { MODES, type Mode } from "./mode.js";
 import { logger } from "./util/logger.js";
 
@@ -134,6 +148,8 @@ class View implements AppBridge {
   echoed: string[] = [];
   /** Per-event state already sent, keyed by ChatEvent.key. */
   private sent = new Map<string, { text: number; done: boolean }>();
+  /** Reasoning characters already sent, per open assistant stream. */
+  private reasoningSent = new Map<string, number>();
   /** Events before this index are fully sent and won't change. */
   private settled = 0;
   private firstKey: string | undefined;
@@ -210,11 +226,18 @@ class View implements AppBridge {
       }
       case "assistant": {
         if (!prev) this.cam.send("AssistantStreamStarted", { stream_id: e.key });
+        // Reasoning streams first; the renderer shows it on Ctrl+R.
+        const thought = this.reasoningSent.get(e.key) ?? 0;
+        if (e.reasoning.length > thought) {
+          this.cam.send("AssistantReasoningDelta", { stream_id: e.key, token: e.reasoning.slice(thought) });
+          this.reasoningSent.set(e.key, e.reasoning.length);
+        }
         const already = prev?.text ?? 0;
         if (e.text.length > already && e.text.startsWith(e.text.slice(0, already))) {
           this.cam.send("AssistantTokenDelta", { stream_id: e.key, token: e.text.slice(already) });
         }
         if (!e.streaming) {
+          this.reasoningSent.delete(e.key);
           this.cam.send("AssistantMessageCompleted", { stream_id: e.key, text: e.text });
           return this.mark(e.key, e.text.length, true);
         }
@@ -456,16 +479,55 @@ class View implements AppBridge {
         return;
       case "commandPicker":
         return want("commandPicker", async () => {
+          const editing = s.commandPickerMode === "edit";
           if (s.customCommands.length === 0) {
             a.closeModal("commandPicker");
             return void this.cam.send("RuntimeError", { message: "No custom commands yet. Create one with /command create.", severity: "info" });
           }
-          const r = await this.select("Delete a custom command", s.customCommands.map((c) => ({ value: c.name, label: `/${c.name}`, description: c.description })));
+          const r = await this.select(editing ? "Edit a custom command" : "Delete a custom command", s.customCommands.map((c) => ({ value: c.name, label: `/${c.name}`, description: c.description })));
           if (!r) return a.closeModal("commandPicker");
+          if (editing) return a.openCommandWizard("edit", r);
           const ok = await this.sdk.confirm(this.cam, { id: `confirm-${Date.now()}`, prompt: `Delete /${r}?`, default: "no" });
           if (ok.value) a.deleteCommand(r);
           else a.closeModal("commandPicker");
         });
+      case "changelogImage":
+        a.closeModal("changelogImage");
+        return want("changelogImage", async () => {
+          const detected = s.changelogImageRepo;
+          const f = await this.sdk.form(this.cam, {
+            id: `changelog-${Date.now()}`,
+            title: "Changelog image",
+            fields: [{ name: "repo", label: "Repository (owner/name)", default: detected ? `${detected.owner}/${detected.name}` : "", required: true }],
+          });
+          const repo = f.values?.repo?.trim();
+          if (f.cancelled || !repo || !repo.includes("/")) return;
+          const [owner, name] = repo.split("/", 2) as [string, string];
+          const days = await this.select("Merged PRs from", [
+            { value: "1", label: "Past 24 hours" },
+            { value: "7", label: "Past 7 days" },
+            { value: "30", label: "Past 30 days" },
+          ], "7");
+          if (days) a.generateChangelogImage(owner, name, Number(days));
+        });
+      case "multiAgent":
+        a.closeModal("multiAgent");
+        return want("multiAgent", () => this.multiAgent(s.multiAgent, s.remoteWorkerUrl));
+      case "remoteDashboard":
+        a.closeModal("remoteDashboard");
+        return want("remoteDashboard", () => this.remoteDashboard());
+      case "lspWizard":
+        a.closeModal("lspWizard");
+        return want("lspWizard", () => this.lspWizard(s.lsp));
+      case "hooksDashboard":
+        a.closeModal("hooksDashboard");
+        return want("hooksDashboard", () => this.hooksDashboard(s.hooks));
+      case "inbox":
+        a.closeModal("inbox");
+        return want("inbox", () => this.inbox());
+      case "commandWizard":
+        if (!s.commandWizard) return;
+        return want(`commandWizard-${s.commandWizard.mode}-${s.commandWizard.initial?.name ?? ""}`, () => this.commandEditor(s));
       default:
         this.cam.send("RuntimeError", {
           message: `${modalName(modal)} isn't available in the Camouflage UI yet. Run \`autopilot --ui ink\` for it.`,
@@ -473,6 +535,446 @@ class View implements AppBridge {
         });
         a.closeModal(modal);
     }
+  }
+
+  /**
+   * The custom-command editor (Ink's CommandWizard): name, description and
+   * template; optional mode, effort and model; project or global; preview;
+   * save through App's handleCommandSave.
+   */
+  private async commandEditor(s: AppSnapshot): Promise<void> {
+    const a = this.actions!;
+    const { mode: wizardMode, initial } = s.commandWizard!;
+    const others = s.customCommandDefs.map((c) => c.name).filter((n) => n !== initial?.name);
+    let draft = { name: initial?.name ?? "", description: initial?.description ?? "", template: initial?.template ?? "" };
+    let problem = "";
+    for (;;) {
+      const r = await this.sdk.form(this.cam, {
+        id: `cmd-${Date.now()}`,
+        title: `${wizardMode === "edit" ? `Edit /${initial?.name ?? ""}` : "New custom command"}${problem ? ` · ${problem}` : ""}`,
+        fields: [
+          { name: "name", label: "Name (you'll type /name)", default: draft.name, required: true, placeholder: "e.g. review" },
+          { name: "description", label: "Description (shown in the / picker)", default: draft.description },
+          {
+            name: "template",
+            label: "Prompt template",
+            kind: "multiline",
+            default: draft.template,
+            required: true,
+            placeholder: "$ARGUMENTS = everything after the command · $1, $2 = arguments · !`git diff` = shell output · @README.md = file contents",
+          },
+        ],
+      });
+      if (r.cancelled || !r.values) return a.closeModal("commandWizard");
+      draft = { name: r.values.name?.trim() ?? "", description: r.values.description?.trim() ?? "", template: r.values.template ?? "" };
+      problem = validateCommandName(draft.name, others) ?? (draft.template.trim() ? "" : "the template can't be empty");
+      if (!problem) break;
+    }
+
+    let cmdMode = initial?.mode;
+    let effort = initial?.effort;
+    let model = initial?.model;
+    const advanced = await this.select("Advanced options", [
+      { value: "skip", label: "Skip", description: "use the session's mode, effort and model" },
+      { value: "set", label: "Set mode, effort or model…" },
+    ]);
+    if (advanced === null) return a.closeModal("commandWizard");
+    if (advanced === "set") {
+      const m = await this.select("Mode for this command", ["none", "edit", "plan", "auto"].map((v) => ({ value: v, label: v })), cmdMode ?? "none");
+      if (m !== null) cmdMode = m === "none" ? undefined : (m as Mode);
+      const e = await this.select("Reasoning effort", ["none", "low", "medium", "high"].map((v) => ({ value: v, label: v })), effort ?? "none");
+      if (e !== null) effort = e === "none" ? undefined : (e as ReasoningEffort);
+      const models = pickableModels();
+      const pick = await this.select(
+        "Model for this command",
+        [{ value: "", label: "none", description: "use the session's model", section: "Default" }, ...modelOptions(models, model ?? "")],
+        model ?? "",
+      );
+      if (pick !== null) model = pick || undefined;
+    }
+
+    const where = await this.select(
+      "Save to",
+      [
+        { value: "project", label: "Project", description: ".kimiflare/commands in this repo" },
+        { value: "global", label: "Global", description: "available in every project" },
+      ],
+      initial?.source ?? "project",
+    );
+    if (where === null) return a.closeModal("commandWizard");
+
+    const front = Object.entries({ description: draft.description || undefined, mode: cmdMode, model, effort })
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}: ${v}`);
+    const preview = (front.length > 0 ? ["---", ...front, "---"] : []).concat(draft.template.split("\n"));
+    this.cam.send("Splash", { text: [`\x1b[1m/${draft.name}\x1b[0m`, ...preview.map((l) => `\x1b[2m│\x1b[0m ${l}`)].join("\n") });
+    const ok = await this.sdk.confirm(this.cam, { id: `save-${Date.now()}`, prompt: `Save /${draft.name}?`, yes_label: "Save", no_label: "Cancel" });
+    if (!ok.value) return a.closeModal("commandWizard");
+    a.saveCommand({
+      name: draft.name,
+      description: draft.description || undefined,
+      template: draft.template,
+      source: where as CommandSource,
+      mode: cmdMode,
+      model,
+      effort,
+      cwd: process.cwd(),
+    });
+  }
+
+  /**
+   * /multi-agent settings (Ink's MultiAgentModal): toggles flip in place,
+   * text fields open a form, Set up / Tear down stream their progress into
+   * the transcript. Loops until the user leaves.
+   */
+  private async multiAgent(initial: MultiAgentSettings, remoteUrl?: string): Promise<void> {
+    let st: MultiAgentSettings = { ...initial };
+    const save = (patch: MultiAgentSettings) => {
+      st = { ...st, ...patch };
+      this.actions?.saveMultiAgent(patch);
+    };
+    const say = (message: string, severity: "info" | "warn" | "error" = "info") => this.cam.send("RuntimeError", { message, severity });
+    const stream = async (steps: AsyncIterable<{ message: string; error?: boolean; done?: boolean; ok?: boolean }>, onDone: () => void) => {
+      try {
+        for await (const step of steps) {
+          say(`${step.error ? "✗" : step.done || step.ok ? "✓" : "·"} ${step.message}`, step.error ? "error" : "info");
+          if (step.done) onDone();
+          if (step.error) break;
+        }
+      } catch (err) {
+        say(`✗ ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    };
+    for (;;) {
+      const endpoint = st.workerEndpoint ?? "";
+      const options: PickOption[] = [
+        { value: "enabled", label: "Multi-agent mode", state: st.multiAgentEnabled ? "on" : "off" },
+        { value: "endpoint", label: "Endpoint", description: endpoint || (remoteUrl ? `${remoteUrl} (via /remote)` : "not set") },
+        { value: "secret", label: "Worker secret", description: st.workerApiKey ? "•".repeat(8) : "not set" },
+        { value: "autoExecute", label: "Auto-implement after research", state: st.autoExecute ? "on" : "off" },
+        { value: "deploy", label: "Set up", description: "deploys to your Cloudflare account, one-time" },
+      ];
+      if (endpoint) options.push({ value: "teardown", label: "Tear down", description: "delete from your Cloudflare account" });
+      const r = await this.select("Multi-agent", options);
+      if (r === null) return;
+      if (r === "enabled") save({ multiAgentEnabled: !st.multiAgentEnabled });
+      else if (r === "autoExecute") save({ autoExecute: !st.autoExecute });
+      else if (r === "endpoint" || r === "secret") {
+        const f = await this.sdk.form(this.cam, {
+          id: `ma-${Date.now()}`,
+          title: r === "endpoint" ? "Worker endpoint" : "Worker secret",
+          fields: [
+            r === "endpoint"
+              ? { name: "v", label: "Endpoint", default: endpoint, placeholder: "https://<your-worker>.workers.dev" }
+              : { name: "v", label: "Secret", kind: "password", default: st.workerApiKey ?? "" },
+          ],
+        });
+        if (!f.cancelled && f.values) {
+          const v = f.values.v?.trim() || undefined;
+          save(r === "endpoint" ? { workerEndpoint: v } : { workerApiKey: v });
+        }
+      } else if (r === "deploy") {
+        say("Scanning your Cloudflare account for existing Workers…");
+        const existing = await findExistingCommuteWorkers().catch(() => [] as string[]);
+        let workerName: string | undefined;
+        if (existing.length > 0) {
+          const pick = await this.select("Deploy to", [
+            ...existing.map((n) => ({ value: n, label: `Reuse ${n}` })),
+            { value: "", label: "Create new: kimiflare-multi-agent", description: "recommended — isolated" },
+          ], "");
+          if (pick === null) continue;
+          workerName = pick || undefined;
+        }
+        say(`Starting deploy${workerName ? ` to ${workerName}` : ""}…`);
+        await stream(deployCommute({ workerName }), () => save({ multiAgentEnabled: true }));
+      } else if (r === "teardown") {
+        const ok = await this.sdk.confirm(this.cam, { id: `td-${Date.now()}`, prompt: "Delete the multi-agent worker from your Cloudflare account?", default: "no" });
+        if (!ok.value) continue;
+        say("Starting tear-down…");
+        await stream(teardownCommute({ workerName: st.workerName }), () =>
+          save({ workerEndpoint: undefined, workerApiKey: undefined, workerName: undefined, multiAgentEnabled: false, autoExecute: false }),
+        );
+      }
+    }
+  }
+
+  /** /hooks (Ink's HooksDashboard + HooksWizard): Enter toggles a
+   *  configured hook or installs a recommended one; loops until Esc. */
+  private async hooksDashboard(initial: AppSnapshot["hooks"]): Promise<void> {
+    const cwd = process.cwd();
+    const say = (message: string, severity: "info" | "error" = "info") => void this.cam.send("RuntimeError", { message, severity });
+    let configured = initial;
+    const refresh = () => {
+      configured = this.actions?.reloadHooks() ?? configured;
+    };
+    let cursor: string | undefined;
+    for (;;) {
+      const ids = new Set(configured.map((c) => c.hook.id ?? deriveHookId(c.event, c.hook.command)));
+      const options: PickOption[] = [
+        ...configured.map((c) => {
+          const id = c.hook.id ?? deriveHookId(c.event, c.hook.command);
+          return {
+            value: `cfg:${id}`,
+            label: id,
+            section: "Configured",
+            columns: [c.event],
+            description: c.hook.description ?? c.hook.command,
+            state: c.hook.enabled === false ? ("off" as const) : ("on" as const),
+          };
+        }),
+        ...RECOMMENDED_HOOKS.filter((r) => !ids.has(r.id)).map((r) => ({
+          value: `rec:${r.id}`,
+          label: r.id,
+          section: "Recommended",
+          columns: [r.event],
+          description: r.hook.description ?? r.hook.command,
+        })),
+        { value: "create", label: "+ Create a custom hook…", section: "Custom" },
+      ];
+      const r = await this.select("Hooks", options, cursor, "Enter toggles · recommended hooks install into this project");
+      if (r === null) return;
+      cursor = r;
+      if (r === "create") {
+        const saved = await this.hookWizard(cwd);
+        if (saved) {
+          refresh();
+          say(`saved ${saved.id} (${saved.event}) → ${saved.path}`);
+        }
+        continue;
+      }
+      const id = r.slice(4);
+      if (r.startsWith("cfg:")) {
+        const entry = configured.find((c) => (c.hook.id ?? deriveHookId(c.event, c.hook.command)) === id);
+        if (!entry) continue;
+        const enable = entry.hook.enabled === false;
+        const path = setHookEnabled(cwd, id, enable);
+        if (path) {
+          refresh();
+          say(`${enable ? "enabled" : "disabled"} ${id} in ${path}`);
+        }
+      } else {
+        const rec = RECOMMENDED_HOOKS.find((x) => x.id === id);
+        if (!rec) continue;
+        const path = appendHook("project", cwd, rec.event, { ...rec.hook, enabled: true });
+        refresh();
+        cursor = `cfg:${id}`;
+        say(`enabled ${rec.id} (${rec.event}) → ${path}`);
+      }
+    }
+  }
+
+  /** Ink's HooksWizard: event → (matcher) → command → details → scope → save. */
+  private async hookWizard(cwd: string): Promise<{ event: HookEvent; id: string; path: string } | null> {
+    const events = Object.keys(EVENT_DESCRIPTIONS) as HookEvent[];
+    const ev = await this.select("Create hook · event", events.map((e) => ({ value: e, label: e, description: EVENT_DESCRIPTIONS[e] })));
+    if (ev === null) return null;
+    const event = ev as HookEvent;
+    const toolEvent = event === "PreToolUse" || event === "PostToolUse";
+    this.cam.send("Splash", {
+      text: [
+        `\x1b[1mExamples for ${event}\x1b[0m`,
+        ...EVENT_COMMAND_EXAMPLES[event].map((l) => (l.startsWith("#") ? `\x1b[2m${l}\x1b[0m` : l)),
+        ...(toolEvent ? ["", "\x1b[2m# Matchers (regex on the tool name):\x1b[0m", ...MATCHER_EXAMPLES.map((l) => `\x1b[2m${l}\x1b[0m`)] : []),
+      ].join("\n"),
+    });
+    const f = await this.sdk.form(this.cam, {
+      id: `hook-${Date.now()}`,
+      title: `Create ${event} hook`,
+      fields: [
+        ...(toolEvent ? [{ name: "matcher", label: "Tool matcher (regex, blank = all)", placeholder: "^(edit|write)$" }] : []),
+        { name: "command", label: "Shell command", required: true, kind: "multiline" as const },
+        { name: "id", label: "Id (optional)", placeholder: "my-hook" },
+        { name: "description", label: "Description (optional)" },
+      ],
+    });
+    if (f.cancelled || !f.values?.command?.trim()) return null;
+    const v = f.values;
+    const scope = await this.select("Save to", [
+      { value: "project", label: "project", description: ".kimiflare/settings.json" },
+      { value: "global", label: "global", description: "~/.config/kimiflare/settings.json" },
+    ]);
+    if (scope === null) return null;
+    const draft: HookConfig = {
+      command: v.command!.trim(),
+      ...(v.matcher?.trim() ? { matcher: v.matcher.trim() } : {}),
+      ...(v.id?.trim() ? { id: v.id.trim() } : {}),
+      ...(v.description?.trim() ? { description: v.description.trim() } : {}),
+      enabled: true,
+    };
+    try {
+      const path = appendHook(scope as "project" | "global", cwd, event, draft);
+      return { event, id: draft.id ?? draft.command.slice(0, 8), path };
+    } catch (e) {
+      this.cam.send("RuntimeError", { message: `save failed: ${(e as Error).message}`, severity: "error" });
+      return null;
+    }
+  }
+
+  /** /lsp setup (Ink's LspWizard). */
+  private async lspWizard(lsp: AppSnapshot["lsp"]): Promise<void> {
+    const a = this.actions!;
+    const { servers, scope } = lsp;
+    const say = (message: string, severity: "info" | "error" = "info") => void this.cam.send("RuntimeError", { message, severity });
+    const names = Object.keys(servers);
+    const action = await this.select("LSP servers", [
+      { value: "add", label: "Add server" },
+      ...(names.length ? [
+        { value: "toggle", label: "Enable / disable a server" },
+        { value: "delete", label: "Delete a server" },
+      ] : []),
+    ], undefined, names.length ? names.map((k) => `${k} ${servers[k]!.enabled === false ? "off" : "on"}`).join(" · ") : "No servers configured");
+    if (action === null) return;
+
+    if (action === "toggle" || action === "delete") {
+      const key = await this.select(action === "toggle" ? "Toggle server" : "Delete server", names.map((k) => ({
+        value: k,
+        label: k,
+        description: servers[k]!.command.join(" "),
+        ...(action === "toggle" ? { state: servers[k]!.enabled === false ? "off" as const : "on" as const } : {}),
+      })));
+      if (key === null) return;
+      if (action === "toggle") {
+        return a.saveLsp({ ...servers, [key]: { ...servers[key]!, enabled: servers[key]!.enabled === false } }, true, scope);
+      }
+      const ok = await this.sdk.confirm(this.cam, { id: `lspdel-${Date.now()}`, prompt: `Delete ${key}?`, default: "no" });
+      if (!ok.value) return;
+      const next = { ...servers };
+      delete next[key];
+      return a.saveLsp(next, Object.keys(next).length > 0, scope);
+    }
+
+    const id = await this.select("Add LSP server", LSP_PRESETS.map((p) => ({
+      value: p.id,
+      label: p.name,
+      description: p.description + (p.id in servers ? " · configured" : ""),
+    })));
+    if (id === null) return;
+    const preset = LSP_PRESETS.find((p) => p.id === id)!;
+    let name = preset.id;
+    let command = preset.command;
+    if (preset.id === "custom") {
+      const f = await this.sdk.form(this.cam, {
+        id: `lspcustom-${Date.now()}`,
+        title: "Custom LSP server",
+        fields: [
+          { name: "name", label: "Name", required: true, placeholder: "my-server" },
+          { name: "command", label: "Command", required: true, placeholder: "my-language-server --stdio" },
+        ],
+      });
+      if (f.cancelled || !f.values?.name?.trim() || !f.values.command?.trim()) return;
+      name = f.values.name.trim();
+      command = f.values.command.trim().split(/\s+/);
+    } else if (preset.installCommand) {
+      const r = await this.select(`Install ${preset.name}`, [
+        { value: "run", label: "Run install command", description: preset.installCommand },
+        { value: "skip", label: "Skip install", description: "already installed" },
+      ], undefined, preset.installHint);
+      if (r === null) return;
+      if (r === "run") {
+        say(`$ ${preset.installCommand}`);
+        const res = await runShell(preset.installCommand);
+        say(res.output.trim().split("\n").slice(-12).join("\n") || (res.ok ? "Installed." : "Install failed."), res.ok ? "info" : "error");
+        if (!res.ok) {
+          const go = await this.sdk.confirm(this.cam, { id: `lspanyway-${Date.now()}`, prompt: "Install failed. Save the server anyway?", default: "no" });
+          if (!go.value) return;
+        }
+      }
+    }
+    const defaultToProject = lsp.hasProjectDir || scope === "project";
+    const where = await this.select("Save to", [
+      { value: "project", label: "This project only" },
+      { value: "global", label: "Global config" },
+    ], defaultToProject ? "project" : "global");
+    if (where === null) return;
+    const next: Record<string, LspServerConfig> = { ...servers, [name]: { command, enabled: true } };
+    a.saveLsp(next, true, where as "project" | "global");
+  }
+
+  /** /remote list (Ink's RemoteDashboard + RemoteSessionDetail). */
+  private async remoteDashboard(): Promise<void> {
+    const say = (message: string, severity: "info" | "error" = "info") => void this.cam.send("RuntimeError", { message, severity });
+    for (;;) {
+      let sessions;
+      try {
+        sessions = await loadRemoteSessions();
+      } catch (err) {
+        return say(`Couldn't load remote sessions: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+      if (sessions.length === 0) return say("No remote sessions yet. Type /remote <prompt> to start one.");
+      const r = await this.select("Recent remote tasks", [
+        ...sessions.map((s) => ({ value: s.sessionId, label: formatSessionLine(s) })),
+        { value: "\0refresh", label: "↻ Refresh" },
+      ]);
+      if (r === null) return;
+      if (r === "\0refresh") continue;
+      const s = sessions.find((x) => x.sessionId === r);
+      if (!s) continue;
+      const tokens = s.tokensUsed !== undefined ? `${formatTokens(s.tokensUsed)}${s.tokensBudget ? ` / ${formatTokens(s.tokensBudget)}` : ""}` : null;
+      const rows: [string, string | null | undefined][] = [
+        ["ID", s.sessionId],
+        ["Repo", s.repo],
+        ["Status", s.status],
+        ["Prompt", s.prompt],
+        ["PR", s.prUrl],
+        ["Error", s.errorMessage],
+        ["Tokens", tokens],
+        ["Created", new Date(s.createdAt).toLocaleString()],
+        ["Finished", s.finishedAt ? new Date(s.finishedAt).toLocaleString() : null],
+      ];
+      this.cam.send("Splash", {
+        text: ["\x1b[1mRemote session\x1b[0m", ...rows.filter(([, v]) => v).map(([k, v]) => `\x1b[2m${k.padEnd(9)}\x1b[0m${v}`)].join("\n"),
+      });
+      const running = s.status === "running" || s.status === "pending";
+      const next = await this.select("Remote session", [
+        { value: "back", label: "Back to list" },
+        ...(s.prUrl ? [{ value: "pr", label: "Open PR", description: s.prUrl }] : []),
+        ...(running ? [{ value: "cancel", label: "Cancel session" }] : []),
+      ]);
+      if (next === null) return;
+      if (next === "pr" && s.prUrl) openBrowser(s.prUrl);
+      if (next === "cancel") {
+        try {
+          await cancelRemoteSession(s.workerUrl, s.sessionId);
+          say(`Cancelled session ${s.sessionId}`);
+        } catch (err) {
+          say(`Failed to cancel: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+      }
+    }
+  }
+
+  /** The voice-note inbox (Ink's InboxModal): handle + secret, then the
+   *  messages; picking one opens it in the browser. */
+  private async inbox(): Promise<void> {
+    const f = await this.sdk.form(this.cam, {
+      id: `inbox-${Date.now()}`,
+      title: "Check your inbox",
+      fields: [
+        { name: "handle", label: "Your X / Twitter handle", required: true, placeholder: "without the @" },
+        { name: "secret", label: "Secret", kind: "password", required: true },
+      ],
+    });
+    const handle = f.values?.handle?.trim().replace(/^@/, "");
+    const secret = f.values?.secret?.trim();
+    if (f.cancelled || !handle || !secret) return;
+    const q = `u=${encodeURIComponent(handle)}&s=${encodeURIComponent(secret)}`;
+    let messages: { id: string; createdAt: number; seen: boolean }[] = [];
+    try {
+      const res = await fetch(`${FEEDBACK_WORKER_URL}/inbox/check?${q}`);
+      if (!res.ok) throw new Error(`the inbox server returned ${res.status}`);
+      const data = (await res.json()) as { messages?: typeof messages };
+      messages = (data.messages ?? []).sort((x, y) => y.createdAt - x.createdAt);
+    } catch (err) {
+      return void this.cam.send("RuntimeError", { message: `Couldn't check the inbox: ${err instanceof Error ? err.message : String(err)}`, severity: "error" });
+    }
+    if (messages.length === 0) {
+      return void this.cam.send("RuntimeError", { message: `No messages yet for @${handle}.`, severity: "info" });
+    }
+    const r = await this.select(
+      `Inbox for @${handle}`,
+      messages.map((m) => ({ value: m.id, label: new Date(m.createdAt).toLocaleString(), state: m.seen ? "off" : "on", description: m.seen ? "" : "new" })),
+    );
+    if (r) openBrowser(`${FEEDBACK_WORKER_URL}/inbox?${q}&m=${encodeURIComponent(r)}`);
   }
 
   /** Run a command; for templates like "/skills add <name>", ask for each
@@ -504,7 +1006,29 @@ class View implements AppBridge {
 
 // ----- helpers ---------------------------------------------------------------
 
+/** Run a shell command to completion, capturing its output. */
+function runShell(command: string): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    const { shell, args } = getShellCommand();
+    const child = spawn(shell, [...args, command], { env: process.env });
+    let out = "";
+    child.stdout?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    child.stderr?.on("data", (c: Buffer) => (out += c.toString("utf8")));
+    child.on("close", (code) => resolve({ ok: code === 0, output: out || (code === 0 ? "" : `Exit code: ${code}`) }));
+    child.on("error", (err) => resolve({ ok: false, output: err.message }));
+  });
+}
+
 type PickOption = { value: string; label: string; description?: string; section?: string; columns?: string[]; state?: "on" | "off"; keywords?: string };
+
+/** The Ink command wizard's name rules. */
+export function validateCommandName(name: string, existing: string[]): string | null {
+  if (!name) return "a name is required";
+  if (!/^[a-zA-Z][a-zA-Z0-9_\-/]*$/.test(name)) return "use letters, numbers, _ - / and start with a letter";
+  if (BUILTIN_COMMAND_NAMES.has(name.toLowerCase())) return `/${name} is a built-in command`;
+  if (existing.includes(name)) return `/${name} already exists`;
+  return null;
+}
 
 /** The Ink help menu's pages as sections, plus custom commands. */
 export function helpOptions(custom: { name: string; description?: string }[]): PickOption[] {

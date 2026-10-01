@@ -95,6 +95,8 @@ import { SlashPicker } from "./ui/slash-picker.js";
 import { usePickerController } from "./ui/use-picker-controller.js";
 import { useModalHost } from "./ui/use-modal-host.js";
 import type { AppBridge, AppModal } from "./ui/app-bridge.js";
+import type { MultiAgentSettings } from "./ui/multi-agent-modal.js";
+import type { HookConfig, HookEvent } from "./hooks/types.js";
 import { ModalHost } from "./ui/modal-host.js";
 import { PlanCompletePicker } from "./ui/plan-complete-picker.js";
 import type { PlanCompleteChoice } from "./ui/plan-complete-picker.js";
@@ -2490,6 +2492,96 @@ function App({
     });
   }, [usage, modelContextLimit, busy, runCompact]);
 
+  function handleChangelogImageGenerate(owner: string, repo: string, days: number) {
+          setShowChangelogImagePicker(false);
+          const asstId = mkAssistantId();
+          setEvents((e) => [
+            ...e,
+            {
+              kind: "assistant",
+              key: `asst_${asstId}`,
+              id: asstId,
+              text: `Generating changelog image for ${owner}/${repo} (last ${days} day${days === 1 ? "" : "s"})…`,
+              reasoning: "",
+              streaming: true,
+            },
+          ]);
+
+          const taskList: import("./tools/registry.js").Task[] = [
+            { id: "fetch-prs", title: "Fetch merged PRs", status: "pending" },
+            { id: "fetch-release", title: "Fetch latest release", status: "pending" },
+            { id: "summarize", title: "Summarize with LLM", status: "pending" },
+            { id: "render", title: "Render changelog image", status: "pending" },
+            { id: "save", title: "Save PNG file", status: "pending" },
+          ];
+          turn.setTasks(taskList);
+          turn.setTasksStartedAt(Date.now());
+
+          const updateTask = (id: string, status: import("./tools/registry.js").Task["status"]) => {
+            turn.setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
+          };
+
+          setTimeout(() => {
+            void (async () => {
+              try {
+                updateTask("fetch-prs", "in_progress");
+                updateTask("fetch-release", "in_progress");
+                const { changelogImageTool } = await import("./tools/changelog-image.js");
+                const result = await changelogImageTool.run({ owner, repo, days }, {
+                  cwd: process.cwd(),
+                  githubToken: cfg?.githubOAuthToken,
+                  llmAuth: llmAuthFromConfig(cfg),
+                  model: cfg?.model,
+                });
+                updateTask("fetch-prs", "completed");
+                updateTask("fetch-release", "completed");
+                updateTask("summarize", "completed");
+                updateTask("render", "completed");
+                updateTask("save", "completed");
+
+                const text = typeof result === "string" ? result : result.content;
+                setEvents((e) =>
+                  e.map((ev) =>
+                    ev.kind === "assistant" && ev.id === asstId
+                      ? { ...ev, text, streaming: false }
+                      : ev,
+                  ),
+                );
+              } catch (err) {
+                const msg = `changelog-image failed: ${err instanceof Error ? err.message : String(err)}`;
+                setEvents((e) =>
+                  e.map((ev) =>
+                    ev.kind === "assistant" && ev.id === asstId
+                      ? { ...ev, text: msg, streaming: false }
+                      : ev,
+                  ),
+                );
+              } finally {
+                turn.setTasksStartedAt(null);
+              }
+            })();
+          }, 0);
+  }
+
+  function configuredHooks(): { event: HookEvent; hook: HookConfig }[] {
+    const out: { event: HookEvent; hook: HookConfig }[] = [];
+    for (const ev of ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PreCompact"] as const) {
+      for (const h of hooksManagerRef.current.hooksFor(ev)) out.push({ event: ev, hook: h });
+    }
+    return out;
+  }
+
+  async function handleMultiAgentSave(patch: MultiAgentSettings) {
+    const fresh = await loadConfig().catch(() => cfg);
+    if (!fresh) return;
+    const next = { ...fresh, ...patch };
+    setCfg(next);
+    void saveConfig(next).catch(() => {});
+    if (patch.multiAgentEnabled === false && mode === "multi-agent-experimental") {
+      setMode("edit");
+    }
+  }
+
   function handlePlanOptionPick(option: PlanOption | null) {
               setPlanOptions(null);
               planOptionsRef.current = null;
@@ -2601,6 +2693,21 @@ function App({
         }
         modals.setShowShellPicker(false);
       },
+      generateChangelogImage: handleChangelogImageGenerate,
+      saveMultiAgent: (patch) => void handleMultiAgentSave(patch),
+      reloadHooks: () => {
+        hooksManagerRef.current.reload();
+        return configuredHooks();
+      },
+      saveLsp: (servers, enabled, scope) => void handleLspSave(servers, enabled, scope),
+      openCommandWizard: (wizardMode, name) => {
+        const initial = name ? customCommandsRef.current.find((c) => c.name === name) : undefined;
+        modals.setCommandPicker(null);
+        modals.setCommandWizard({ mode: wizardMode, initial });
+      },
+      saveCommand: (opts) => {
+        void handleCommandSave(opts);
+      },
       deleteCommand: (name) => {
         const cmd = customCommandsRef.current.find((c) => c.name === name);
         modals.setCommandPicker(null);
@@ -2626,6 +2733,24 @@ function App({
       currentTheme: cfg?.theme ?? DEFAULT_THEME_NAME,
       currentShell: cfg?.shell ?? "auto",
       memoryEnabled: !!cfg?.memoryEnabled,
+      customCommandDefs: customCommandsRef.current,
+      commandWizard: modals.commandWizard,
+      commandPickerMode: modals.commandPicker?.mode ?? null,
+      changelogImageRepo,
+      multiAgent: {
+        multiAgentEnabled: cfg?.multiAgentEnabled,
+        workerEndpoint: cfg?.workerEndpoint,
+        workerApiKey: cfg?.workerApiKey,
+        workerName: cfg?.workerName,
+        autoExecute: cfg?.autoExecute,
+      },
+      remoteWorkerUrl: cfg?.remoteWorkerUrl,
+      hooks: configuredHooks(),
+      lsp: {
+        servers: cfg?.lspServers ?? {},
+        scope: lspScope,
+        hasProjectDir: existsSync(join(process.cwd(), ".kimiflare")),
+      },
     });
   });
 
@@ -2732,27 +2857,10 @@ function App({
           workerName: cfg.workerName,
           autoExecute: cfg.autoExecute,
         } : undefined}
-        onMultiAgentSave={async (patch) => {
-          const fresh = await loadConfig().catch(() => cfg);
-          if (!fresh) return;
-          const next = { ...fresh, ...patch };
-          setCfg(next);
-          void saveConfig(next).catch(() => {});
-          if (patch.multiAgentEnabled === false && mode === "multi-agent-experimental") {
-            setMode("edit");
-          }
-        }}
+        onMultiAgentSave={handleMultiAgentSave}
         multiAgentRemoteWorkerUrl={cfg?.remoteWorkerUrl}
         multiAgentRemoteAuthSecret={cfg?.remoteAuthSecret}
-        getConfiguredHooks={() => {
-          const out: { event: import("./hooks/types.js").HookEvent; hook: import("./hooks/types.js").HookConfig }[] = [];
-          for (const ev of (["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PreCompact"] as const)) {
-            for (const h of hooksManagerRef.current.hooksFor(ev)) {
-              out.push({ event: ev, hook: h });
-            }
-          }
-          return out;
-        }}
+        getConfiguredHooks={configuredHooks}
         cwd={process.cwd()}
         onHooksMutate={() => hooksManagerRef.current.reload()}
         costAttributionEnabled={cfg?.costAttribution ?? false}
@@ -2787,76 +2895,7 @@ function App({
         }}
         onSkillsDone={() => setShowSkillsPicker(false)}
         changelogImageRepo={changelogImageRepo}
-        onChangelogImageGenerate={(owner, repo, days) => {
-          setShowChangelogImagePicker(false);
-          const asstId = mkAssistantId();
-          setEvents((e) => [
-            ...e,
-            {
-              kind: "assistant",
-              key: `asst_${asstId}`,
-              id: asstId,
-              text: `Generating changelog image for ${owner}/${repo} (last ${days} day${days === 1 ? "" : "s"})…`,
-              reasoning: "",
-              streaming: true,
-            },
-          ]);
-
-          const taskList: import("./tools/registry.js").Task[] = [
-            { id: "fetch-prs", title: "Fetch merged PRs", status: "pending" },
-            { id: "fetch-release", title: "Fetch latest release", status: "pending" },
-            { id: "summarize", title: "Summarize with LLM", status: "pending" },
-            { id: "render", title: "Render changelog image", status: "pending" },
-            { id: "save", title: "Save PNG file", status: "pending" },
-          ];
-          turn.setTasks(taskList);
-          turn.setTasksStartedAt(Date.now());
-
-          const updateTask = (id: string, status: import("./tools/registry.js").Task["status"]) => {
-            turn.setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, status } : t)));
-          };
-
-          setTimeout(() => {
-            void (async () => {
-              try {
-                updateTask("fetch-prs", "in_progress");
-                updateTask("fetch-release", "in_progress");
-                const { changelogImageTool } = await import("./tools/changelog-image.js");
-                const result = await changelogImageTool.run({ owner, repo, days }, {
-                  cwd: process.cwd(),
-                  githubToken: cfg?.githubOAuthToken,
-                  llmAuth: llmAuthFromConfig(cfg),
-                  model: cfg?.model,
-                });
-                updateTask("fetch-prs", "completed");
-                updateTask("fetch-release", "completed");
-                updateTask("summarize", "completed");
-                updateTask("render", "completed");
-                updateTask("save", "completed");
-
-                const text = typeof result === "string" ? result : result.content;
-                setEvents((e) =>
-                  e.map((ev) =>
-                    ev.kind === "assistant" && ev.id === asstId
-                      ? { ...ev, text, streaming: false }
-                      : ev,
-                  ),
-                );
-              } catch (err) {
-                const msg = `changelog-image failed: ${err instanceof Error ? err.message : String(err)}`;
-                setEvents((e) =>
-                  e.map((ev) =>
-                    ev.kind === "assistant" && ev.id === asstId
-                      ? { ...ev, text: msg, streaming: false }
-                      : ev,
-                  ),
-                );
-              } finally {
-                turn.setTasksStartedAt(null);
-              }
-            })();
-          }, 0);
-        }}
+        onChangelogImageGenerate={handleChangelogImageGenerate}
         onChangelogImageCancel={() => setShowChangelogImagePicker(false)}
       />
     );

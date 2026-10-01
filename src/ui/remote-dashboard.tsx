@@ -25,29 +25,7 @@ export function RemoteDashboard({ onSelect, onCancel }: Props) {
   async function loadSessions() {
     try {
       setRefreshing(true);
-      const list = await listRemoteSessions();
-      // Refresh status for running/pending sessions from the worker
-      const updated = await Promise.all(
-        list.map(async (s) => {
-          if (s.status === "running" || s.status === "pending") {
-            try {
-              const status = await getRemoteStatus(s.workerUrl, s.sessionId);
-              return {
-                ...s,
-                status: status.status,
-                prUrl: status.prUrl ?? s.prUrl,
-                tokensUsed: status.tokensUsed ?? s.tokensUsed,
-                tokensBudget: status.tokensBudget ?? s.tokensBudget,
-                updatedAt: new Date().toISOString(),
-              };
-            } catch {
-              return s;
-            }
-          }
-          return s;
-        }),
-      );
-      setSessions(updated.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()));
+      setSessions(await loadRemoteSessions());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -121,7 +99,31 @@ export function RemoteDashboard({ onSelect, onCancel }: Props) {
   );
 }
 
-function formatSessionLine(s: RemoteSession): string {
+/** Remote sessions, newest first, with live status for unfinished ones. */
+export async function loadRemoteSessions(): Promise<RemoteSession[]> {
+  const list = await listRemoteSessions();
+  const updated = await Promise.all(
+    list.map(async (s) => {
+      if (s.status !== "running" && s.status !== "pending") return s;
+      try {
+        const status = await getRemoteStatus(s.workerUrl, s.sessionId);
+        return {
+          ...s,
+          status: status.status,
+          prUrl: status.prUrl ?? s.prUrl,
+          tokensUsed: status.tokensUsed ?? s.tokensUsed,
+          tokensBudget: status.tokensBudget ?? s.tokensBudget,
+          updatedAt: new Date().toISOString(),
+        };
+      } catch {
+        return s;
+      }
+    }),
+  );
+  return updated.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+export function formatSessionLine(s: RemoteSession): string {
   const icon =
     s.status === "done"
       ? "✅"
@@ -154,7 +156,7 @@ function formatAgo(date: Date): string {
   return "just now";
 }
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);

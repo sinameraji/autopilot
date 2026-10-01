@@ -3,7 +3,7 @@ import assert from "node:assert";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { helpOptions, listMentionDir, modelOptions, toolRow, toolSummary } from "./camouflage-view.js";
+import { helpOptions, listMentionDir, modelOptions, toolRow, toolSummary, validateCommandName } from "./camouflage-view.js";
 import { listModels } from "./models/registry.js";
 
 describe("listMentionDir", () => {
@@ -54,5 +54,15 @@ describe("helpOptions", () => {
     assert.deepEqual(sections.slice(0, 3), ["Mode", "Session", "Memory"]);
     assert.ok(opts.some((o) => o.value === "/memory search <query>"), "argument templates are pickable");
     assert.deepEqual(opts[opts.length - 1], { value: "/ship", label: "/ship", description: "Ship it", section: "Custom commands" });
+  });
+});
+
+describe("validateCommandName", () => {
+  it("applies the Ink wizard's rules", () => {
+    assert.equal(validateCommandName("review", []), null);
+    assert.equal(validateCommandName("ops/deploy-check", []), null);
+    assert.match(validateCommandName("1bad", [])!, /start with a letter/);
+    assert.match(validateCommandName("Model", [])!, /built-in/);
+    assert.match(validateCommandName("review", ["review"])!, /already exists/);
   });
 });
