@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.11.0](https://github.com/sinameraji/autopilot/compare/v1.10.1...v1.11.0) (2026-10-01)
+
+
+### Features
+
+* **runs:** support long-running unattended tasks ([ea88965](https://github.com/sinameraji/autopilot/commit/ea889657d245833de01c08779f330e898a77ba7e))
+* **runs:** support long-running unattended tasks ([4c903de](https://github.com/sinameraji/autopilot/commit/4c903de4e43f3a45b243ab83af6493c2c3b5922f))
+
 ## [1.10.1](https://github.com/sinameraji/autopilot/compare/v1.10.0...v1.10.1) (2026-10-01)
 
 
