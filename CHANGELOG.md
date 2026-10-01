@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.0](https://github.com/sinameraji/autopilot/compare/v1.9.0...v1.10.0) (2026-10-01)
+
+
+### Features
+
+* **server:** add Aster control plane API ([eb99aa0](https://github.com/sinameraji/autopilot/commit/eb99aa0c3e59191ab72149a963940acba3366542))
+* **server:** support legacy and idempotent Aster turns ([0f0641c](https://github.com/sinameraji/autopilot/commit/0f0641cf4dc0b00dfa8687ec3cdf526b95e28996))
+* **server:** support legacy and idempotent Aster turns ([2a020bf](https://github.com/sinameraji/autopilot/commit/2a020bf57f964579a94e4348d23ddbb20c444ded))
+
 ## [1.9.0](https://github.com/sinameraji/autopilot/compare/v1.8.0...v1.9.0) (2026-10-01)
 
 
