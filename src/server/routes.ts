@@ -255,6 +255,16 @@ export function setupRoutes(config: KimiConfig) {
           badRequest(res, "maxRuntimeMs must be an integer from 1000 through 604800000");
           return;
         }
+        const maxTotalTokens = body.maxTotalTokens ?? 1_000_000;
+        if (!Number.isInteger(maxTotalTokens) || (maxTotalTokens as number) < 1 || (maxTotalTokens as number) > 100_000_000) {
+          badRequest(res, "maxTotalTokens must be an integer from 1 through 100000000");
+          return;
+        }
+        const maxCostUsd = body.maxCostUsd === undefined ? (config.baseUrl ? null : 5) : body.maxCostUsd;
+        if (maxCostUsd !== null && (typeof maxCostUsd !== "number" || !Number.isFinite(maxCostUsd) || maxCostUsd < 0.01 || maxCostUsd > 10_000)) {
+          badRequest(res, "maxCostUsd must be null or a number from 0.01 through 10000");
+          return;
+        }
         if (!task || task.length > 20_000) {
           badRequest(res, "task is required and must be at most 20000 characters");
           return;
@@ -321,6 +331,8 @@ export function setupRoutes(config: KimiConfig) {
               allowedTools,
               maxToolIterations: maxToolIterations as number,
               maxRuntimeMs: maxRuntimeMs as number,
+              maxTotalTokens: maxTotalTokens as number,
+              maxCostUsd,
             });
             store.transition(run.id, "running");
           } finally {
@@ -650,6 +662,15 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
           totalTokens: usage.total_tokens,
         });
       }
+    },
+    onUsageFinal: (usage) => {
+      if (!runStore || !active.runId) return;
+      const result = runStore.recordUsage(active.runId, {
+        promptTokens: usage.prompt_tokens,
+        completionTokens: usage.completion_tokens,
+        ...(usage.cost !== undefined ? { costUsd: usage.cost } : {}),
+      });
+      if (result.budgetExceededReason) throw new Error(result.budgetExceededReason);
     },
     onWarning: (msg) => {
       for (const client of active.sseClients) {

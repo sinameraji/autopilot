@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import type { RunWorktree } from "./worktrees.js";
 
 export type RunStatus = "queued" | "running" | "waiting" | "needs_input" | "completed" | "failed" | "cancelled" | "interrupted_unknown";
-export type RunEventType = "state" | "tool_intent" | "tool_result";
+export type RunEventType = "state" | "tool_intent" | "tool_result" | "usage";
 export type TimerCondition = "time" | "job" | "approval";
 export type TimerStatus = "scheduled" | "claimed" | "completed" | "failed" | "cancelled";
 
@@ -24,6 +24,12 @@ export interface RunRecord {
   allowedTools: string[];
   maxToolIterations: number;
   maxRuntimeMs: number;
+  maxTotalTokens: number;
+  maxCostUsd: number | null;
+  totalPromptTokens: number;
+  totalCompletionTokens: number;
+  totalCostUsd: number;
+  costUnknownResponses: number;
   createdAt: number;
   updatedAt: number;
   startedAt: number | null;
@@ -69,6 +75,12 @@ interface RunRow extends Record<string, unknown> {
   allowed_tools_json: string;
   max_tool_iterations: number;
   max_runtime_ms: number;
+  max_total_tokens: number;
+  max_cost_usd: number | null;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_cost_usd: number;
+  cost_unknown_responses: number;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -134,6 +146,12 @@ export class RunStore {
         allowed_tools_json TEXT NOT NULL DEFAULT '[]',
         max_tool_iterations INTEGER NOT NULL DEFAULT 100,
         max_runtime_ms INTEGER NOT NULL DEFAULT 28800000,
+        max_total_tokens INTEGER NOT NULL DEFAULT 1000000,
+        max_cost_usd REAL DEFAULT 5.0,
+        total_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+        total_completion_tokens INTEGER NOT NULL DEFAULT 0,
+        total_cost_usd REAL NOT NULL DEFAULT 0,
+        cost_unknown_responses INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         started_at INTEGER,
@@ -181,6 +199,12 @@ export class RunStore {
     if (!runColumnNames.has("repository_root")) this.db.exec("ALTER TABLE runs ADD COLUMN repository_root TEXT");
     if (!runColumnNames.has("worktree_path")) this.db.exec("ALTER TABLE runs ADD COLUMN worktree_path TEXT");
     if (!runColumnNames.has("branch")) this.db.exec("ALTER TABLE runs ADD COLUMN branch TEXT");
+    if (!runColumnNames.has("max_total_tokens")) this.db.exec("ALTER TABLE runs ADD COLUMN max_total_tokens INTEGER NOT NULL DEFAULT 1000000");
+    if (!runColumnNames.has("max_cost_usd")) this.db.exec("ALTER TABLE runs ADD COLUMN max_cost_usd REAL DEFAULT 5.0");
+    if (!runColumnNames.has("total_prompt_tokens")) this.db.exec("ALTER TABLE runs ADD COLUMN total_prompt_tokens INTEGER NOT NULL DEFAULT 0");
+    if (!runColumnNames.has("total_completion_tokens")) this.db.exec("ALTER TABLE runs ADD COLUMN total_completion_tokens INTEGER NOT NULL DEFAULT 0");
+    if (!runColumnNames.has("total_cost_usd")) this.db.exec("ALTER TABLE runs ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0");
+    if (!runColumnNames.has("cost_unknown_responses")) this.db.exec("ALTER TABLE runs ADD COLUMN cost_unknown_responses INTEGER NOT NULL DEFAULT 0");
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
 
@@ -197,6 +221,8 @@ export class RunStore {
     allowedTools?: string[];
     maxToolIterations?: number;
     maxRuntimeMs?: number;
+    maxTotalTokens?: number;
+    maxCostUsd?: number | null;
   }): RunRecord {
     const task = input.task.trim();
     if (!task) throw new Error("task must not be empty");
@@ -213,6 +239,14 @@ export class RunStore {
     if (!Number.isInteger(maxRuntimeMs) || maxRuntimeMs < 1000 || maxRuntimeMs > 7 * 24 * 60 * 60 * 1000) {
       throw new Error("maxRuntimeMs must be an integer from 1000 through 604800000");
     }
+    const maxTotalTokens = input.maxTotalTokens ?? 1_000_000;
+    if (!Number.isInteger(maxTotalTokens) || maxTotalTokens < 1 || maxTotalTokens > 100_000_000) {
+      throw new Error("maxTotalTokens must be an integer from 1 through 100000000");
+    }
+    const maxCostUsd = input.maxCostUsd === undefined ? 5 : input.maxCostUsd;
+    if (maxCostUsd !== null && (!Number.isFinite(maxCostUsd) || maxCostUsd < 0.01 || maxCostUsd > 10_000)) {
+      throw new Error("maxCostUsd must be null or a number from 0.01 through 10000");
+    }
     const id = input.id ?? input.worktree?.runId ?? randomUUID();
     if (!id.trim()) throw new Error("id must not be empty");
     if (input.worktree && input.worktree.runId !== id) throw new Error("worktree runId must match run id");
@@ -220,9 +254,9 @@ export class RunStore {
     const worktree = input.worktree;
     const create = this.db.transaction(() => {
       this.db.prepare(`INSERT INTO runs
-        (id, session_id, cwd, source_cwd, repository_root, worktree_path, branch, task, status, allowed_tools_json, max_tool_iterations, max_runtime_ms, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`)
-        .run(id, input.sessionId ?? null, worktree?.cwd ?? input.cwd, worktree?.sourceCwd ?? null, worktree?.repositoryRoot ?? null, worktree?.worktreePath ?? null, worktree?.branch ?? null, task, JSON.stringify(allowedTools), maxToolIterations, maxRuntimeMs, now, now);
+        (id, session_id, cwd, source_cwd, repository_root, worktree_path, branch, task, status, allowed_tools_json, max_tool_iterations, max_runtime_ms, max_total_tokens, max_cost_usd, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.sessionId ?? null, worktree?.cwd ?? input.cwd, worktree?.sourceCwd ?? null, worktree?.repositoryRoot ?? null, worktree?.worktreePath ?? null, worktree?.branch ?? null, task, JSON.stringify(allowedTools), maxToolIterations, maxRuntimeMs, maxTotalTokens, maxCostUsd, now, now);
       this.appendEvent(id, "state", null, null, { status: "queued" }, now);
     });
     create.immediate();
@@ -301,6 +335,58 @@ export class RunStore {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM run_events WHERE run_id = ? AND event_type = 'tool_intent'")
       .get(runId) as { count: number };
     return row.count;
+  }
+
+  recordUsage(runId: string, usage: { promptTokens: number; completionTokens: number; costUsd?: number }): {
+    run: RunRecord;
+    budgetExceededReason: string | null;
+  } {
+    for (const [name, value] of [["promptTokens", usage.promptTokens], ["completionTokens", usage.completionTokens]] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be a non-negative integer`);
+    }
+    if (usage.costUsd !== undefined && (!Number.isFinite(usage.costUsd) || usage.costUsd < 0)) {
+      throw new Error("costUsd must be a non-negative finite number");
+    }
+
+    const record = this.db.transaction(() => {
+      const current = this.getRun(runId);
+      if (!current) throw new Error(`Run not found: ${runId}`);
+      if (current.status !== "running") throw new Error(`Run ${runId} is not running (status: ${current.status})`);
+      const now = Date.now();
+      const totalPromptTokens = current.totalPromptTokens + usage.promptTokens;
+      const totalCompletionTokens = current.totalCompletionTokens + usage.completionTokens;
+      const totalCostUsd = current.totalCostUsd + (usage.costUsd ?? 0);
+      const costUnknownResponses = current.costUnknownResponses + (usage.costUsd === undefined ? 1 : 0);
+      this.db.prepare(`UPDATE runs SET total_prompt_tokens = ?, total_completion_tokens = ?, total_cost_usd = ?,
+        cost_unknown_responses = ?, updated_at = ? WHERE id = ?`)
+        .run(totalPromptTokens, totalCompletionTokens, totalCostUsd, costUnknownResponses, now, runId);
+
+      const totalTokens = totalPromptTokens + totalCompletionTokens;
+      const budgetExceededReason = totalTokens >= current.maxTotalTokens
+        ? "max_total_tokens_exceeded"
+        : current.maxCostUsd !== null && usage.costUsd === undefined
+          ? "cost_unavailable"
+          : current.maxCostUsd !== null && totalCostUsd >= current.maxCostUsd
+            ? "max_cost_usd_exceeded"
+            : null;
+      this.appendEvent(runId, "usage", null, null, {
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        costUsd: usage.costUsd ?? null,
+        totalPromptTokens,
+        totalCompletionTokens,
+        totalCostUsd,
+        costUnknownResponses,
+      }, now);
+
+      if (budgetExceededReason) {
+        this.db.prepare("UPDATE runs SET status = 'failed', stop_reason = ?, updated_at = ?, finished_at = ? WHERE id = ?")
+          .run(budgetExceededReason, now, now, runId);
+        this.appendEvent(runId, "state", null, null, { status: "failed", reason: budgetExceededReason }, now);
+      }
+      return { run: this.getRun(runId)!, budgetExceededReason };
+    });
+    return record.immediate();
   }
 
   /**
@@ -513,6 +599,12 @@ function rowToRun(row: RunRow): RunRecord {
     allowedTools: JSON.parse(row.allowed_tools_json) as string[],
     maxToolIterations: row.max_tool_iterations,
     maxRuntimeMs: row.max_runtime_ms,
+    maxTotalTokens: row.max_total_tokens,
+    maxCostUsd: row.max_cost_usd,
+    totalPromptTokens: row.total_prompt_tokens,
+    totalCompletionTokens: row.total_completion_tokens,
+    totalCostUsd: row.total_cost_usd,
+    costUnknownResponses: row.cost_unknown_responses,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     startedAt: row.started_at,

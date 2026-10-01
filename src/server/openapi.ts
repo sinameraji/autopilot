@@ -50,6 +50,8 @@ export function getOpenApiSpec(): string {
                 allowedTools: { type: "array", items: { type: "string" }, description: "Explicit tool permission allowlist; wait_for is always available." },
                 maxToolIterations: { type: "integer", minimum: 1, maximum: 5000 },
                 maxRuntimeMs: { type: "integer", minimum: 1000, maximum: 604800000 },
+                maxTotalTokens: { type: "integer", minimum: 1, maximum: 100000000, default: 1000000 },
+                maxCostUsd: { type: "number", minimum: 0.01, maximum: 10000, nullable: true, default: 5, description: "Null disables USD enforcement; custom endpoints default to null because they may omit authoritative cost." },
               },
             } } },
           },

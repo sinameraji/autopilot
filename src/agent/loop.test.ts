@@ -16,6 +16,58 @@ describe("runAgentTurn", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("does not execute tool calls when the usage callback stops an over-budget response", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "read the file" },
+    ];
+    let toolExecutions = 0;
+    const tool: ToolSpec = {
+      name: "read",
+      description: "Read a file",
+      parameters: { type: "object", properties: { path: { type: "string" } } },
+      needsPermission: false,
+      run: async () => "unexpected",
+    };
+    globalThis.fetch = async () => {
+      const encoder = new TextEncoder();
+      const events = [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "read", arguments: "" } }] } }] },
+        { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: JSON.stringify({ path: "README.md" }) } }] } }] },
+        { choices: [{ finish_reason: "tool_calls" }] },
+        { choices: [], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, cost: 0.02 } },
+      ];
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const executor = {
+      list: () => [tool],
+      run: async () => { toolExecutions++; return { ok: true, content: "unexpected" }; },
+    } as unknown as ToolExecutor;
+
+    await assert.rejects(runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [tool],
+      executor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callbacks: {
+        onUsageFinal: () => { throw new Error("max_cost_usd_exceeded"); },
+        askPermission: async () => "allow",
+      },
+    }), /max_cost_usd_exceeded/);
+    assert.equal(toolExecutions, 0);
+    assert.equal(messages.length, 2);
+  });
+
   it("exits gracefully when signal aborts during streaming", async () => {
     const controller = new AbortController();
     const messages: ChatMessage[] = [
