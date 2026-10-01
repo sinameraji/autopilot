@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.6.0](https://github.com/sinameraji/autopilot/compare/v1.5.0...v1.6.0) (2026-10-01)
+
+
+### Features
+
+* **runs:** add isolated worktree manager ([37382b7](https://github.com/sinameraji/autopilot/commit/37382b781c3e91558d853a111aab6ec2e0c1a28d))
+* **runs:** add isolated worktree manager ([6909ebd](https://github.com/sinameraji/autopilot/commit/6909ebd64217c173aa3d5b1e799f5649c2554e50))
+* **runs:** enforce token and cost budgets ([4b82b0c](https://github.com/sinameraji/autopilot/commit/4b82b0c1b6c4a523f41ea425f44a0c5ebad78905))
+* **runs:** enforce token and cost budgets ([cd3b416](https://github.com/sinameraji/autopilot/commit/cd3b4168f8562614273ab1d0533b4acf3d10a112))
+* **server:** isolate unattended runs in worktrees ([9763143](https://github.com/sinameraji/autopilot/commit/9763143d98b1a250ffd18bd8d21e57d281d39745))
+* **server:** isolate unattended runs in worktrees ([02638ee](https://github.com/sinameraji/autopilot/commit/02638ee136d0e3e7397d276b7d5607b05ead2fa9))
+* **ui:** browse folders from @ in the Camouflage UI ([4694bef](https://github.com/sinameraji/autopilot/commit/4694befa11b110b26c1b60c1748fc3170fca2afa))
+* **ui:** Ink-quality model and resume pickers in the Camouflage UI, plus /ui ([4154107](https://github.com/sinameraji/autopilot/commit/4154107cff79d803134f65ee9430ec60d5c93ddd))
+* **ui:** Ink-quality pickers and dialogs in the Camouflage UI ([0ab0384](https://github.com/sinameraji/autopilot/commit/0ab0384e70aef73285aa0cec6e31367f5baff120))
+* **ui:** run the full App in the Camouflage UI for slash-command parity ([7413582](https://github.com/sinameraji/autopilot/commit/741358287c34e1bcf8b8f8074f196d1d662089ad))
+* **ui:** run the full App in the Camouflage UI for slash-command parity ([0bb1a4b](https://github.com/sinameraji/autopilot/commit/0bb1a4b28a6a14cc29a244d492d0f19876831d0a))
+* **ui:** theme, shell, help, memory, skills and command dialogs in Camouflage ([812d392](https://github.com/sinameraji/autopilot/commit/812d3923ed7164f00aa8f4e52e7866ff42c49e7d))
+
 ## [1.5.0](https://github.com/sinameraji/autopilot/compare/v1.4.0...v1.5.0) (2026-10-01)
 
 
