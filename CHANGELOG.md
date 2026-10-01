@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/sinameraji/autopilot/compare/v1.6.0...v1.7.0) (2026-10-01)
+
+
+### Features
+
+* **ui:** settings dialogs and editors in the Camouflage UI ([631d69e](https://github.com/sinameraji/autopilot/commit/631d69edf899a693824ab63ab0320bab4bbb602a))
+
 ## [1.6.0](https://github.com/sinameraji/autopilot/compare/v1.5.0...v1.6.0) (2026-10-01)
 
 
