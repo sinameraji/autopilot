@@ -3,6 +3,7 @@ import assert from "node:assert";
 import { runAgentTurn } from "./loop.js";
 import type { ToolExecutor } from "../tools/executor.js";
 import type { ChatMessage } from "./messages.js";
+import type { RunWaitRequest, ToolSpec } from "../tools/registry.js";
 
 describe("runAgentTurn", () => {
   let originalFetch: typeof globalThis.fetch;
@@ -202,6 +203,75 @@ describe("runAgentTurn", () => {
     assert.equal(workerRuns, 0);
     assert.ok(fetchCalls >= 2);
     assert.ok(messages.some((message) => message.role === "tool" && /not available under this turn's policy/.test(String(message.content))));
+  });
+
+  it("ends the turn after a durable wait request without making another model call", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "wait briefly" },
+    ];
+    let fetchCalls = 0;
+    const waitRequest = { runId: "run-1", timerId: "timer-1", condition: "time" as const, wakeAt: Date.now() + 1000 };
+    globalThis.fetch = async () => {
+      fetchCalls++;
+      const events = [
+        { choices: [{ delta: { tool_calls: [{ index: 0, id: "call_wait", type: "function", function: { name: "wait_for", arguments: JSON.stringify({ duration_ms: 1000 }) } }] } }] },
+        { choices: [{ finish_reason: "tool_calls" }] },
+      ];
+      const encoder = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const waitTool: ToolSpec = {
+      name: "wait_for",
+      description: "wait",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      needsPermission: false,
+      run: async () => "unused",
+    };
+    const executor = {
+      list: () => [waitTool],
+      run: async () => ({
+        tool_call_id: "call_wait",
+        name: "wait_for",
+        content: "Yielding until the timer.",
+        ok: true,
+        waitRequest,
+      }),
+    } as unknown as ToolExecutor;
+    let yielded: RunWaitRequest | undefined;
+    let persisted = false;
+
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [waitTool],
+      executor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      onIterationEnd: async (updatedMessages) => {
+        persisted = true;
+        return updatedMessages;
+      },
+      callbacks: {
+        askPermission: async () => "allow",
+        onRunYield: (request) => {
+          assert.equal(persisted, true);
+          yielded = request;
+        },
+      },
+    });
+
+    assert.equal(fetchCalls, 1);
+    assert.deepEqual(yielded, waitRequest);
+    assert.ok(messages.some((message) => message.role === "tool" && message.tool_call_id === "call_wait"));
   });
 
   it("keeps Code Mode's synthetic execute_code tool available to the loop", async () => {

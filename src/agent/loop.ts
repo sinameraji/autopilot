@@ -5,7 +5,7 @@ import { toOpenAIToolDefs, type ToolSpec } from "../tools/registry.js";
 import type { ToolExecutor, PermissionAsker, ToolResult } from "../tools/executor.js";
 import { mergeReasoningDetails, sanitizeString, stableStringify, stripOldImages } from "./messages.js";
 import type { ChatMessage, ReasoningDetail, ToolCall, Usage } from "./messages.js";
-import type { Task, PlanOption } from "../tools/registry.js";
+import type { Task, PlanOption, RunWaitRequest } from "../tools/registry.js";
 import type { MemoryManager } from "../memory/manager.js";
 import type { HybridResult } from "../memory/schema.js";
 import { hasRecalledMemory, injectRecalledMemoryOnce } from "../memory/recall-inject.js";
@@ -57,6 +57,8 @@ export interface AgentCallbacks {
   onSkillsSelected?: (result: SemanticSkillRoutingResult) => void;
   /** Called after pre-turn setup (memory + skills) to emit the meta banner. */
   onMetaBanner?: (info: { intentTier: string; skillsActive: number; memoryRecalled: boolean }) => void;
+  /** Called when an unattended run yields on a durable timer or job condition. */
+  onRunYield?: (request: RunWaitRequest) => void;
   /** Called when worker status changes during multi-agent orchestration. */
   onWorkersUpdated?: (workers: import("./supervisor.js").ActiveWorker[]) => void;
 }
@@ -76,6 +78,10 @@ export interface AgentTurnOpts extends LlmAuth {
   reasoningEffort?: "low" | "medium" | "high";
   coauthor?: { name: string; email: string };
   sessionId?: string;
+  /** Durable unattended-run identity; enables tool boundary journaling. */
+  runId?: string;
+  /** Optional override for the durable run/event/timer database. */
+  runsDbPath?: string;
   githubToken?: string;
   /** Drop image_url parts from user messages older than this many turns. */
   keepLastImageTurns?: number;
@@ -920,6 +926,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               llmAuth: llmAuthOf(opts),
               model: opts.model,
               allowDirectPush: opts.allowDirectPush,
+              runId: opts.runId,
+              runsDbPath: opts.runsDbPath,
             },
             opts.onFileChange,
           );
@@ -1308,6 +1316,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             llmAuth: llmAuthOf(opts),
             model: opts.model,
             allowDirectPush: opts.allowDirectPush,
+            runId: opts.runId,
+            runsDbPath: opts.runsDbPath,
           },
           opts.onFileChange,
         );
@@ -1353,6 +1363,28 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           name: result.name,
         });
         opts.callbacks.onToolResult?.(result);
+        if (result.waitRequest) {
+          if (opts.onIterationEnd) {
+            opts.messages = await opts.onIterationEnd(opts.messages, opts.signal);
+          }
+          logger.info("run:yielded", {
+            runId: result.waitRequest.runId,
+            timerId: result.waitRequest.timerId,
+            condition: result.waitRequest.condition,
+            wakeAt: result.waitRequest.wakeAt,
+          });
+          try {
+            opts.callbacks.onRunYield?.(result.waitRequest);
+          } catch (error) {
+            logger.warn("run:yield_callback_failed", {
+              runId: result.waitRequest.runId,
+              timerId: result.waitRequest.timerId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          await fireStopHook();
+          return;
+        }
 
         // Auto-extract memories from tool results
         if (opts.memoryManager) {

@@ -27,6 +27,58 @@ export function getOpenApiSpec(): string {
           },
         },
       },
+      "/runs": {
+        get: {
+          summary: "List durable unattended runs",
+          security: [{ basicAuth: [] }],
+          parameters: [{ name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 500 } }],
+          responses: { "200": { description: "Run records" }, "503": { description: "Server password is not configured" } },
+        },
+        post: {
+          summary: "Create a durable unattended run",
+          security: [{ basicAuth: [] }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object",
+              required: ["task"],
+              properties: {
+                task: { type: "string", maxLength: 20000 },
+                cwd: { type: "string" },
+                model: { type: "string" },
+                allowedTools: { type: "array", items: { type: "string" }, description: "Explicit tool permission allowlist; wait_for is always available." },
+                maxToolIterations: { type: "integer", minimum: 1, maximum: 5000 },
+                maxRuntimeMs: { type: "integer", minimum: 1000, maximum: 604800000 },
+              },
+            } } },
+          },
+          responses: { "202": { description: "Run started" }, "400": { description: "Invalid run options" }, "503": { description: "Server password is not configured" } },
+        },
+      },
+      "/runs/{runId}": {
+        get: {
+          summary: "Get a durable run status",
+          security: [{ basicAuth: [] }],
+          parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "Run record" }, "404": { description: "Run not found" } },
+        },
+      },
+      "/runs/{runId}/events": {
+        get: {
+          summary: "Get a durable run event journal",
+          security: [{ basicAuth: [] }],
+          parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "Run events; tool arguments and output content are not included" } },
+        },
+      },
+      "/runs/{runId}/cancel": {
+        post: {
+          summary: "Cancel a queued, running, or waiting run",
+          security: [{ basicAuth: [] }],
+          parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string" } }],
+          responses: { "200": { description: "Current run state" }, "404": { description: "Run not found" } },
+        },
+      },
       "/prompt": {
         post: {
           summary: "Start a new agent session with a prompt",
@@ -229,6 +281,11 @@ export function getOpenApiSpec(): string {
             },
           },
         },
+      },
+    },
+    components: {
+      securitySchemes: {
+        basicAuth: { type: "http", scheme: "basic" },
       },
     },
   };
