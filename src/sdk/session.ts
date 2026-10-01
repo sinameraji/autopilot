@@ -402,7 +402,7 @@ class InternalSession implements KimiFlareSession {
     const coauthor =
       this.config.coauthor !== false
         ? {
-            name: this.config.coauthorName || "kimiflare",
+            name: this.config.coauthorName || "autopilot",
             email: this.config.coauthorEmail || "kimiflare@proton.me",
           }
         : undefined;

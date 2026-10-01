@@ -1,4 +1,4 @@
-import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
+import type { ToolSpec, ToolContext, ToolOutput, RunWaitRequest } from "./registry.js";
 import { wrapAsToolError, type ToolErrorCode } from "./tool-error.js";
 import type { HooksManager } from "../hooks/manager.js";
 import { readTool } from "./read.js";
@@ -20,8 +20,10 @@ import { ToolArtifactStore } from "./artifact-store.js";
 import { reduceToolOutput, DEFAULT_REDUCER_CONFIG } from "./reducer.js";
 import { makeExpandArtifactTool } from "./expand-artifact.js";
 import { jobStartTool, jobStatusTool, jobLogsTool, jobCancelTool } from "./jobs.js";
+import { waitForTool } from "./wait-for.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { RunStore } from "../runs/store.js";
 
 export const ALL_TOOLS: ToolSpec[] = [
   { ...readTool, isReadOnly: true },
@@ -50,6 +52,7 @@ export const ALL_TOOLS: ToolSpec[] = [
   jobStatusTool,
   jobLogsTool,
   jobCancelTool,
+  waitForTool,
 ];
 
 export const RESEARCH_WORKER_TOOL_NAMES = new Set([
@@ -229,6 +232,8 @@ export interface ToolResult {
   recoverable?: boolean;
   /** Optional one-line UI hint describing how to recover. */
   suggestion?: string;
+  /** Durable wait signal that ends the current agent turn after persisting state. */
+  waitRequest?: RunWaitRequest;
 }
 
 /** Cap on `result.content` bytes carried in the PostToolUse hook
@@ -384,9 +389,27 @@ export class ToolExecutor {
       }
     }
 
+    let runStore: RunStore | null = null;
+    let intentRecorded = false;
+    let toolCompleted = false;
     try {
+      if (ctx.runId) {
+        runStore = new RunStore(ctx.runsDbPath);
+        runStore.recordToolIntent(ctx.runId, call.id, call.name, args);
+        intentRecorded = true;
+      }
       const result = await tool.run(args as never, ctx);
+      toolCompleted = true;
       const normalized = normalizeToolOutput(result);
+      if (runStore && ctx.runId) {
+        runStore.recordToolResult(ctx.runId, call.id, call.name, { ok: true, content: normalized.content });
+      }
+      if (normalized.waitRequest) {
+        if (!ctx.runId || normalized.waitRequest.runId !== ctx.runId || !runStore) {
+          throw new Error("wait_for yield signal does not match an active durable run");
+        }
+        runStore.transition(ctx.runId, "waiting", `timer:${normalized.waitRequest.timerId}`);
+      }
 
       // Notify LSP document sync bridge on write/edit
       if (onFileChange) {
@@ -433,6 +456,7 @@ export class ToolExecutor {
         rawBytes: reduced.rawBytes,
         reducedBytes: reduced.reducedBytes,
         artifactId: reduced.artifactId,
+        ...(normalized.waitRequest ? { waitRequest: normalized.waitRequest } : {}),
       };
       this.firePostToolUse(call, args, success, ctx);
       return success;
@@ -450,8 +474,17 @@ export class ToolExecutor {
         recoverable: err.recoverable,
         suggestion: err.suggestion,
       };
+      if (runStore && ctx.runId && intentRecorded && !toolCompleted) {
+        try {
+          runStore.recordToolResult(ctx.runId, call.id, call.name, { ok: false, content: msg, errorCode: err.code });
+        } catch {
+          // Preserve the tool error; an unmatched intent is recovered as unknown.
+        }
+      }
       this.firePostToolUse(call, args, failure, ctx);
       return failure;
+    } finally {
+      runStore?.close();
     }
   }
 

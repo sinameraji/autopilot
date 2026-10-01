@@ -111,6 +111,8 @@ describe("loadConfig", () => {
     assert.ok(cfg);
     assert.strictEqual(cfg.openrouterApiKey, "sk-or-env");
     assert.strictEqual(cfg.model, DEFAULT_MODEL);
+    assert.strictEqual(cfg.coauthorName, "autopilot");
+    assert.strictEqual(cfg.coauthorEmail, "kimiflare@proton.me");
   });
 
   it("keeps remote workers as the compatibility default and supports explicit Hotcell opt-in", async () => {

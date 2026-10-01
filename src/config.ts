@@ -261,7 +261,7 @@ function readSubagentPolicyEnv(): SubagentPolicy | undefined {
 function readCoauthorEnv(): { enabled: boolean; name: string; email: string } | undefined {
   const enabled = process.env.KIMIFLARE_COAUTHOR;
   if (enabled === "0" || enabled === "false") return undefined;
-  const name = process.env.KIMIFLARE_COAUTHOR_NAME || "kimiflare";
+  const name = process.env.KIMIFLARE_COAUTHOR_NAME || "autopilot";
   const email = process.env.KIMIFLARE_COAUTHOR_EMAIL || "kimiflare@proton.me";
   return { enabled: true, name, email };
 }

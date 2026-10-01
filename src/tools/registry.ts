@@ -30,6 +30,10 @@ export interface ToolContext {
   model?: string;
   /** Optional override for the durable managed-jobs database (primarily for embedding/tests). */
   jobsDbPath?: string;
+  /** Run identifier for durable tool-boundary journaling in unattended runs. */
+  runId?: string;
+  /** Optional override for the durable run/event/timer database. */
+  runsDbPath?: string;
   /** When false (default), the bash tool blocks `git push` to the repository's
    *  default branch and directs the model to open a PR instead. */
   allowDirectPush?: boolean;
@@ -41,10 +45,20 @@ export interface ToolRender {
   diff?: { path: string; before: string; after: string };
 }
 
+export interface RunWaitRequest {
+  runId: string;
+  timerId: string;
+  condition: "time" | "job";
+  jobId?: string;
+  wakeAt: number;
+}
+
 export interface ToolOutput {
   content: string;
   rawBytes: number;
   reducedBytes: number;
+  /** Internal control signal: persist the wait and end this agent turn. */
+  waitRequest?: RunWaitRequest;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

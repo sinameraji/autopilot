@@ -21,15 +21,25 @@ import { readFile } from "node:fs/promises";
 import { resolve, basename } from "node:path";
 import { encodeImageFile, isImagePath } from "../util/image.js";
 import { glob } from "../util/glob.js";
+import { RunStore } from "../runs/store.js";
+import { RunWakeScheduler, type RunWakeEvent } from "../runs/wake-scheduler.js";
+import type { RunRecord } from "../runs/store.js";
 
 interface ActiveSession {
   sessionFile: SessionFile;
   messages: ChatMessage[];
   executor: ToolExecutor;
   sseClients: Set<SseClient>;
+  runId?: string;
+  allowedTools?: Set<string>;
+  maxToolIterations?: number;
+  maxRuntimeMs?: number;
+  controller?: AbortController;
+  running?: boolean;
 }
 
 const activeSessions = new Map<string, ActiveSession>();
+const activeRuns = new Map<string, ActiveSession>();
 
 function json(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -115,6 +125,45 @@ async function buildUserMessage(prompt: string, files: string[], cwd: string): P
 }
 
 export function setupRoutes(config: KimiConfig) {
+  const wakeScheduler = new RunWakeScheduler({
+    onWake: async (event: RunWakeEvent) => {
+      const store = new RunStore();
+      let run: RunRecord | undefined;
+      try { run = store.getRun(event.runId); } finally { store.close(); }
+      if (!run || run.status !== "running" || !run.sessionId) {
+        throw new Error(`Cannot restore active run ${event.runId}`);
+      }
+      let active = activeRuns.get(run.id) ?? activeSessions.get(run.sessionId);
+      if (!active) {
+        const sessionFile = await loadSession(resolve(sessionsDir(), `${run.sessionId}.json`));
+        const allowedTools = new Set(run.allowedTools);
+        allowedTools.add("wait_for");
+        const tools = ALL_TOOLS.filter((tool) => allowedTools.has(tool.name));
+        active = {
+          sessionFile,
+          messages: sessionFile.messages,
+          executor: new ToolExecutor(tools),
+          sseClients: new Set(),
+          runId: run.id,
+          allowedTools,
+          maxToolIterations: run.maxToolIterations,
+          maxRuntimeMs: run.maxRuntimeMs,
+        };
+        activeSessions.set(run.sessionId, active);
+        activeRuns.set(run.id, active);
+      }
+      active.messages.push({
+        role: "user",
+        content: event.condition === "job"
+          ? `The wait condition has been checked. Job ${event.jobId} is ${event.jobStatus ?? "unknown"}. Continue the task.`
+          : `The scheduled wait has elapsed at ${new Date().toISOString()}. Continue the task.`,
+      });
+      launchAgentTurnForSession(active, config, false);
+    },
+    onError: (error, timer) => logger.error("server: run wake failed", { error: error.message, timerId: timer?.id }),
+  });
+  wakeScheduler.start();
+
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const method = req.method ?? "GET";
@@ -132,6 +181,171 @@ export function setupRoutes(config: KimiConfig) {
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(getOpenApiSpec());
         return;
+      }
+
+      // Durable unattended runs are deliberately disabled without server auth.
+      const runPathMatch = pathname.match(/^\/runs\/([^/]+)(?:\/(events|cancel))?$/);
+      if (pathname === "/runs" && method === "GET") {
+        if (!process.env.KIMIFLARE_SERVER_PASSWORD) {
+          json(res, 503, { error: "Set KIMIFLARE_SERVER_PASSWORD before accessing unattended runs" });
+          return;
+        }
+        const store = new RunStore();
+        try {
+          const limit = Number(url.searchParams.get("limit") ?? 50);
+          json(res, 200, { runs: store.listRuns({ limit }) });
+        } finally {
+          store.close();
+        }
+        return;
+      }
+      if (pathname === "/runs" && method === "POST") {
+        if (!process.env.KIMIFLARE_SERVER_PASSWORD) {
+          json(res, 503, { error: "Set KIMIFLARE_SERVER_PASSWORD before creating unattended runs" });
+          return;
+        }
+        const parsedBody = await readBody(req);
+        if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+          badRequest(res, "request body must be a JSON object");
+          return;
+        }
+        const body = parsedBody as Record<string, unknown>;
+        const task = typeof body.task === "string" ? body.task.trim() : "";
+        let cwd: string;
+        try {
+          cwd = typeof body.cwd === "string" ? resolve(body.cwd) : process.cwd();
+        } catch {
+          badRequest(res, "cwd must be a valid path");
+          return;
+        }
+        const model = typeof body.model === "string" ? body.model : (config.model ?? DEFAULT_MODEL);
+        if (!model.trim() || model.length > 200) {
+          badRequest(res, "model must be a non-empty string of at most 200 characters");
+          return;
+        }
+        if (body.allowedTools !== undefined && (!Array.isArray(body.allowedTools) || body.allowedTools.some((name) => typeof name !== "string"))) {
+          badRequest(res, "allowedTools must be an array of tool names");
+          return;
+        }
+        const allowedTools = Array.isArray(body.allowedTools)
+          ? [...new Set(body.allowedTools as string[])]
+          : [];
+        const maxToolIterations = body.maxToolIterations ?? 100;
+        if (!Number.isInteger(maxToolIterations) || (maxToolIterations as number) < 1 || (maxToolIterations as number) > 5000) {
+          badRequest(res, "maxToolIterations must be an integer from 1 through 5000");
+          return;
+        }
+        const maxRuntimeMs = body.maxRuntimeMs ?? 8 * 60 * 60 * 1000;
+        if (!Number.isInteger(maxRuntimeMs) || (maxRuntimeMs as number) < 1000 || (maxRuntimeMs as number) > 7 * 24 * 60 * 60 * 1000) {
+          badRequest(res, "maxRuntimeMs must be an integer from 1000 through 604800000");
+          return;
+        }
+        if (!task || task.length > 20_000) {
+          badRequest(res, "task is required and must be at most 20000 characters");
+          return;
+        }
+        if (allowedTools.some((name) => name !== "wait_for" && !ALL_TOOLS.some((tool) => tool.name === name))) {
+          badRequest(res, "allowedTools contains an unknown tool");
+          return;
+        }
+        let cwdStat;
+        try {
+          cwdStat = await import("node:fs/promises").then((m) => m.stat(cwd));
+        } catch {
+          badRequest(res, "cwd must be an existing directory");
+          return;
+        }
+        if (!cwdStat.isDirectory()) {
+          badRequest(res, "cwd must be an existing directory");
+          return;
+        }
+        const toolNames = new Set(allowedTools);
+        toolNames.add("wait_for");
+        const tools = ALL_TOOLS.filter((tool) => toolNames.has(tool.name));
+        const executor = new ToolExecutor(tools);
+        const { makeSessionId } = await import("../sessions.js");
+        const sessionId = makeSessionId(task);
+        const sessionFile: SessionFile = {
+          id: sessionId,
+          cwd,
+          model,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          messages: [],
+          title: task.slice(0, 80),
+        };
+        const messages: ChatMessage[] = [
+          { role: "system", content: buildSystemPrompt({ cwd, tools, model, preferPullRequests: config.preferPullRequests }) },
+          { role: "system", content: `This is an unattended run. Only these tools are authorized: ${[...allowedTools, "wait_for"].join(", ")}. Do not request or attempt any other tool.` },
+          { role: "user", content: task },
+        ];
+        sessionFile.messages = messages;
+        await saveSession(sessionFile);
+        const store = new RunStore();
+        let run: RunRecord;
+        try {
+          run = store.createRun({
+            task,
+            cwd,
+            sessionId,
+            allowedTools,
+            maxToolIterations: maxToolIterations as number,
+            maxRuntimeMs: maxRuntimeMs as number,
+          });
+          store.transition(run.id, "running");
+        } finally {
+          store.close();
+        }
+        const active: ActiveSession = {
+          sessionFile,
+          messages,
+          executor,
+          sseClients: new Set(),
+          runId: run.id,
+          allowedTools: toolNames,
+          maxToolIterations: run.maxToolIterations,
+          maxRuntimeMs: run.maxRuntimeMs,
+        };
+        activeSessions.set(sessionId, active);
+        activeRuns.set(run.id, active);
+        launchAgentTurnForSession(active, config, false);
+        json(res, 202, { runId: run.id, sessionId, status: "running" });
+        return;
+      }
+      if (runPathMatch) {
+        if (!process.env.KIMIFLARE_SERVER_PASSWORD) {
+          json(res, 503, { error: "Set KIMIFLARE_SERVER_PASSWORD before accessing unattended runs" });
+          return;
+        }
+        const runId = runPathMatch[1]!;
+        const suffix = runPathMatch[2];
+        const store = new RunStore();
+        try {
+          const run = store.getRun(runId);
+          if (!run) {
+            notFound(res, `run ${runId} not found`);
+            return;
+          }
+          if (suffix === "events" && method === "GET") {
+            json(res, 200, { events: store.listEvents(runId) });
+            return;
+          }
+          if (suffix === "cancel" && method === "POST") {
+            if (run.status === "queued" || run.status === "running" || run.status === "waiting") {
+              activeRuns.get(runId)?.controller?.abort();
+              store.transition(runId, "cancelled", "cancelled_by_client");
+              store.cancelTimersForRun(runId);
+            }
+            json(res, 200, { run: store.getRun(runId) });
+            return;
+          }
+          if (!suffix && method === "GET") {
+            json(res, 200, { run });
+            return;
+          }
+        } finally {
+          store.close();
+        }
       }
 
       // SSE event stream
@@ -245,7 +459,7 @@ export function setupRoutes(config: KimiConfig) {
         activeSessions.set(sessionId, active);
 
         // Start agent turn in background
-        runAgentTurnForSession(active, config, allowAll);
+        launchAgentTurnForSession(active, config, allowAll);
 
         json(res, 202, { sessionId, status: "started" });
         return;
@@ -279,7 +493,7 @@ export function setupRoutes(config: KimiConfig) {
         const userContent = await buildUserMessage(prompt, resolvedFiles, active.sessionFile.cwd);
         active.messages.push({ role: "user", content: userContent });
 
-        runAgentTurnForSession(active, config, allowAll);
+        launchAgentTurnForSession(active, config, allowAll);
 
         json(res, 202, { sessionId, status: "started" });
         return;
@@ -294,20 +508,70 @@ export function setupRoutes(config: KimiConfig) {
   }
 
   function cleanup(): void {
+    wakeScheduler.dispose();
     for (const [, active] of activeSessions) {
+      active.controller?.abort();
       for (const client of active.sseClients) {
         client.close();
       }
     }
+    activeRuns.clear();
     activeSessions.clear();
   }
 
   return { handleRequest, cleanup };
 }
 
+function launchAgentTurnForSession(active: ActiveSession, config: KimiConfig, allowAll: boolean): void {
+  void runAgentTurnForSession(active, config, allowAll).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error("server: agent turn startup failed", { sessionId: active.sessionFile.id, error: message });
+    active.running = false;
+    active.controller = undefined;
+    if (!active.runId) return;
+    try {
+      const store = new RunStore();
+      try {
+        const run = store.getRun(active.runId);
+        if (run && ["queued", "running", "waiting"].includes(run.status)) {
+          store.transition(run.id, "failed", `server_turn_start_failed:${message}`.slice(0, 500));
+          store.cancelTimersForRun(run.id);
+        }
+      } finally {
+        store.close();
+      }
+    } catch (storeError) {
+      logger.error("server: failed to record agent startup failure", {
+        runId: active.runId,
+        error: storeError instanceof Error ? storeError.message : String(storeError),
+      });
+    }
+  });
+}
+
 async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig, allowAll: boolean): Promise<void> {
+  if (active.running) return;
+  active.running = true;
   const controller = new AbortController();
+  active.controller = controller;
   const { sessionFile, messages, executor } = active;
+  let runtimeTimer: ReturnType<typeof setTimeout> | undefined;
+  let yielded = false;
+  let runStore: RunStore | undefined;
+  let run: RunRecord | undefined;
+  if (active.runId) {
+    runStore = new RunStore();
+    run = runStore.getRun(active.runId);
+    if (!run || run.status !== "running") {
+      runStore.close();
+      active.running = false;
+      return;
+    }
+    const elapsed = run.startedAt ? Date.now() - run.startedAt : 0;
+    const remainingMs = Math.max(1, run.maxRuntimeMs - elapsed);
+    runtimeTimer = setTimeout(() => controller.abort(new Error("max_runtime_exceeded")), remainingMs);
+    runtimeTimer.unref();
+  }
 
   const callbacks: AgentCallbacks = {
     onTextDelta: (delta) => {
@@ -348,7 +612,16 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
         client.send("warning", { message: msg });
       }
     },
+    onRunYield: (request) => {
+      if (!runStore || !active.runId || request.runId !== active.runId) return;
+      runStore.transition(active.runId, "waiting", `timer:${request.timerId}`);
+      yielded = true;
+    },
     askPermission: async ({ tool, args }) => {
+      if (active.runId) {
+        if (active.allowedTools?.has(tool.name)) return "allow";
+        return "deny";
+      }
       if (allowAll) return "allow";
 
       // Evaluate config-based permission rules
@@ -374,25 +647,64 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
   };
 
   try {
-    await runAgentTurn({
-      ...llmAuthFromConfig(config),
-      model: sessionFile.model,
-      reasoningEffort: config.reasoningEffort,
-      sessionId: sessionFile.id,
-      messages,
-      tools: ALL_TOOLS,
-      executor,
-      cwd: sessionFile.cwd,
-      signal: controller.signal,
-      codeMode: config.codeMode,
-      allowDirectPush: config.allowDirectPush,
-      preferPullRequests: config.preferPullRequests,
-      callbacks,
-    });
+    if (run && runStore) {
+      const remainingIterations = run.maxToolIterations - runStore.countToolIterations(run.id);
+      if (remainingIterations <= 0) {
+        runStore.transition(run.id, "failed", "max_tool_iterations_exceeded");
+        return;
+      }
+      const tools = ALL_TOOLS.filter((tool) => active.allowedTools?.has(tool.name));
+      await runAgentTurn({
+        ...llmAuthFromConfig(config),
+        model: sessionFile.model,
+        reasoningEffort: config.reasoningEffort,
+        sessionId: sessionFile.id,
+        runId: run.id,
+        runsDbPath: process.env.AUTOPILOT_RUNS_DB,
+        messages,
+        tools,
+        executor,
+        cwd: sessionFile.cwd,
+        signal: controller.signal,
+        maxToolIterations: remainingIterations,
+        maxTotalToolIterations: remainingIterations,
+        toolLimitBehavior: "stop",
+        codeMode: false,
+        allowDirectPush: config.allowDirectPush,
+        preferPullRequests: config.preferPullRequests,
+        callbacks,
+        onIterationEnd: async (updatedMessages) => {
+          sessionFile.messages = updatedMessages;
+          sessionFile.updatedAt = new Date().toISOString();
+          await saveSession(sessionFile);
+          return updatedMessages;
+        },
+      });
+    } else {
+      await runAgentTurn({
+        ...llmAuthFromConfig(config),
+        model: sessionFile.model,
+        reasoningEffort: config.reasoningEffort,
+        sessionId: sessionFile.id,
+        messages,
+        tools: ALL_TOOLS,
+        executor,
+        cwd: sessionFile.cwd,
+        signal: controller.signal,
+        codeMode: config.codeMode,
+        allowDirectPush: config.allowDirectPush,
+        preferPullRequests: config.preferPullRequests,
+        callbacks,
+      });
+    }
 
     sessionFile.messages = messages;
     sessionFile.updatedAt = new Date().toISOString();
     await saveSession(sessionFile);
+    if (runStore && active.runId) {
+      const current = runStore.getRun(active.runId);
+      if (current?.status === "running" && !yielded) runStore.transition(active.runId, "completed");
+    }
 
     for (const client of active.sseClients) {
       client.send("session.completed", { sessionId: sessionFile.id });
@@ -400,8 +712,22 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
   } catch (err) {
     const message = (err as Error).message;
     logger.error("server: agent turn failed", { sessionId: sessionFile.id, error: message });
+    if (runStore && active.runId) {
+      const current = runStore.getRun(active.runId);
+      if (current?.status === "running") {
+        const reason = controller.signal.aborted && Date.now() - (run?.startedAt ?? Date.now()) >= (run?.maxRuntimeMs ?? Infinity)
+          ? "max_runtime_exceeded"
+          : message;
+        runStore.transition(active.runId, "failed", reason);
+      }
+    }
     for (const client of active.sseClients) {
       client.send("error", { message, sessionId: sessionFile.id });
     }
+  } finally {
+    if (runtimeTimer) clearTimeout(runtimeTimer);
+    active.controller = undefined;
+    active.running = false;
+    runStore?.close();
   }
 }
