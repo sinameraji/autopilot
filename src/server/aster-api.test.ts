@@ -103,7 +103,7 @@ describe("Aster control-plane API", () => {
       const firstTurn = await fetch(`${base}/api/v1/conversations/${conversation.conversationId}/turns`, {
         method: "POST",
         headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text: "first turn" }),
+        body: JSON.stringify({ clientTurnId: "turn-first", text: "first turn" }),
       });
       assert.equal(firstTurn.status, 202);
       await waitForStatusAt(base, credential.token, conversation.conversationId, "completed");
@@ -121,7 +121,7 @@ describe("Aster control-plane API", () => {
       const secondTurn = await fetch(`${base}/api/v1/conversations/${conversation.conversationId}/turns`, {
         method: "POST",
         headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ text: "second turn" }),
+        body: JSON.stringify({ clientTurnId: "turn-second", text: "second turn" }),
       });
       assert.equal(secondTurn.status, 202);
       await waitForStatusAt(base, credential.token, conversation.conversationId, "completed");
@@ -211,14 +211,18 @@ describe("Aster control-plane API", () => {
       assert.equal(conversation.status, "ready");
       assert.doesNotMatch(JSON.stringify(conversation), new RegExp(escapeRegExp(harness.workspaceRoot)));
 
-      const first = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "first turn" });
+      const first = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-first", text: "first turn" });
       assert.equal(first.status, 202);
-      const firstRun = await first.json() as { runId: string };
+      const firstRun = await first.json() as { clientTurnId: string; runId: string; status: string };
       await waitForStatus(harness, conversation.conversationId, "completed");
+      const exactRetry = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-first", text: "first turn" });
+      assert.equal(exactRetry.status, 202);
+      assert.deepEqual(await exactRetry.json(), firstRun);
+      assert.equal(harness.turns.length, 1);
       const cursorResponse = await request(harness, "GET", `/api/v1/conversations/${conversation.conversationId}`);
       const firstState = await cursorResponse.json() as { lastEventId: number };
 
-      const second = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "second turn" });
+      const second = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-second", text: "second turn" });
       assert.equal(second.status, 202);
       const secondRun = await second.json() as { runId: string };
       assert.notEqual(secondRun.runId, firstRun.runId);
@@ -240,6 +244,84 @@ describe("Aster control-plane API", () => {
     }
   });
 
+  it("accepts legacy text-only turns without deduplicating their text", async () => {
+    const harness = await createHarness("hang");
+    try {
+      const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
+      const conversation = await created.json() as { conversationId: string };
+      const turnsPath = "/api/v1/conversations/" + conversation.conversationId + "/turns";
+
+      const malformedKey = await request(harness, "POST", turnsPath, { clientTurnId: null, text: "legacy text" });
+      assert.equal(malformedKey.status, 400);
+      assert.equal(((await malformedKey.json() as { error: { code: string } }).error).code, "invalid_client_turn_id");
+
+      const first = await request(harness, "POST", turnsPath, { text: "legacy text" });
+      assert.equal(first.status, 202);
+      const firstBody = await first.json() as { conversationId: string; runId: string; status: string; clientTurnId?: string };
+      assert.equal(firstBody.clientTurnId, undefined);
+      const overlappingSameText = await request(harness, "POST", turnsPath, { text: "legacy text" });
+      assert.equal(overlappingSameText.status, 409);
+      assert.equal(((await overlappingSameText.json() as { error: { code: string } }).error).code, "conversation_busy");
+
+      await request(harness, "POST", "/api/v1/conversations/" + conversation.conversationId + "/cancel");
+      const second = await request(harness, "POST", turnsPath, { text: "legacy text" });
+      assert.equal(second.status, 202);
+      const secondBody = await second.json() as { runId: string };
+      assert.notEqual(secondBody.runId, firstBody.runId);
+      assert.equal(harness.turns.length, 2);
+      await request(harness, "POST", "/api/v1/conversations/" + conversation.conversationId + "/cancel");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("makes turn submissions idempotent across concurrent retries and busy responses", async () => {
+    const harness = await createHarness("hang");
+    try {
+      const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
+      const conversation = await created.json() as { conversationId: string };
+      const turnsPath = "/api/v1/conversations/" + conversation.conversationId + "/turns";
+
+      const payload = { clientTurnId: "client-turn-001", text: "do exactly once" };
+      const [first, concurrentRetry] = await Promise.all([
+        request(harness, "POST", turnsPath, payload),
+        request(harness, "POST", turnsPath, payload),
+      ]);
+      assert.equal(first.status, 202);
+      assert.equal(concurrentRetry.status, 202);
+      const accepted = await first.json() as { conversationId: string; clientTurnId: string; runId: string; status: string };
+      assert.deepEqual(await concurrentRetry.json(), accepted);
+      assert.equal(accepted.clientTurnId, payload.clientTurnId);
+      assert.equal(harness.turns.length, 1);
+      assert.equal(harness.turns[0]!.messages.filter((message) => message.role === "user" && message.content === payload.text).length, 1);
+
+      const exactRetry = await request(harness, "POST", turnsPath, payload);
+      assert.equal(exactRetry.status, 202);
+      assert.deepEqual(await exactRetry.json(), accepted);
+
+      const conflict = await request(harness, "POST", turnsPath, { clientTurnId: payload.clientTurnId, text: "different text" });
+      assert.equal(conflict.status, 409);
+      assert.equal(((await conflict.json() as { error: { code: string } }).error).code, "idempotency_conflict");
+
+      const notConsumed = { clientTurnId: "busy-retry-key", text: "retry when ready" };
+      const busy = await request(harness, "POST", turnsPath, notConsumed);
+      assert.equal(busy.status, 409);
+      assert.equal(((await busy.json() as { error: { code: string } }).error).code, "conversation_busy");
+
+      const cancelFirst = await request(harness, "POST", "/api/v1/conversations/" + conversation.conversationId + "/cancel");
+      assert.equal(cancelFirst.status, 200);
+      const retriedAfterBusy = await request(harness, "POST", turnsPath, notConsumed);
+      assert.equal(retriedAfterBusy.status, 202);
+      const secondRun = await retriedAfterBusy.json() as { runId: string };
+      assert.notEqual(secondRun.runId, accepted.runId);
+      assert.equal(harness.turns.length, 2);
+      const cancelSecond = await request(harness, "POST", "/api/v1/conversations/" + conversation.conversationId + "/cancel");
+      assert.equal(cancelSecond.status, 200);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it("cancels an active turn and does not accept arbitrary cwd input", async () => {
     const harness = await createHarness("hang");
     try {
@@ -254,10 +336,10 @@ describe("Aster control-plane API", () => {
 
       const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
       const conversation = await created.json() as { conversationId: string };
-      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "long task" });
+      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-long-task", text: "long task" });
       assert.equal(turn.status, 202);
       const runId = (await turn.json() as { runId: string }).runId;
-      const overlapping = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "overlapping turn" });
+      const overlapping = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-overlap", text: "overlapping turn" });
       assert.equal(overlapping.status, 409);
       const cancelled = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/cancel`);
       assert.equal(cancelled.status, 200);
@@ -274,7 +356,7 @@ describe("Aster control-plane API", () => {
     try {
       const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
       const conversation = await created.json() as { conversationId: string };
-      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "write after approval" });
+      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-write-approval", text: "write after approval" });
       assert.equal(turn.status, 202);
       const approval = await waitForApproval(harness, conversation.conversationId);
 
@@ -297,7 +379,7 @@ describe("Aster control-plane API", () => {
     try {
       const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
       const conversation = await created.json() as { conversationId: string };
-      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "write but let approval expire" });
+      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-expiry", text: "write but let approval expire" });
       assert.equal(turn.status, 202);
       const approval = await waitForApproval(harness, conversation.conversationId);
       await waitForStatus(harness, conversation.conversationId, "completed");
@@ -321,7 +403,7 @@ describe("Aster control-plane API", () => {
     try {
       const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
       const conversation = await created.json() as { conversationId: string };
-      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "write a file" });
+      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { clientTurnId: "turn-write-file", text: "write a file" });
       assert.equal(turn.status, 202);
       const approval = await waitForApproval(harness, conversation.conversationId);
 

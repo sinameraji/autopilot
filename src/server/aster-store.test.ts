@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,6 +65,44 @@ describe("AsterStore", () => {
       assert.equal(restored?.model, "test/model");
       assert.equal(restored?.status, "running");
       assert.equal(restored?.activeRunId, "run-2");
+    } finally {
+      try { store.close(); } catch { /* closed before reopening */ }
+    }
+  });
+
+  it("migrates an existing database additively and persists accepted turn replay across reopen", async () => {
+    const root = await fixture();
+    const dbPath = join(root, "state", "aster.db");
+    await mkdir(join(root, "state"));
+    const now = Date.now();
+    const legacy = new Database(dbPath);
+    legacy.exec("CREATE TABLE aster_conversations (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, model TEXT NOT NULL, session_id TEXT NOT NULL UNIQUE, worktree_path TEXT NOT NULL, cwd TEXT NOT NULL, branch TEXT NOT NULL, status TEXT NOT NULL, active_run_id TEXT, last_event_sequence INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)");
+    legacy.prepare("INSERT INTO aster_conversations (id, workspace_id, model, session_id, worktree_path, cwd, branch, status, active_run_id, last_event_sequence, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run("conv-legacy", "default", "test/model", "session-legacy", join(root, "worktree"), join(root, "worktree"), "branch", "ready", null, 0, now, now);
+    legacy.close();
+
+    let store = new AsterStore(dbPath);
+    try {
+      assert.equal(store.getConversation("conv-legacy")?.workspaceId, "default");
+      const response = { conversationId: "conv-legacy", clientTurnId: "retry-1", runId: "run-legacy", status: "running" };
+      assert.deepEqual(store.reserveTurn({
+        conversationId: "conv-legacy",
+        clientTurnId: "retry-1",
+        requestText: "accepted text",
+        acceptedText: "accepted text",
+        runId: "run-legacy",
+        response,
+      }), { kind: "reserved" });
+      store.close();
+      store = new AsterStore(dbPath);
+      const replay = store.lookupTurn("conv-legacy", "retry-1", "accepted text");
+      assert.equal(replay.kind, "replay");
+      if (replay.kind === "replay") {
+        assert.equal(replay.runId, "run-legacy");
+        assert.equal(replay.responseStatus, 202);
+        assert.deepEqual(replay.response, response);
+      }
+      assert.equal(store.lookupTurn("conv-legacy", "retry-1", "different text").kind, "conflict");
     } finally {
       try { store.close(); } catch { /* closed before reopening */ }
     }

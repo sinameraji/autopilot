@@ -118,11 +118,25 @@ Returns `201` with an opaque conversation ID and cursor; no filesystem paths or 
 
 `POST /api/v1/conversations/{conversationId}/turns`
 
+The existing iOS client submits the legacy text-only shape, which remains supported:
+
 ```json
 {"text":"Summarize the failing test and propose a fix."}
 ```
 
-Returns `202` with `{conversationId,runId,status:"running"}`. Only one active turn per conversation is allowed; overlapping turns get `409 conversation_busy`. Text is capped at 20,000 characters; request bodies are capped at 64 KiB. Workspace and model cannot be changed by a turn request.
+A legacy request returns `202` with `{conversationId,runId,status:"running"}`. Requests without `clientTurnId` are independent, non-idempotent submissions: the server never deduplicates by comparing text. Callers **must not automatically retry an ambiguous submission** (for example, after a timeout or lost response), because that may start a second turn. If another turn is still active, the request returns `409 conversation_busy`; after it finishes, another text-only submission is treated as a new turn, even if its text is identical.
+
+New clients can opt into durable idempotency by including a stable `clientTurnId`:
+
+```json
+{"clientTurnId":"turn-550e8400-e29b-41d4-a716-446655440000","text":"Summarize the failing test and propose a fix."}
+```
+
+`clientTurnId` is 1-128 ASCII letters, digits, `.`, `_`, `:`, or `-`, starting with a letter or digit, and is scoped to its conversation. Keep and resend the same ID for every retry of the same logical turn. The server compares the JSON-decoded `text` exactly for key reuse; it trims the text before appending it to the conversation and sending it to the model. Text is capped at 20,000 characters; request bodies are capped at 64 KiB. Workspace and model cannot be changed by a turn request.
+
+The first accepted keyed request returns `202` with `{conversationId,clientTurnId,runId,status:"running"}` and stores that acceptance response, text, and run ID in SQLite in the same transaction that claims the conversation's active turn. Repeating the same ID and same text returns the original `202` response and run ID without appending another user message or starting another run, including after completion or restart. A restarted server marks uncertain work interrupted and does not replay it; a keyed retry still returns the original acceptance receipt, while conversation metadata/SSE reports current state. Reusing the ID with different text returns stable `409 idempotency_conflict`.
+
+Only one active turn per conversation is allowed. A different, previously unused keyed request submitted while another turn is active returns `409 conversation_busy` and does not consume its ID; it may be retried after the active turn ends. An exact retry of an already accepted keyed request replays its response rather than returning busy. If `clientTurnId` is present but malformed (including `null`), the server returns `400 invalid_client_turn_id`; it never silently falls back to legacy mode.
 
 `POST /api/v1/conversations/{conversationId}/cancel` is idempotent. It aborts the active agent signal, updates durable run state, cancels pending approvals, and returns the current conversation.
 

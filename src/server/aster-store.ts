@@ -64,6 +64,23 @@ export interface NewAsterApproval {
   expiresAt: number;
 }
 
+export type AsterTurnReservation =
+  | { kind: "absent" }
+  | { kind: "reserved" }
+  | { kind: "replay"; runId: string; responseStatus: number; response: Record<string, unknown> }
+  | { kind: "conflict" }
+  | { kind: "busy" }
+  | { kind: "not_found" };
+
+export interface ReserveAsterTurnInput {
+  conversationId: string;
+  clientTurnId: string;
+  requestText: string;
+  acceptedText: string;
+  runId: string;
+  response: Record<string, unknown>;
+}
+
 interface CredentialRow extends Record<string, unknown> {
   id: string;
   name: string;
@@ -181,6 +198,17 @@ export class AsterStore {
         resolved_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_aster_approvals_pending ON aster_approvals(conversation_id, status, expires_at);
+      CREATE TABLE IF NOT EXISTS aster_turn_idempotency (
+        conversation_id TEXT NOT NULL REFERENCES aster_conversations(id) ON DELETE CASCADE,
+        client_turn_id TEXT NOT NULL,
+        request_text TEXT NOT NULL,
+        accepted_text TEXT NOT NULL,
+        run_id TEXT NOT NULL UNIQUE,
+        response_status INTEGER NOT NULL,
+        response_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (conversation_id, client_turn_id)
+      );
     `);
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
@@ -259,6 +287,48 @@ export class AsterStore {
   listActiveConversations(): AsterConversation[] {
     const rows = this.db.prepare("SELECT * FROM aster_conversations WHERE active_run_id IS NOT NULL").all() as ConversationRow[];
     return rows.map(rowToConversation);
+  }
+
+  lookupTurn(conversationId: string, clientTurnId: string, requestText: string): AsterTurnReservation {
+    const row = this.db.prepare("SELECT run_id, request_text, response_status, response_json FROM aster_turn_idempotency WHERE conversation_id = ? AND client_turn_id = ?")
+      .get(conversationId, clientTurnId) as { run_id: string; request_text: string; response_status: number; response_json: string } | undefined;
+    if (!row) return { kind: "absent" };
+    if (row.request_text !== requestText) return { kind: "conflict" };
+    return {
+      kind: "replay",
+      runId: row.run_id,
+      responseStatus: row.response_status,
+      response: JSON.parse(row.response_json) as Record<string, unknown>,
+    };
+  }
+
+  reserveTurn(input: ReserveAsterTurnInput): AsterTurnReservation {
+    const reserve = this.db.transaction((): AsterTurnReservation => {
+      const existing = this.db.prepare("SELECT run_id, request_text, response_status, response_json FROM aster_turn_idempotency WHERE conversation_id = ? AND client_turn_id = ?")
+        .get(input.conversationId, input.clientTurnId) as { run_id: string; request_text: string; response_status: number; response_json: string } | undefined;
+      if (existing) {
+        if (existing.request_text !== input.requestText) return { kind: "conflict" };
+        return {
+          kind: "replay",
+          runId: existing.run_id,
+          responseStatus: existing.response_status,
+          response: JSON.parse(existing.response_json) as Record<string, unknown>,
+        };
+      }
+
+      const conversation = this.getConversation(input.conversationId);
+      if (!conversation) return { kind: "not_found" };
+      if (conversation.activeRunId) return { kind: "busy" };
+      const now = Date.now();
+      const updated = this.db.prepare("UPDATE aster_conversations SET status = 'running', active_run_id = ?, updated_at = ? WHERE id = ? AND active_run_id IS NULL")
+        .run(input.runId, now, input.conversationId);
+      if (updated.changes !== 1) return { kind: "busy" };
+      this.insertEvent(input.conversationId, input.runId, "status", { status: "running" }, now);
+      this.db.prepare("INSERT INTO aster_turn_idempotency (conversation_id, client_turn_id, request_text, accepted_text, run_id, response_status, response_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(input.conversationId, input.clientTurnId, input.requestText, input.acceptedText, input.runId, 202, JSON.stringify(input.response), now);
+      return { kind: "reserved" };
+    });
+    return reserve.immediate();
   }
 
   beginTurn(conversationId: string, runId: string): boolean {

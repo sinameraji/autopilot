@@ -18,6 +18,7 @@ import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, as
 const API_PREFIX = "/api/v1";
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_USER_TURN_CHARS = 20_000;
+const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_APPROVAL_ARG_BYTES = 24 * 1024;
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ASTER_TOOLS = ["read", "write", "edit"] as const;
@@ -136,11 +137,15 @@ export class AsterApi {
         const conversation = await this.authorizedConversation(store, principal, turnMatch[1]!);
         if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
         const body = await readJsonBody(req);
-        if (Object.keys(body).some((key) => key !== "text")) return sendError(res, 400, "unsupported_field", "Turns accept text only; workspace and model are fixed by the conversation");
-        const text = typeof body.text === "string" ? body.text.trim() : "";
+        if (Object.keys(body).some((key) => key !== "text" && key !== "clientTurnId")) return sendError(res, 400, "unsupported_field", "Turns accept text and an optional clientTurnId; workspace and model are fixed by the conversation");
+        const hasClientTurnId = Object.hasOwn(body, "clientTurnId");
+        const clientTurnId = hasClientTurnId && typeof body.clientTurnId === "string" ? body.clientTurnId : undefined;
+        if (hasClientTurnId && (!clientTurnId || !CLIENT_TURN_ID_RE.test(clientTurnId))) return sendError(res, 400, "invalid_client_turn_id", "clientTurnId must be 1-128 ASCII letters, digits, '.', '_', ':', or '-' and start with a letter or digit");
+        const requestText = typeof body.text === "string" ? body.text : "";
+        const text = requestText.trim();
         if (!text || text.length > MAX_USER_TURN_CHARS) return sendError(res, 400, "invalid_turn", `Turn text must be 1-${MAX_USER_TURN_CHARS} characters`);
         if (containsLikelyProviderSecret(text)) return sendError(res, 400, "secret_input_rejected", "Provider credentials must not be sent in conversation text");
-        return await this.appendTurn(res, store, conversation, text);
+        return await this.appendTurn(res, store, conversation, clientTurnId, requestText, text);
       }
 
       const cancelMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/cancel$/);
@@ -304,25 +309,79 @@ export class AsterApi {
     }
   }
 
-  private async appendTurn(res: ServerResponse, store: AsterStore, conversation: AsterConversation, text: string): Promise<void> {
+  private async appendTurn(
+    res: ServerResponse,
+    store: AsterStore,
+    conversation: AsterConversation,
+    clientTurnId: string | undefined,
+    requestText: string,
+    text: string,
+  ): Promise<void> {
+    const idempotent = clientTurnId !== undefined;
+    if (clientTurnId !== undefined) {
+      const previous = store.lookupTurn(conversation.id, clientTurnId, requestText);
+      if (previous.kind === "replay") {
+        json(res, previous.responseStatus, previous.response);
+        return;
+      }
+      if (previous.kind === "conflict") {
+        sendError(res, 409, "idempotency_conflict", "clientTurnId was already used with different text");
+        return;
+      }
+    }
+
     const runId = randomUUID();
-    if (!store.beginTurn(conversation.id, runId)) {
+    if (!idempotent && !store.beginTurn(conversation.id, runId)) {
       sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
       return;
     }
-    const sessionPath = resolve(sessionsDir(), `${conversation.sessionId}.json`);
+
+    const sessionPath = resolve(sessionsDir(), conversation.sessionId + ".json");
     let sessionFile: SessionFile;
     try {
       sessionFile = await loadSession(sessionPath);
     } catch {
-      store.updateConversationStatus(conversation.id, runId, "interrupted", { reason: "session_missing" });
+      if (!idempotent) store.updateConversationStatus(conversation.id, runId, "interrupted", { reason: "session_missing" });
       sendError(res, 409, "conversation_state_unavailable", "Conversation state is unavailable; no new turn was started");
       return;
     }
     if (sessionFile.cwd !== conversation.cwd) {
-      store.updateConversationStatus(conversation.id, runId, "failed", { reason: "workspace_mismatch" });
+      if (!idempotent) store.updateConversationStatus(conversation.id, runId, "failed", { reason: "workspace_mismatch" });
       sendError(res, 500, "conversation_state_invalid", "Conversation workspace binding is invalid");
       return;
+    }
+
+    const acceptedResponse: Record<string, unknown> = {
+      conversationId: conversation.id,
+      runId,
+      status: "running",
+    };
+    if (clientTurnId !== undefined) acceptedResponse.clientTurnId = clientTurnId;
+    if (clientTurnId !== undefined) {
+      const reservation = store.reserveTurn({
+        conversationId: conversation.id,
+        clientTurnId,
+        requestText,
+        acceptedText: text,
+        runId,
+        response: acceptedResponse,
+      });
+      if (reservation.kind === "replay") {
+        json(res, reservation.responseStatus, reservation.response);
+        return;
+      }
+      if (reservation.kind === "conflict") {
+        sendError(res, 409, "idempotency_conflict", "clientTurnId was already used with different text");
+        return;
+      }
+      if (reservation.kind === "busy") {
+        sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
+        return;
+      }
+      if (reservation.kind === "not_found") {
+        sendError(res, 404, "conversation_not_found", "Conversation not found");
+        return;
+      }
     }
 
     const previousLength = sessionFile.messages.length;
@@ -368,7 +427,7 @@ export class AsterApi {
         },
       };
       this.runtime.startTurn(active);
-      json(res, 202, { conversationId: conversation.id, runId, status: "running" });
+      json(res, 202, acceptedResponse);
     } catch {
       sessionFile.messages.length = previousLength;
       await saveSession(sessionFile).catch(() => {});
@@ -384,7 +443,8 @@ export class AsterApi {
       }
       store.updateConversationStatus(conversation.id, runId, "failed", { reason: "turn_start_failed" });
       store.appendEvent(conversation.id, runId, "failed", { code: "turn_start_failed" });
-      sendError(res, 500, "turn_start_failed", "Turn could not be started");
+      if (idempotent) json(res, 202, acceptedResponse);
+      else sendError(res, 500, "turn_start_failed", "Turn could not be started");
     }
   }
 
