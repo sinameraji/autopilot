@@ -86,6 +86,66 @@ program
 
 program.addCommand(createRemoteCommand());
 
+const asterCommand = program.command("aster").description("Manage the Aster mobile API");
+const asterTokenCommand = asterCommand.command("token").description("Manage scoped Aster API credentials");
+asterTokenCommand
+  .command("create")
+  .description("Create a 30-day credential scoped to selected workspace IDs")
+  .requiredOption("-n, --name <name>", "Credential label")
+  .requiredOption("-w, --workspace <id>", "Allowed workspace ID (repeatable)", (value, previous: string[] = []) => [...previous, value])
+  .option("--expires-in-days <days>", "Expiry in days (1-365)", (value) => Number.parseInt(value, 10), 30)
+  .action(async (options: { name: string; workspace: string[]; expiresInDays: number }) => {
+    const { loadAsterServerConfig } = await import("./server/aster-workspaces.js");
+    const { AsterStore } = await import("./server/aster-store.js");
+    try {
+      const config = await loadAsterServerConfig();
+      const workspaceIds = [...new Set(options.workspace)];
+      if (!Number.isInteger(options.expiresInDays) || options.expiresInDays < 1 || options.expiresInDays > 365) {
+        throw new Error("--expires-in-days must be an integer from 1 through 365");
+      }
+      if (workspaceIds.some((id) => !config.workspaces.some((workspace) => workspace.id === id))) {
+        throw new Error("credential includes an unknown workspace ID");
+      }
+      const store = new AsterStore();
+      try {
+        const created = store.createCredential({
+          name: options.name,
+          workspaceIds,
+          scopes: ["workspaces:read", "models:read", "conversations:read", "conversations:write", "approvals:resolve"],
+          expiresAt: Date.now() + options.expiresInDays * 24 * 60 * 60 * 1000,
+        });
+        console.log(`Credential ID: ${created.id}`);
+        console.log(`Workspace scope: ${created.workspaceIds.join(", ")}`);
+        console.log(`Expires: ${new Date(created.expiresAt).toISOString()}`);
+        console.log("Copy this token into the Aster app's Keychain now; it will not be shown again:");
+        console.log(created.token);
+      } finally {
+        store.close();
+      }
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 2;
+    }
+  });
+asterTokenCommand
+  .command("revoke")
+  .description("Revoke an Aster credential immediately")
+  .argument("<credential-id>")
+  .action(async (credentialId: string) => {
+    const { AsterStore } = await import("./server/aster-store.js");
+    const store = new AsterStore();
+    try {
+      if (!store.revokeCredential(credentialId)) {
+        console.error("Aster credential not found");
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`Revoked credential ${credentialId}`);
+    } finally {
+      store.close();
+    }
+  });
+
 const logsCmd = program
   .command("logs")
   .description("Inspect KimiFlare's structured logs (jsonl, one file per day, 7-day retention)");
