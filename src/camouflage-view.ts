@@ -27,6 +27,7 @@ import { featuredModels, listModels, type ModelEntry } from "./models/registry.j
 import { formatContext, formatModelPrice } from "./ui/model-picker.js";
 import { CATEGORIES, SINGLE_COMMANDS } from "./ui/help-menu.js";
 import { FEEDBACK_WORKER_URL, openBrowser } from "./ui/app-helpers.js";
+import { registerTerminalHandoff } from "./ui/bang-command.js";
 import { deployCommute, teardownCommute, findExistingCommuteWorkers } from "./remote/deploy-commute.js";
 import type { MultiAgentSettings } from "./ui/multi-agent-modal.js";
 import { loadRemoteSessions, formatSessionLine, formatTokens } from "./ui/remote-dashboard.js";
@@ -52,6 +53,9 @@ interface CamouflageSdk {
   selectList(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; value?: string; cancelled: boolean }>;
   confirm(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; value?: boolean; cancelled: boolean }>;
   form(cam: CamouflageHandle, spec: Record<string, unknown>): Promise<{ id: string; values?: Record<string, string>; cancelled: boolean }>;
+  /** camouflage-tui 2.4.0-beta.7+. */
+  suspendTerminal?(cam: CamouflageHandle, opts?: { timeoutMs?: number }): Promise<{ supported: boolean }>;
+  resumeTerminal?(cam: CamouflageHandle): void;
 }
 
 /** The renderer couldn't start (not installed, no binary for this
@@ -108,6 +112,11 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
   }
 
   const view = new View(cam, sdk);
+  // `!` commands borrow the terminal from the renderer while they run.
+  registerTerminalHandoff({
+    suspend: async () => (sdk.suspendTerminal ? (await sdk.suspendTerminal(cam)).supported : false),
+    resume: () => sdk.resumeTerminal?.(cam),
+  });
   cam.on("userInput", (text: string) => {
     view.echoed.push(text.trim());
     view.actions?.submit(text);
@@ -131,6 +140,7 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
   const finish = async () => {
     if (closing) return;
     closing = true;
+    registerTerminalHandoff(null);
     await cam.close().catch(() => undefined);
     restoreConsole();
   };
