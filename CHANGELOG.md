@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.1](https://github.com/sinameraji/autopilot/compare/v1.7.0...v1.7.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ui:** no mode badge in the Camouflage footer when modes are off ([0740150](https://github.com/sinameraji/autopilot/commit/0740150507766f32ef35df0dd885b20f21f369ac))
+* **ui:** no mode badge in the Camouflage footer when modes are off ([68d6d00](https://github.com/sinameraji/autopilot/commit/68d6d008fcb0a3aaaa18e109ba0b10bc173ba875))
+
 ## [1.7.0](https://github.com/sinameraji/autopilot/compare/v1.6.0...v1.7.0) (2026-10-01)
 
 
