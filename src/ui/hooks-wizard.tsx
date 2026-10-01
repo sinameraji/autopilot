@@ -34,7 +34,7 @@ type Step =
 
 const TOOL_EVENTS = new Set<HookEvent>(["PreToolUse", "PostToolUse"]);
 
-const EVENT_DESCRIPTIONS: Record<HookEvent, string> = {
+export const EVENT_DESCRIPTIONS: Record<HookEvent, string> = {
   PreToolUse: "before every tool call — can VETO (block) it",
   PostToolUse: "after every tool call — informational only",
   UserPromptSubmit: "when you hit Enter — can VETO the prompt",
@@ -45,7 +45,7 @@ const EVENT_DESCRIPTIONS: Record<HookEvent, string> = {
 /** Concrete, copy-pasteable command examples per event. Shown in the
  *  wizard's `command` step so users see exactly what a hook looks like
  *  instead of having to invent one from first principles. */
-const EVENT_COMMAND_EXAMPLES: Record<HookEvent, string[]> = {
+export const EVENT_COMMAND_EXAMPLES: Record<HookEvent, string[]> = {
   PreToolUse: [
     `# Block edits to secrets / .env files:`,
     `case "$KIMIFLARE_HOOK_PATH" in *.env|*.pem|*.key) echo blocked; exit 1 ;; esac`,
@@ -82,7 +82,7 @@ const EVENT_COMMAND_EXAMPLES: Record<HookEvent, string[]> = {
 
 /** Suggested matcher regexes per event. Shown in the matcher step so
  *  users see the common patterns instead of inventing them. */
-const MATCHER_EXAMPLES = [
+export const MATCHER_EXAMPLES = [
   `"^(edit|write)$"  — only file edits / writes (the common case)`,
   `"^bash$"          — only bash commands`,
   `"^mcp_"           — every MCP-server tool`,

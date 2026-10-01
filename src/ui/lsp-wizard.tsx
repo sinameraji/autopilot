@@ -8,7 +8,7 @@ import type { LspServerConfig } from "../config.js";
 import { getShellCommand } from "../tools/bash.js";
 import { CustomTextInput } from "./text-input.js";
 
-interface Preset {
+export interface Preset {
   id: string;
   name: string;
   description: string;
@@ -17,7 +17,7 @@ interface Preset {
   installHint: string;
 }
 
-const PRESETS: Preset[] = [
+export const PRESETS: Preset[] = [
   {
     id: "typescript",
     name: "TypeScript",

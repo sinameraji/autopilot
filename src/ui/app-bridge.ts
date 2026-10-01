@@ -20,6 +20,11 @@ import type { SessionSummary, Checkpoint } from "../sessions.js";
 import type { PlanOption } from "../tools/registry.js";
 import type { PermissionDecision, PermissionRequest } from "../tools/executor.js";
 import type { PlanCompleteChoice } from "./plan-complete-picker.js";
+import type { CustomCommand } from "../commands/types.js";
+import type { SaveCustomCommandOptions } from "../commands/save.js";
+import type { MultiAgentSettings } from "./multi-agent-modal.js";
+import type { LspServerConfig } from "../config.js";
+import type { HookConfig, HookEvent } from "../hooks/types.js";
 
 /** Which Ink dialog App currently wants open. */
 export type AppModal =
@@ -63,6 +68,19 @@ export interface AppSnapshot {
   currentTheme: string;
   currentShell: string;
   memoryEnabled: boolean;
+  /** Full custom command definitions (for editing). */
+  customCommandDefs: CustomCommand[];
+  /** The custom-command editor App wants open. */
+  commandWizard: { mode: "create" | "edit"; initial?: CustomCommand } | null;
+  commandPickerMode: "edit" | "delete" | null;
+  /** The repo /changelog-image detected, if any. */
+  changelogImageRepo: { owner: string; name: string } | null;
+  multiAgent: MultiAgentSettings;
+  /** Commute URL from /remote setup, used when no worker endpoint is set. */
+  remoteWorkerUrl?: string;
+  /** Every configured hook, by event. */
+  hooks: { event: HookEvent; hook: HookConfig }[];
+  lsp: { servers: Record<string, LspServerConfig>; scope: "project" | "global"; hasProjectDir: boolean };
 }
 
 export interface AppActions {
@@ -82,6 +100,17 @@ export interface AppActions {
   pickPlanComplete: (choice: PlanCompleteChoice | null) => void;
   pickTheme: (name: string | null) => void;
   pickShell: (shell: string | null) => void;
+  generateChangelogImage: (owner: string, repo: string, days: number) => void;
+  /** Save multi-agent settings (as the Ink modal does). */
+  saveMultiAgent: (patch: MultiAgentSettings) => void;
+  /** Save LSP servers (closes the LSP wizard). */
+  saveLsp: (servers: Record<string, LspServerConfig>, enabled: boolean, scope: "project" | "global") => void;
+  /** Reload hooks after the view changed settings.json; returns the fresh list. */
+  reloadHooks: () => AppSnapshot["hooks"];
+  /** Open the custom-command editor (from the picker, for edit). */
+  openCommandWizard: (mode: "create" | "edit", name?: string) => void;
+  /** Save from the custom-command editor (closes it). */
+  saveCommand: (opts: SaveCustomCommandOptions) => void;
   /** Delete a custom command (after the view confirmed it). */
   deleteCommand: (name: string) => void;
   /** Close a dialog the view can't show. */
