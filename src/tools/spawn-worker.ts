@@ -3,6 +3,7 @@ import type { WorkerResultMessage } from "../agent/messages.js";
 import { logger } from "../util/logger.js";
 import { loadConfig, resolveWorkerBudgetUsd, DEFAULT_MODEL } from "../config.js";
 import { runHotcellWorker } from "./hotcell-worker.js";
+import { llmAuthFromConfig, usesRequesty } from "../agent/llm-auth.js";
 
 interface SpawnWorkerArgs {
   mode: "plan" | "execute";
@@ -153,8 +154,8 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
     const budgetCeiling = resolveWorkerBudgetUsd(cfg);
 
     if (cfg?.workerBackend === "hotcell") {
-      if (cfg.baseUrl) {
-        return textOutput("Hotcell workers currently require an OpenRouter-backed session; custom model endpoints cannot be routed through the Hotcell gateway.");
+      if (cfg.baseUrl || usesRequesty(llmAuthFromConfig(cfg))) {
+        return textOutput("Hotcell workers currently require an OpenRouter-backed session; custom model endpoints and Requesty sessions cannot be routed through the Hotcell gateway.");
       }
       if (args.mode !== "plan") {
         return textOutput("Hotcell workers currently support read-only plan mode only. Execute mode is disabled until reviewed patch artifacts are supported.");
@@ -206,6 +207,12 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
 
     const apiKey = process.env.KIMIFLARE_WORKER_API_KEY;
     const defaultModel = cfg?.model ?? DEFAULT_MODEL;
+    const workerModel = args.model ?? ctx.model ?? defaultModel;
+    // Requesty managed policy ids ("kimi-k2.6") have no vendor prefix, and the
+    // remote worker does not inherit the session's Requesty credentials.
+    if (cfg && usesRequesty(llmAuthFromConfig(cfg)) && !workerModel.includes("/")) {
+      return textOutput("Remote workers require an OpenRouter-compatible model ID and do not inherit the session's Requesty credentials. Pass an OpenRouter model ID or configure the remote worker separately.");
+    }
     const payload = {
       mode: args.mode,
       task: args.task,
@@ -213,7 +220,7 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
       budget: { maxCostUsd: budgetCeiling },
       outputFormat: args.outputFormat ?? "structured",
       tools: args.tools ?? (args.mode === "plan" ? "read-only" : "all"),
-      model: args.model ?? ctx.model ?? defaultModel,
+      model: workerModel,
       ...(args.mode === "execute"
         ? {
             branchName: args.branchName,

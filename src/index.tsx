@@ -421,7 +421,7 @@ async function main() {
     return;
   }
   if (uiEngine === "camouflage") {
-    console.error("autopilot: --ui camouflage needs an OpenRouter key; starting the default UI to set one up.");
+    console.error("autopilot: --ui camouflage needs a model provider key (OpenRouter or Requesty); run `autopilot auth openrouter` or `autopilot auth requesty` to set one up.");
   } else if (uiEngine !== "ink") {
     console.error(`autopilot: unknown --ui "${uiEngine}"; using ink.`);
   }

@@ -14,7 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { runAgentTurn, BudgetExhaustedError, AgentLoopError } from "./agent/loop.js";
-import { llmAuthFromConfig } from "./agent/llm-auth.js";
+import { llmAuthFromConfig, usesRequesty } from "./agent/llm-auth.js";
 import { buildSystemPrompt } from "./agent/system-prompt.js";
 import type { ChatMessage, ToolCall, Usage } from "./agent/messages.js";
 import type { ResponseMeta } from "./agent/client.js";
@@ -27,6 +27,8 @@ import { recordUsage, getCostReport } from "./usage-tracker.js";
 import { makeSessionId, generateSessionTitle, saveSession } from "./sessions.js";
 import { classifyIntent } from "./intent/classify.js";
 import { loadOpenRouterCatalog } from "./models/openrouter-catalog.js";
+import { ensureRequestyCatalog } from "./models/requesty-catalog.js";
+import { featuredModels, listModels, type ModelEntry } from "./models/registry.js";
 import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { logger } from "./util/logger.js";
 
@@ -326,7 +328,7 @@ export async function runCamouflageMode(opts: CamouflageModeOpts): Promise<void>
       case "model": {
         let chosen = arg;
         if (!chosen) {
-          const models = await loadOpenRouterCatalog().catch(() => []);
+          const models = await loadPickerModels(cfg).catch(() => []);
           if (models.length === 0) return void notice("Couldn't load the model list. Try /model <id>.", "warn");
           const pick = await sdk.selectList(cam, {
             id: `model-${Date.now()}`,
@@ -471,6 +473,20 @@ function formatK(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
+}
+
+/**
+ * Models for the /model picker, from the gateway in use. On Requesty this is
+ * the same list the Ink picker shows: its managed policies first (registry
+ * featured order), then the rest of its catalog.
+ */
+async function loadPickerModels(cfg: KimiConfig): Promise<ModelEntry[]> {
+  if (!usesRequesty(llmAuthFromConfig(cfg))) return loadOpenRouterCatalog();
+  await ensureRequestyCatalog();
+  const all = listModels().filter((m) => m.supports.tools);
+  const featured = featuredModels(all);
+  const seen = new Set(featured.map((m) => m.id));
+  return [...featured, ...all.filter((m) => !seen.has(m.id))];
 }
 
 function shortModel(id: string): string {

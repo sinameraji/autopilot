@@ -943,7 +943,7 @@ export class TurnSupervisor {
       const synth = await this.synthesizeFindings(results, {
         prompt,
         auth: llmAuthFromConfig(cfg),
-        model: cfg?.synthesisModel,
+        model: cfg?.synthesisModel ?? cfg?.plumbingModel,
         signal,
         strategy: cfg?.synthesisStrategy,
         disableLlmSynthesis: cfg?.disableLlmSynthesis,
@@ -1092,7 +1092,7 @@ async function decomposeWithLlm(
   fileTree: string,
   cfg: KimiConfig,
 ): Promise<SpawnWorkerOpts[] | null> {
-  const model = cfg.decompositionModel ?? DEFAULT_PLUMBING_MODEL;
+  const model = cfg.decompositionModel ?? cfg.plumbingModel ?? DEFAULT_PLUMBING_MODEL;
   const auth = llmAuthFromConfig(cfg);
   if (!hasLlmAuth(auth)) {
     logger.warn("decompose:missing_creds", { reason: "no OpenRouter key or custom endpoint" });
