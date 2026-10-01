@@ -46,6 +46,30 @@ describe("run tool-boundary journal", () => {
     }
   });
 
+  it("blocks the over-budget action before its side effect and notifies the host", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "autopilot-run-action-budget-"));
+    const dbPath = join(dir, "runs.db");
+    const store = new RunStore(dbPath);
+    let sideEffects = 0;
+    const budgetReasons: string[] = [];
+    try {
+      const run = store.createRun({ task: "Bound actions", cwd: dir, maxToolIterations: 1 });
+      store.transition(run.id, "running");
+      const tool: ToolSpec = { name: "counted_action", description: "side effect", parameters: { type: "object", properties: {}, additionalProperties: true }, needsPermission: false, run: async () => { sideEffects++; return "done"; } };
+      const executor = new ToolExecutor([tool]);
+      const context = { cwd: dir, runId: run.id, runsDbPath: dbPath, onRunBudgetExceeded: (reason: string) => budgetReasons.push(reason) };
+      assert.equal((await executor.run({ id: "first", name: tool.name, arguments: "{}" }, allow, context)).ok, true);
+      const blocked = await executor.run({ id: "second", name: tool.name, arguments: "{}" }, allow, context);
+      assert.equal(blocked.ok, false);
+      assert.equal(sideEffects, 1);
+      assert.deepEqual(budgetReasons, ["max_tool_iterations_exceeded"]);
+      assert.equal(store.getRun(run.id)?.status, "needs_input");
+      assert.equal(store.countToolIterations(run.id), 1);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("schedules a supervisor re-check when waiting on an active managed job", async () => {
     const dir = mkdtempSync(join(tmpdir(), "autopilot-run-job-wait-"));
     const runsDbPath = join(dir, "runs.db");

@@ -102,8 +102,8 @@ export class RunWakeScheduler {
       return;
     }
     const runStartedAt = run.startedAt ?? run.createdAt;
-    if (now - runStartedAt >= run.maxRuntimeMs) {
-      this.store.transition(run.id, "failed", "max_runtime_exceeded");
+    if (run.maxRuntimeMs !== null && now - runStartedAt >= run.maxRuntimeMs) {
+      this.store.transition(run.id, "needs_input", "max_runtime_exceeded");
       this.store.cancelTimer(timer.id);
       return;
     }

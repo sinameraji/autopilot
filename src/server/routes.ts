@@ -25,7 +25,7 @@ import { glob } from "../util/glob.js";
 import { RunStore } from "../runs/store.js";
 import { RunWorktreeManager, type RunWorktree } from "../runs/worktrees.js";
 import { RunWakeScheduler, type RunWakeEvent } from "../runs/wake-scheduler.js";
-import type { RunRecord } from "../runs/store.js";
+import type { RunBudgetUpdate, RunRecord } from "../runs/store.js";
 
 interface ActiveSession {
   sessionFile: SessionFile;
@@ -34,14 +34,40 @@ interface ActiveSession {
   sseClients: Set<SseClient>;
   runId?: string;
   allowedTools?: Set<string>;
-  maxToolIterations?: number;
-  maxRuntimeMs?: number;
   controller?: AbortController;
   running?: boolean;
+  shuttingDown?: boolean;
 }
 
 const activeSessions = new Map<string, ActiveSession>();
 const activeRuns = new Map<string, ActiveSession>();
+const MAX_NODE_TIMEOUT_MS = 2_147_000_000;
+
+function parseOptionalBudgetInteger(body: Record<string, unknown>, name: string, minimum = 1): number | null | undefined {
+  if (!Object.hasOwn(body, name)) return undefined;
+  const value = body[name];
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(name + " must be null or a safe integer greater than or equal to " + minimum);
+  }
+  return value;
+}
+
+function parseRunBudgetUpdate(body: Record<string, unknown>): RunBudgetUpdate {
+  const budgets: RunBudgetUpdate = {
+    maxToolIterations: parseOptionalBudgetInteger(body, "maxToolIterations"),
+    maxRuntimeMs: parseOptionalBudgetInteger(body, "maxRuntimeMs", 1000),
+    maxTotalTokens: parseOptionalBudgetInteger(body, "maxTotalTokens"),
+  };
+  if (Object.hasOwn(body, "maxCostUsd")) {
+    const value = body.maxCostUsd;
+    if (value !== null && (typeof value !== "number" || !Number.isFinite(value) || value < 0.01)) {
+      throw new Error("maxCostUsd must be null or a finite number greater than or equal to 0.01");
+    }
+    budgets.maxCostUsd = value as number | null;
+  }
+  return budgets;
+}
 
 function json(res: ServerResponse, status: number, data: unknown): void {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -127,6 +153,56 @@ async function buildUserMessage(prompt: string, files: string[], cwd: string): P
 }
 
 export function setupRoutes(config: KimiConfig) {
+  async function getOrRestoreActiveRun(run: RunRecord): Promise<ActiveSession> {
+    if (!run.sessionId) throw new Error("Cannot restore run without a session id: " + run.id);
+    const existing = activeRuns.get(run.id) ?? activeSessions.get(run.sessionId);
+    if (existing) return existing;
+    const sessionFile = await loadSession(resolve(sessionsDir(), run.sessionId + ".json"));
+    const allowedTools = new Set(run.allowedTools);
+    allowedTools.add("wait_for");
+    const tools = ALL_TOOLS.filter((tool) => allowedTools.has(tool.name));
+    const active: ActiveSession = {
+      sessionFile,
+      messages: sessionFile.messages,
+      executor: new ToolExecutor(tools),
+      sseClients: new Set(),
+      runId: run.id,
+      allowedTools,
+    };
+    activeSessions.set(run.sessionId, active);
+    activeRuns.set(run.id, active);
+    return active;
+  }
+
+  async function recoverQueuedRuns(): Promise<void> {
+    const store = new RunStore();
+    try {
+      while (true) {
+        const queuedRuns = store.listRuns({ status: "queued", limit: 500 });
+        if (queuedRuns.length === 0) break;
+        for (const queued of queuedRuns) {
+          try {
+            const run = store.transition(queued.id, "running", "resumed_from_checkpoint");
+            const active = await getOrRestoreActiveRun(run);
+            active.messages.push({ role: "user", content: "The server restarted after the last saved checkpoint. Continue from this state without repeating actions already recorded as complete." });
+            active.sessionFile.messages = active.messages;
+            await saveSession(active.sessionFile);
+            store.recordCheckpoint(run.id);
+            launchAgentTurnForSession(active, config, false);
+          } catch (error) {
+            const current = store.getRun(queued.id);
+            if (current && (current.status === "running" || current.status === "queued")) {
+              store.transition(current.id, "failed", "checkpoint_restore_failed:" + (error instanceof Error ? error.message : String(error)).slice(0, 400));
+            }
+            logger.error("server: failed to recover queued run", { runId: queued.id, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      }
+    } finally {
+      store.close();
+    }
+  }
+
   const wakeScheduler = new RunWakeScheduler({
     onWake: async (event: RunWakeEvent) => {
       const store = new RunStore();
@@ -135,36 +211,23 @@ export function setupRoutes(config: KimiConfig) {
       if (!run || run.status !== "running" || !run.sessionId) {
         throw new Error(`Cannot restore active run ${event.runId}`);
       }
-      let active = activeRuns.get(run.id) ?? activeSessions.get(run.sessionId);
-      if (!active) {
-        const sessionFile = await loadSession(resolve(sessionsDir(), `${run.sessionId}.json`));
-        const allowedTools = new Set(run.allowedTools);
-        allowedTools.add("wait_for");
-        const tools = ALL_TOOLS.filter((tool) => allowedTools.has(tool.name));
-        active = {
-          sessionFile,
-          messages: sessionFile.messages,
-          executor: new ToolExecutor(tools),
-          sseClients: new Set(),
-          runId: run.id,
-          allowedTools,
-          maxToolIterations: run.maxToolIterations,
-          maxRuntimeMs: run.maxRuntimeMs,
-        };
-        activeSessions.set(run.sessionId, active);
-        activeRuns.set(run.id, active);
-      }
+      const active = await getOrRestoreActiveRun(run);
       active.messages.push({
         role: "user",
         content: event.condition === "job"
           ? `The wait condition has been checked. Job ${event.jobId} is ${event.jobStatus ?? "unknown"}. Continue the task.`
           : `The scheduled wait has elapsed at ${new Date().toISOString()}. Continue the task.`,
       });
+      active.sessionFile.messages = active.messages;
+      await saveSession(active.sessionFile);
+      const checkpointStore = new RunStore();
+      try { checkpointStore.recordCheckpoint(run.id); } finally { checkpointStore.close(); }
       launchAgentTurnForSession(active, config, false);
     },
     onError: (error, timer) => logger.error("server: run wake failed", { error: error.message, timerId: timer?.id }),
   });
   wakeScheduler.start();
+  void recoverQueuedRuns();
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -186,7 +249,7 @@ export function setupRoutes(config: KimiConfig) {
       }
 
       // Durable unattended runs are deliberately disabled without server auth.
-      const runPathMatch = pathname.match(/^\/runs\/([^/]+)(?:\/(events|cancel))?$/);
+      const runPathMatch = pathname.match(/^\/runs\/([^/]+)(?:\/(events|cancel|resume))?$/);
       if (pathname === "/runs" && method === "GET") {
         if (!process.env.KIMIFLARE_SERVER_PASSWORD) {
           json(res, 503, { error: "Set KIMIFLARE_SERVER_PASSWORD before accessing unattended runs" });
@@ -245,26 +308,17 @@ export function setupRoutes(config: KimiConfig) {
           badRequest(res, "cwd is required when worktree is enabled; provide a path in a Git repository or set worktree to false");
           return;
         }
-        const maxToolIterations = body.maxToolIterations ?? 100;
-        if (!Number.isInteger(maxToolIterations) || (maxToolIterations as number) < 1 || (maxToolIterations as number) > 5000) {
-          badRequest(res, "maxToolIterations must be an integer from 1 through 5000");
+        let budgets: RunBudgetUpdate;
+        try {
+          budgets = parseRunBudgetUpdate(body);
+        } catch (error) {
+          badRequest(res, error instanceof Error ? error.message : String(error));
           return;
         }
-        const maxRuntimeMs = body.maxRuntimeMs ?? 8 * 60 * 60 * 1000;
-        if (!Number.isInteger(maxRuntimeMs) || (maxRuntimeMs as number) < 1000 || (maxRuntimeMs as number) > 7 * 24 * 60 * 60 * 1000) {
-          badRequest(res, "maxRuntimeMs must be an integer from 1000 through 604800000");
-          return;
-        }
-        const maxTotalTokens = body.maxTotalTokens ?? 1_000_000;
-        if (!Number.isInteger(maxTotalTokens) || (maxTotalTokens as number) < 1 || (maxTotalTokens as number) > 100_000_000) {
-          badRequest(res, "maxTotalTokens must be an integer from 1 through 100000000");
-          return;
-        }
-        const maxCostUsd = body.maxCostUsd === undefined ? (config.baseUrl ? null : 5) : body.maxCostUsd;
-        if (maxCostUsd !== null && (typeof maxCostUsd !== "number" || !Number.isFinite(maxCostUsd) || maxCostUsd < 0.01 || maxCostUsd > 10_000)) {
-          badRequest(res, "maxCostUsd must be null or a number from 0.01 through 10000");
-          return;
-        }
+        const maxToolIterations = budgets.maxToolIterations ?? null;
+        const maxRuntimeMs = budgets.maxRuntimeMs ?? null;
+        const maxTotalTokens = budgets.maxTotalTokens ?? null;
+        const maxCostUsd = budgets.maxCostUsd ?? null;
         if (!task || task.length > 20_000) {
           badRequest(res, "task is required and must be at most 20000 characters");
           return;
@@ -354,8 +408,6 @@ export function setupRoutes(config: KimiConfig) {
           sseClients: new Set(),
           runId: run.id,
           allowedTools: toolNames,
-          maxToolIterations: run.maxToolIterations,
-          maxRuntimeMs: run.maxRuntimeMs,
         };
         activeSessions.set(sessionId, active);
         activeRuns.set(run.id, active);
@@ -386,8 +438,43 @@ export function setupRoutes(config: KimiConfig) {
             json(res, 200, { events: store.listEvents(runId) });
             return;
           }
+          if (suffix === "resume" && method === "POST") {
+            if (run.status !== "needs_input") {
+              json(res, 409, { error: "Only a run paused for input can be resumed", run });
+              return;
+            }
+            const parsedBody = await readBody(req);
+            if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+              badRequest(res, "request body must be a JSON object containing at least one revised budget");
+              return;
+            }
+            const resumeBody = parsedBody as Record<string, unknown>;
+            const allowedBudgetKeys = new Set(["maxToolIterations", "maxRuntimeMs", "maxTotalTokens", "maxCostUsd"]);
+            const unsupportedKey = Object.keys(resumeBody).find((key) => !allowedBudgetKeys.has(key));
+            if (unsupportedKey) { badRequest(res, "Unsupported resume field: " + unsupportedKey); return; }
+            let budgets: RunBudgetUpdate;
+            try { budgets = parseRunBudgetUpdate(resumeBody); }
+            catch (error) { badRequest(res, error instanceof Error ? error.message : String(error)); return; }
+            if (Object.values(budgets).every((value) => value === undefined)) {
+              badRequest(res, "Provide at least one revised budget; use null to remove a limit");
+              return;
+            }
+            const active = await getOrRestoreActiveRun(run);
+            if (active.running) {
+              json(res, 409, { error: "The previous turn is still stopping; retry resume shortly", run });
+              return;
+            }
+            active.messages.push({ role: "user", content: "The run was paused because " + (run.stopReason ?? "it needs input") + ". Its budget was updated. Continue the task from the last saved checkpoint." });
+            active.sessionFile.messages = active.messages;
+            await saveSession(active.sessionFile);
+            const resumed = store.resumeWithBudgets(runId, budgets);
+            store.recordCheckpoint(runId);
+            launchAgentTurnForSession(active, config, false);
+            json(res, 202, { run: resumed });
+            return;
+          }
           if (suffix === "cancel" && method === "POST") {
-            if (run.status === "queued" || run.status === "running" || run.status === "waiting") {
+            if (run.status === "queued" || run.status === "running" || run.status === "waiting" || run.status === "needs_input") {
               activeRuns.get(runId)?.controller?.abort();
               store.transition(runId, "cancelled", "cancelled_by_client");
               store.cancelTimersForRun(runId);
@@ -566,7 +653,8 @@ export function setupRoutes(config: KimiConfig) {
   function cleanup(): void {
     wakeScheduler.dispose();
     for (const [, active] of activeSessions) {
-      active.controller?.abort();
+      active.shuttingDown = true;
+      active.controller?.abort(new Error("server_shutdown"));
       for (const client of active.sseClients) {
         client.close();
       }
@@ -623,10 +711,19 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       active.running = false;
       return;
     }
-    const elapsed = run.startedAt ? Date.now() - run.startedAt : 0;
-    const remainingMs = Math.max(1, run.maxRuntimeMs - elapsed);
-    runtimeTimer = setTimeout(() => controller.abort(new Error("max_runtime_exceeded")), remainingMs);
-    runtimeTimer.unref();
+    const armRuntimeBudget = (): void => {
+      if (!runStore || !active.runId) return;
+      const current = runStore.getRun(active.runId);
+      if (!current || current.status !== "running" || current.maxRuntimeMs === null || current.startedAt === null) return;
+      const remainingMs = current.maxRuntimeMs - (Date.now() - current.startedAt);
+      if (remainingMs <= 0) {
+        controller.abort(new Error("max_runtime_exceeded"));
+        return;
+      }
+      runtimeTimer = setTimeout(armRuntimeBudget, Math.min(remainingMs, MAX_NODE_TIMEOUT_MS));
+      runtimeTimer.unref();
+    };
+    armRuntimeBudget();
   }
 
   const callbacks: AgentCallbacks = {
@@ -682,6 +779,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
       runStore.transition(active.runId, "waiting", `timer:${request.timerId}`);
       yielded = true;
     },
+    onRunBudgetExceeded: (reason) => controller.abort(new Error(reason)),
     askPermission: async ({ tool, args }) => {
       if (active.runId) {
         if (active.allowedTools?.has(tool.name)) return "allow";
@@ -713,11 +811,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
 
   try {
     if (run && runStore) {
-      const remainingIterations = run.maxToolIterations - runStore.countToolIterations(run.id);
-      if (remainingIterations <= 0) {
-        runStore.transition(run.id, "failed", "max_tool_iterations_exceeded");
-        return;
-      }
+
       const tools = ALL_TOOLS.filter((tool) => active.allowedTools?.has(tool.name));
       await runAgentTurn({
         ...llmAuthFromConfig(config),
@@ -731,9 +825,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
         executor,
         cwd: sessionFile.cwd,
         signal: controller.signal,
-        maxToolIterations: remainingIterations,
-        maxTotalToolIterations: remainingIterations,
-        toolLimitBehavior: "stop",
+        toolLimitBehavior: "continue",
         codeMode: false,
         allowDirectPush: config.allowDirectPush,
         preferPullRequests: config.preferPullRequests,
@@ -742,6 +834,10 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
           sessionFile.messages = updatedMessages;
           sessionFile.updatedAt = new Date().toISOString();
           await saveSession(sessionFile);
+          if (runStore && active.runId) {
+            const current = runStore.getRun(active.runId);
+            if (current?.status === "running" || current?.status === "needs_input") runStore.recordCheckpoint(active.runId);
+          }
           return updatedMessages;
         },
       });
@@ -766,9 +862,14 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
     sessionFile.messages = messages;
     sessionFile.updatedAt = new Date().toISOString();
     await saveSession(sessionFile);
+    if (runStore && active.runId && runStore.getRun(active.runId)?.status === "running") {
+      runStore.recordCheckpoint(active.runId);
+    }
     if (runStore && active.runId) {
       const current = runStore.getRun(active.runId);
-      if (current?.status === "running" && !yielded) runStore.transition(active.runId, "completed");
+      if (current?.status === "running" && !yielded) {
+        runStore.transition(active.runId, "completed");
+      }
     }
 
     for (const client of active.sseClients) {
@@ -779,11 +880,10 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
     logger.error("server: agent turn failed", { sessionId: sessionFile.id, error: message });
     if (runStore && active.runId) {
       const current = runStore.getRun(active.runId);
-      if (current?.status === "running") {
-        const reason = controller.signal.aborted && Date.now() - (run?.startedAt ?? Date.now()) >= (run?.maxRuntimeMs ?? Infinity)
-          ? "max_runtime_exceeded"
-          : message;
-        runStore.transition(active.runId, "failed", reason);
+      if (current?.status === "running" && !active.shuttingDown) {
+        const runtimeBudgetExceeded = controller.signal.aborted && run?.maxRuntimeMs !== null && run?.maxRuntimeMs !== undefined && run.startedAt !== null && Date.now() - run.startedAt >= run.maxRuntimeMs;
+        const reason = runtimeBudgetExceeded ? "max_runtime_exceeded" : message;
+        runStore.transition(active.runId, runtimeBudgetExceeded ? "needs_input" : "failed", reason);
       }
     }
     for (const client of active.sseClients) {

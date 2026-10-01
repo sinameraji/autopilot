@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KimiConfig } from "../config.js";
 import { setupRoutes } from "./routes.js";
+import { RunStore } from "../runs/store.js";
+import { saveSession } from "../sessions.js";
 
 describe("unattended run HTTP routes", () => {
   it("requires server auth configuration and validates run options", async () => {
@@ -81,6 +83,53 @@ describe("unattended run HTTP routes", () => {
         body: JSON.stringify({ task: "inspect", cwd: dir, maxCostUsd: 0 }),
       });
       assert.equal(invalidCostBudget.status, 400);
+
+      const configurableBudgets = await fetch(`${baseUrl}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task: "inspect", cwd: dir, worktree: false, allowedTools: ["unknown_tool"], maxToolIterations: 5001, maxRuntimeMs: 604_800_001, maxTotalTokens: 100_000_001, maxCostUsd: 10_001 }),
+      });
+      assert.equal(configurableBudgets.status, 400);
+      assert.match((await configurableBudgets.json() as { error: string }).error, /unknown tool/);
+
+      const store = new RunStore();
+      let completedRunId: string;
+      try {
+        const run = store.createRun({ task: "Already completed", cwd: dir });
+        store.transition(run.id, "running");
+        store.transition(run.id, "completed");
+        completedRunId = run.id;
+      } finally { store.close(); }
+      const notPaused = await fetch(`${baseUrl}/runs/${completedRunId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxRuntimeMs: null }),
+      });
+      assert.equal(notPaused.status, 409);
+
+      const sessionId = "budget-resume-session";
+      const timestamp = new Date().toISOString();
+      await saveSession({ id: sessionId, cwd: dir, model: "moonshotai/kimi-k2.6", createdAt: timestamp, updatedAt: timestamp, messages: [
+        { role: "system", content: "You are a test agent." },
+        { role: "user", content: "Continue this task." },
+      ] });
+      const pausedStore = new RunStore();
+      let pausedRunId: string;
+      try {
+        const run = pausedStore.createRun({ task: "Resume through API", cwd: dir, sessionId, maxTotalTokens: 1 });
+        pausedStore.transition(run.id, "running");
+        assert.equal(pausedStore.recordUsage(run.id, { promptTokens: 1, completionTokens: 0 }).run.status, "needs_input");
+        pausedRunId = run.id;
+      } finally { pausedStore.close(); }
+      const resumed = await fetch(`${baseUrl}/runs/${pausedRunId}/resume`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ maxTotalTokens: null }),
+      });
+      assert.equal(resumed.status, 202);
+      const resumeBody = await resumed.json() as { run: { status: string; maxTotalTokens: number | null } };
+      assert.equal(resumeBody.run.status, "running");
+      assert.equal(resumeBody.run.maxTotalTokens, null);
     } finally {
       routes.cleanup();
       await close(server);

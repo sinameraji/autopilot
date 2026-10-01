@@ -48,10 +48,10 @@ export function getOpenApiSpec(): string {
                 worktree: { type: "boolean", default: true, description: "Create a per-run Git branch/worktree; set false for non-Git jobs." },
                 model: { type: "string" },
                 allowedTools: { type: "array", items: { type: "string" }, description: "Explicit tool permission allowlist; wait_for is always available." },
-                maxToolIterations: { type: "integer", minimum: 1, maximum: 5000 },
-                maxRuntimeMs: { type: "integer", minimum: 1000, maximum: 604800000 },
-                maxTotalTokens: { type: "integer", minimum: 1, maximum: 100000000, default: 1000000 },
-                maxCostUsd: { type: "number", minimum: 0.01, maximum: 10000, nullable: true, default: 5, description: "Null disables USD enforcement; custom endpoints default to null because they may omit authoritative cost." },
+                maxToolIterations: { type: "integer", minimum: 1, nullable: true, description: "Optional lifetime tool-action budget; null (default) is unlimited." },
+                maxRuntimeMs: { type: "integer", minimum: 1000, nullable: true, description: "Optional total runtime budget; null (default) is unlimited." },
+                maxTotalTokens: { type: "integer", minimum: 1, nullable: true, description: "Optional cumulative token budget; null (default) is unlimited." },
+                maxCostUsd: { type: "number", minimum: 0.01, nullable: true, default: null, description: "Optional cumulative USD budget; null (default) is unlimited." },
               },
             } } },
           },
@@ -72,6 +72,28 @@ export function getOpenApiSpec(): string {
           security: [{ basicAuth: [] }],
           parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string" } }],
           responses: { "200": { description: "Run events; tool arguments and output content are not included" } },
+        },
+      },
+      "/runs/{runId}/resume": {
+        post: {
+          summary: "Resume a budget-paused run with revised limits",
+          security: [{ basicAuth: [] }],
+          parameters: [{ name: "runId", in: "path", required: true, schema: { type: "string" } }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object",
+              minProperties: 1,
+              properties: {
+                maxToolIterations: { type: "integer", minimum: 1, nullable: true, description: "Set a new lifetime tool-action budget, or null to remove it." },
+                maxRuntimeMs: { type: "integer", minimum: 1000, nullable: true, description: "Set a new total runtime budget, or null to remove it." },
+                maxTotalTokens: { type: "integer", minimum: 1, nullable: true, description: "Set a new cumulative token budget, or null to remove it." },
+                maxCostUsd: { type: "number", minimum: 0.01, nullable: true, description: "Set a new cumulative USD budget, or null to remove it." },
+              },
+              additionalProperties: false,
+            } } },
+          },
+          responses: { "202": { description: "Run resumed" }, "400": { description: "Invalid budgets" }, "409": { description: "Run is not paused for input" } },
         },
       },
       "/runs/{runId}/cancel": {

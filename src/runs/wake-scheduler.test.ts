@@ -62,6 +62,21 @@ describe("RunWakeScheduler", () => {
     assert.equal(store.nextTimerAt(), null);
   }));
 
+  it("pauses a waiting run when its configured runtime budget expires", async () => withFixture(async ({ dir, store, runsDbPath, jobsDbPath, addScheduler }) => {
+    const created = store.createRun({ task: "Respect runtime budget", cwd: dir, maxRuntimeMs: 1000 });
+    const running = store.transition(created.id, "running");
+    const waiting = store.transition(running.id, "waiting");
+    const wakeAt = (waiting.startedAt ?? waiting.createdAt) + 1000;
+    const timer = store.scheduleTimer({ runId: waiting.id, condition: "time", wakeAt });
+    let wakeCalls = 0;
+    const scheduler = addScheduler(new RunWakeScheduler({ onWake: () => { wakeCalls++; }, runsDbPath, jobsDbPath }));
+
+    assert.equal(await scheduler.processDueTimers(wakeAt), 1);
+    assert.equal(store.getRun(waiting.id)?.status, "needs_input");
+    assert.equal(store.getRun(waiting.id)?.stopReason, "max_runtime_exceeded");
+    assert.equal(store.getTimer(timer.id)?.status, "cancelled");
+    assert.equal(wakeCalls, 0);
+  }));
   it("reschedules active job checks without consuming failed-wake retries", async () => withFixture(async ({ dir, store, runsDbPath, jobsDbPath, addScheduler, addManager }) => {
     const run = createWaitingRun(store, dir, "Wait for build");
     const jobs = addManager(new JobManager(jobsDbPath));
