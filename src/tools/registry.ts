@@ -32,6 +32,8 @@ export interface ToolContext {
   jobsDbPath?: string;
   /** Run identifier for durable tool-boundary journaling in unattended runs. */
   runId?: string;
+  /** Notifies the host that a durable run budget paused execution. */
+  onRunBudgetExceeded?: (reason: string) => void;
   /** Optional override for the durable run/event/timer database. */
   runsDbPath?: string;
   /** When false (default), the bash tool blocks `git push` to the repository's

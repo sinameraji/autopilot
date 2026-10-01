@@ -30,8 +30,8 @@ export interface AsterTurnStart {
   messages: ChatMessage[];
   executor: ToolExecutor;
   allowedTools: Set<string>;
-  maxToolIterations: number;
-  maxRuntimeMs: number;
+  maxToolIterations: number | null;
+  maxRuntimeMs: number | null;
   askPermission: (request: PermissionRequest) => Promise<PermissionDecision>;
   publishEvent: (type: string, data: Record<string, unknown>) => void;
   finish: (status: "completed" | "failed" | "cancelled", reason?: string) => void;

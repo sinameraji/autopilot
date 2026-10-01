@@ -59,6 +59,8 @@ export interface AgentCallbacks {
   onMetaBanner?: (info: { intentTier: string; skillsActive: number; memoryRecalled: boolean }) => void;
   /** Called when an unattended run yields on a durable timer or job condition. */
   onRunYield?: (request: RunWaitRequest) => void;
+  /** Called when a durable run budget is exhausted at a tool boundary. */
+  onRunBudgetExceeded?: (reason: string) => void;
   /** Called when worker status changes during multi-agent orchestration. */
   onWorkersUpdated?: (workers: import("./supervisor.js").ActiveWorker[]) => void;
 }
@@ -1317,6 +1319,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             model: opts.model,
             allowDirectPush: opts.allowDirectPush,
             runId: opts.runId,
+            onRunBudgetExceeded: opts.callbacks.onRunBudgetExceeded,
             runsDbPath: opts.runsDbPath,
           },
           opts.onFileChange,

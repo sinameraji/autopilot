@@ -23,7 +23,7 @@ import { jobStartTool, jobStatusTool, jobLogsTool, jobCancelTool } from "./jobs.
 import { waitForTool } from "./wait-for.js";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { RunStore } from "../runs/store.js";
+import { RunStore, RunToolBudgetExceededError } from "../runs/store.js";
 
 export const ALL_TOOLS: ToolSpec[] = [
   { ...readTool, isReadOnly: true },
@@ -461,6 +461,7 @@ export class ToolExecutor {
       this.firePostToolUse(call, args, success, ctx);
       return success;
     } catch (e) {
+      if (e instanceof RunToolBudgetExceededError) ctx.onRunBudgetExceeded?.(e.reason);
       const err = wrapAsToolError(e);
       const msg = `Error running ${call.name}: ${err.message}`;
       const failure: ToolResult = {

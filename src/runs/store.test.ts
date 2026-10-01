@@ -44,14 +44,25 @@ describe("RunStore", () => {
       assert.equal(run?.repositoryRoot, null);
       assert.equal(run?.worktreePath, null);
       assert.equal(run?.branch, null);
-      assert.equal(run?.maxTotalTokens, 1_000_000);
-      assert.equal(run?.maxCostUsd, 5);
+      assert.equal(run?.maxTotalTokens, null);
+      assert.equal(run?.maxCostUsd, null);
       assert.equal(run?.totalPromptTokens, 0);
     } finally {
       migrated.close();
     }
   }));
 
+  it("creates unlimited run budgets by default", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Run until complete", cwd: dir });
+    assert.equal(run.maxToolIterations, null);
+    assert.equal(run.maxRuntimeMs, null);
+    assert.equal(run.maxTotalTokens, null);
+    assert.equal(run.maxCostUsd, null);
+    store.transition(run.id, "running");
+    const usage = store.recordUsage(run.id, { promptTokens: 1_000_000, completionTokens: 500_000, costUsd: 25 });
+    assert.equal(usage.budgetExceededReason, null);
+    assert.equal(usage.run.status, "running");
+  }));
   it("persists worktree metadata and the worktree cwd", async () => withFixture(({ dir, store, reopen }) => {
     const worktree = {
       runId: "run-123",
@@ -73,7 +84,7 @@ describe("RunStore", () => {
     assert.deepEqual(restarted.getRun(run.id), run);
   }));
 
-  it("aggregates tokens and cost across generations and fails at a ceiling", async () => withFixture(({ dir, store }) => {
+  it("aggregates tokens and cost across generations and pauses at a ceiling", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Bound usage", cwd: dir, maxTotalTokens: 100, maxCostUsd: 1 });
     store.transition(run.id, "running");
     const first = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 10, costUsd: 0.2 });
@@ -84,31 +95,50 @@ describe("RunStore", () => {
 
     const second = store.recordUsage(run.id, { promptTokens: 40, completionTokens: 40, costUsd: 0.5 });
     assert.equal(second.budgetExceededReason, "max_total_tokens_exceeded");
-    assert.equal(second.run.status, "failed");
+    assert.equal(second.run.status, "needs_input");
     assert.equal(second.run.stopReason, "max_total_tokens_exceeded");
     assert.equal(second.run.totalCostUsd, 0.7);
     assert.deepEqual(store.listEvents(run.id).map((event) => event.type), ["state", "state", "usage", "usage", "state"]);
+    const resumed = store.resumeWithBudgets(run.id, { maxTotalTokens: 200, maxCostUsd: null });
+    assert.equal(resumed.status, "running");
+    assert.equal(resumed.maxTotalTokens, 200);
+    assert.equal(resumed.maxCostUsd, null);
+    assert.equal(resumed.stopReason, null);
   }));
 
-  it("fails when authoritative cumulative cost reaches its ceiling", async () => withFixture(({ dir, store }) => {
+  it("pauses before an action would exceed the lifetime tool budget", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Bound tool actions", cwd: dir, maxToolIterations: 1 });
+    store.transition(run.id, "running");
+    store.recordToolIntent(run.id, "allowed-call", "job_start", { command: "train" });
+    store.recordToolResult(run.id, "allowed-call", "job_start", { ok: true, content: "started" });
+    assert.throws(() => store.recordToolIntent(run.id, "blocked-call", "job_start", { command: "train-again" }), /max_tool_iterations_exceeded/);
+    assert.equal(store.getRun(run.id)?.status, "needs_input");
+    assert.equal(store.countToolIterations(run.id), 1);
+    store.recordCheckpoint(run.id);
+    const resumed = store.resumeWithBudgets(run.id, { maxToolIterations: null });
+    assert.equal(resumed.maxToolIterations, null);
+    store.recordToolIntent(run.id, "resumed-call", "job_status", { job_id: "job-1" });
+    assert.equal(store.countToolIterations(run.id), 2);
+  }));
+  it("pauses when authoritative cumulative cost reaches its ceiling", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Stop at cost cap", cwd: dir, maxTotalTokens: 1000, maxCostUsd: 0.05 });
     store.transition(run.id, "running");
     const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5, costUsd: 0.05 });
     assert.equal(result.budgetExceededReason, "max_cost_usd_exceeded");
-    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.status, "needs_input");
     assert.equal(result.run.totalCostUsd, 0.05);
   }));
 
-  it("fails closed when a configured cost ceiling has no authoritative cost", async () => withFixture(({ dir, store }) => {
+  it("pauses when a configured cost ceiling has no authoritative cost", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Require billed cost", cwd: dir, maxCostUsd: 1 });
     store.transition(run.id, "running");
     const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5 });
     assert.equal(result.budgetExceededReason, "cost_unavailable");
-    assert.equal(result.run.status, "failed");
+    assert.equal(result.run.status, "needs_input");
     assert.equal(result.run.costUnknownResponses, 1);
   }));
 
-  it("allows usage without cost only when the cost ceiling is explicitly disabled", async () => withFixture(({ dir, store }) => {
+  it("allows usage without cost when the cost ceiling is disabled", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Token-only budget", cwd: dir, maxTotalTokens: 100, maxCostUsd: null });
     store.transition(run.id, "running");
     const result = store.recordUsage(run.id, { promptTokens: 10, completionTokens: 5 });
@@ -159,17 +189,38 @@ describe("RunStore", () => {
     assert.deepEqual(restarted.reconcileInterruptedRuns(2345), []);
   }));
 
-  it("does not label a run with completed tool calls as replayable after restart", async () => withFixture(({ dir, store }) => {
+  it("requeues a run with completed tool calls from its saved checkpoint after restart", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Run checks", cwd: dir });
     store.transition(run.id, "running");
     store.recordToolIntent(run.id, "call-done", "bash", { command: "npm test" });
     store.recordToolResult(run.id, "call-done", "bash", { ok: true, content: "passed" });
+    store.recordCheckpoint(run.id);
 
     const [interrupted] = store.reconcileInterruptedRuns(3456);
-    assert.equal(interrupted?.status, "interrupted_unknown");
-    assert.equal(interrupted?.stopReason, "process_restart");
+    assert.equal(interrupted?.status, "queued");
+    assert.equal(interrupted?.stopReason, "process_restart_recovered");
   }));
 
+  it("does not replay a completed tool action that was not saved into the session checkpoint", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Do not duplicate action", cwd: dir });
+    store.transition(run.id, "running");
+    store.recordToolIntent(run.id, "call-uncheckpointed", "job_start", { command: "train" });
+    store.recordToolResult(run.id, "call-uncheckpointed", "job_start", { ok: true, content: "job started" });
+
+    const [recovered] = store.reconcileInterruptedRuns(4567);
+    assert.equal(recovered?.status, "interrupted_unknown");
+    assert.match(recovered?.stopReason ?? "", /tool_result_not_checkpointed:job_start:call-uncheckpointed/);
+  }));
+
+  it("restores a run with an active durable timer to waiting after restart", async () => withFixture(({ dir, store }) => {
+    const run = store.createRun({ task: "Keep waiting after restart", cwd: dir });
+    store.transition(run.id, "running");
+    store.scheduleTimer({ runId: run.id, condition: "time", wakeAt: 10_000 });
+
+    const [recovered] = store.reconcileInterruptedRuns(5678);
+    assert.equal(recovered?.status, "waiting");
+    assert.equal(recovered?.stopReason, "process_restart_wait_recovered");
+  }));
   it("leases due timers and retries failures with bounded backoff", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({ task: "Wait on a build", cwd: dir });
     const timer = store.scheduleTimer({ runId: run.id, condition: "job", jobId: "job-1", wakeAt: 100, maxAttempts: 2 });
