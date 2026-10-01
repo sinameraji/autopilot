@@ -28,7 +28,7 @@ program
   .option("--max-input-tokens <n>", "cumulative prompt token budget; exits 42 when exhausted (print mode only)", (v) => parseInt(v, 10))
   .option("--emit-events", "emit Camouflage NDJSON events to stdout; requires -p (for initial prompt)")
   .option("--multi-turn", "with --emit-events: keep reading stdin for UserInputSubmitted follow-ups after the initial turn")
-  .option("--ui <name>", "render UI with React Ink (the only supported engine). This flag and KIMIFLARE_UI are currently ignored.")
+  .option("--ui <name>", "interface: ink (default) or camouflage (experimental inline renderer). Also KIMIFLARE_UI.")
   .option("--mode <mode>", "run mode: interactive (default), print, rpc")
   .option("-c, --continue", "continue the most recent session in the current working directory (print mode only)")
   .option("-S, --session <id>", "resume a specific session by id (print mode only)")
@@ -383,15 +383,21 @@ async function main() {
   // alt-screen and flash for a fraction of a second.
   const logoText = renderLogo(getAppVersion(), opts.model ?? cfg?.model);
 
-  // UI engine resolution: React Ink is always used. Camouflage UI access is
-  // temporarily disabled, so `--ui`, `KIMIFLARE_UI`, and any persisted
-  // `uiEngine: "camouflage"` config value are ignored.
-  const uiEngine = "ink";
+  // UI engine: Ink by default. `--ui camouflage` (or KIMIFLARE_UI=camouflage)
+  // runs the experimental Camouflage inline renderer; it needs credentials,
+  // so first-run setup always goes through Ink.
+  const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? "ink").toLowerCase();
+  if (uiEngine === "camouflage" && cfg) {
+    const { runCamouflageMode } = await import("./camouflage-mode.js");
+    await runCamouflageMode({ cfg, model: opts.model ?? cfg.model ?? DEFAULT_MODEL, version: getAppVersion() });
+    return;
+  }
+  if (uiEngine === "camouflage") {
+    console.error("autopilot: --ui camouflage needs an OpenRouter key; starting the default UI to set one up.");
+  } else if (uiEngine !== "ink") {
+    console.error(`autopilot: unknown --ui "${uiEngine}"; using ink.`);
+  }
   console.log(logoText);
-  // Camouflage UI branch is temporarily disabled.
-  // if (uiEngine === "camouflage") {
-  //   ...
-  // }
   // React Ink UI.
   const { renderApp } = await import("./app.js");
   if (cfg) {

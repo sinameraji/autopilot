@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/sinameraji/autopilot/main/docs/logo.png" alt="Autopilot logo" width="160">
+</p>
+
 <h1 align="center">autopilot <sub>(formerly kimiflare)</sub></h1>
 
 <p align="center">

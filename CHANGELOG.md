@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/sinameraji/autopilot/compare/v1.3.0...v1.4.0) (2026-09-29)
+
+
+### Features
+
+* **ui:** coordinate queued follow-ups ([#669](https://github.com/sinameraji/autopilot/issues/669)) ([275ab3a](https://github.com/sinameraji/autopilot/commit/275ab3aae13b9b963ffe124b65f25ba5644d7ce8))
+
 ## [1.3.0](https://github.com/sinameraji/autopilot/compare/v1.2.2...v1.3.0) (2026-09-29)
 
 

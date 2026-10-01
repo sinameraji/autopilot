@@ -414,7 +414,7 @@ export class KimiflareAcpAgent implements Agent {
 
     const coauthor = session.config.coauthor
       ? {
-          name: session.config.coauthorName ?? "kimiflare",
+          name: session.config.coauthorName ?? "autopilot",
           email: session.config.coauthorEmail ?? "kimiflare@proton.me",
         }
       : undefined;

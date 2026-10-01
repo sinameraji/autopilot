@@ -18,7 +18,7 @@ a { color: inherit; text-decoration: none; }
 .topbar, footer { width: min(1120px, calc(100% - 64px)); margin: auto; display: flex; align-items: center; justify-content: space-between; }
 .topbar { height: 82px; border-bottom: 1px solid var(--line); }
 .wordmark { display: inline-flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 700; letter-spacing: -.04em; }
-.mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid #666; border-radius: 50%; font-family: var(--mono); font-size: 13px; font-weight: 500; }
+.mark { display: block; width: 28px; height: 28px; object-fit: contain; }
 nav { display: flex; align-items: center; gap: 30px; color: var(--muted); font-size: 12px; }
 nav a:hover, footer a:hover { color: var(--text); }
 nav .nav-install { padding: 10px 13px; border: 1px solid #454545; border-radius: 4px; color: var(--text); }
@@ -53,7 +53,7 @@ h2 { margin: 0; font-size: clamp(30px, 5vw, 48px); line-height: 1.12; letter-spa
 .command { width: min(500px, 100%); margin: auto; padding: 16px 17px; display: flex; align-items: center; gap: 12px; border: 1px solid #333; border-radius: 4px; background: #101010; text-align: left; font: 11px var(--mono); }
 .command > span { color: #777; }.command button { margin-left: auto; padding: 6px 8px; border: 1px solid #363636; border-radius: 3px; background: transparent; color: #aaa; font: 8px var(--mono); cursor: pointer; }
 .get-started > p:last-child { max-width: none; margin: 14px auto 0; font-size: 10px; }.get-started code { color: #ddd; font-family: var(--mono); }
-footer { min-height: 76px; border-top: 1px solid var(--line); color: #777; font-size: 10px; }footer .wordmark { color: var(--text); font-size: 13px; }footer .mark { width: 24px; height: 24px; font-size: 11px; }
+footer { min-height: 76px; border-top: 1px solid var(--line); color: #777; font-size: 10px; }footer .wordmark { color: var(--text); font-size: 13px; }footer .mark { width: 24px; height: 24px; }
 @keyframes blink { to { visibility: hidden; } }
 @media (max-width: 620px) {
   .topbar, footer { width: calc(100% - 36px); }.topbar { height: 68px; }nav { gap: 16px; font-size: 10px; }nav a:first-child { display: none; }
