@@ -27,6 +27,33 @@ export function registerInkInstance(instance: Instance | null): void {
 }
 
 /** True while a `!` command owns the terminal (the app ignores SIGINT then). */
+/**
+ * A renderer that owns the terminal (Camouflage) and can lend it out.
+ * `suspend` resolves false when it can't (Windows, older renderers); the
+ * command then runs with its output captured instead of drawn.
+ */
+export interface TerminalHandoff {
+  suspend(): Promise<boolean>;
+  resume(): void;
+}
+let terminalHandoff: TerminalHandoff | null = null;
+
+export function registerTerminalHandoff(h: TerminalHandoff | null): void {
+  terminalHandoff = h;
+}
+
+/** Run without a terminal: output piped and captured, no prompts. */
+function runCaptured(inv: Invocation, cwd: string): Promise<{ code: number | null; signal: NodeJS.Signals | null; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(inv.file, inv.args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: inv.env ?? process.env });
+    let output = "";
+    child.stdout?.on("data", (c: Buffer) => (output += c.toString("utf8")));
+    child.stderr?.on("data", (c: Buffer) => (output += c.toString("utf8")));
+    child.once("error", (e) => resolve({ code: 127, signal: null, output: `failed to start: ${e.message}` }));
+    child.once("exit", (code, signal) => resolve({ code, signal, output }));
+  });
+}
+
 export function isTerminalHandedOff(): boolean {
   return handedOff;
 }
@@ -169,6 +196,13 @@ export async function runBangCommand(command: string, cwd: string): Promise<Bang
     ? { file: shell, args: ["/c", command] }
     : { file: shell, args: ["-c", command] };
 
+  // Under Camouflage the renderer holds the terminal (raw mode, reading
+  // keys); borrow it, or capture the output when it can't be lent.
+  if (terminalHandoff && !(await terminalHandoff.suspend())) {
+    const r = await runCaptured(direct, cwd);
+    return { command, exitCode: r.code, signal: r.signal, output: cleanTerminalOutput(r.output) };
+  }
+
   const stdin = process.stdin;
   const stdout = process.stdout;
   const stderr = process.stderr;
@@ -218,6 +252,7 @@ export async function runBangCommand(command: string, cwd: string): Promise<Bang
     if (stdin.isTTY) stdin.setRawMode(wasRaw);
     for (const l of readable) stdin.addListener("readable", l);
     origOut.call(stdout, "\n");
+    terminalHandoff?.resume();
   }
 
   let output: string | null = spawnError ? `failed to start: ${spawnError}` : null;
