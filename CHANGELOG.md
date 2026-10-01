@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.8.0](https://github.com/sinameraji/autopilot/compare/v1.7.1...v1.8.0) (2026-10-01)
+
+
+### Features
+
+* **agent:** delegate useful parallel work by default ([b7e0ddd](https://github.com/sinameraji/autopilot/commit/b7e0dddc88540a446af8d99c6541ef20ec08eaa5))
+* **agent:** delegate useful parallel work by default ([18f75ba](https://github.com/sinameraji/autopilot/commit/18f75babba4b1389e207348b8bebee813bf31f9b))
+* **ui:** Camouflage is the default UI for everyone ([897dd8f](https://github.com/sinameraji/autopilot/commit/897dd8f46a1d6025735d03167e89dc90d6529548))
+* **ui:** Camouflage is the default UI for everyone ([736b49f](https://github.com/sinameraji/autopilot/commit/736b49f302f0b2abd2c8271479051e1dfcc97846))
+
 ## [1.7.1](https://github.com/sinameraji/autopilot/compare/v1.7.0...v1.7.1) (2026-10-01)
 
 
