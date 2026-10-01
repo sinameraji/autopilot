@@ -940,29 +940,6 @@ const handleTheme: Handler = (ctx, _rest, arg) => {
   return true;
 };
 
-const handleUi: Handler = (ctx, _rest, arg) => {
-  const { setEvents, mkKey } = ctx;
-  const say = (text: string, kind: "info" | "error" = "info") =>
-    setEvents((e) => [...e, { kind, key: mkKey(), text }]);
-  if (!arg) {
-    const current = ctx.cfg?.uiEngine ?? "ink";
-    say(`UI: ${current}. Use /ui ink or /ui camouflage (takes effect next launch; --ui overrides for one run).`);
-    return true;
-  }
-  if (arg !== "ink" && arg !== "camouflage") {
-    say(`unknown UI "${arg}" — use ink or camouflage`, "error");
-    return true;
-  }
-  ctx.setCfg((prev) => {
-    if (!prev) return prev;
-    const updated = { ...prev, uiEngine: arg } as Cfg;
-    void saveConfig(updated).catch(() => {});
-    return updated;
-  });
-  say(`UI set to ${arg}. It takes effect the next time you start autopilot.`);
-  return true;
-};
-
 const handlePlan: Handler = (ctx) => {
   if (!modesGate(ctx)) return true;
   ctx.setMode("plan");
@@ -1937,7 +1914,6 @@ const handlers: Record<string, Handler> = {
   "/mode": handleMode,
   "/multi-agent": handleMultiAgent,
   "/theme": handleTheme,
-  "/ui": handleUi,
   "/plan": handlePlan,
   "/auto": handleAuto,
   "/edit": handleEdit,
