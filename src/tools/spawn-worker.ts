@@ -36,7 +36,7 @@ export async function callWorkerEndpoint(
     ...(apiKey ? { "X-Worker-Api-Key": apiKey } : {}),
   };
   const body = JSON.stringify(payload);
-  const fetchSignal = signal ?? controller.signal;
+  const fetchSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
   try {
     // Primary attempt
@@ -205,7 +205,7 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
       return textOutput("Worker endpoint not configured. Set KIMIFLARE_WORKER_ENDPOINT or workerEndpoint in config, or set workerBackend to hotcell.");
     }
 
-    const apiKey = process.env.KIMIFLARE_WORKER_API_KEY;
+    const apiKey = process.env.KIMIFLARE_WORKER_API_KEY ?? cfg?.workerApiKey;
     const defaultModel = cfg?.model ?? DEFAULT_MODEL;
     const workerModel = args.model ?? ctx.model ?? defaultModel;
     // Requesty managed policy ids ("kimi-k2.6") have no vendor prefix, and the

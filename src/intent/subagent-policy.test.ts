@@ -17,7 +17,7 @@ function mockAsk(answer: JevAnswer, capture?: (question: JevQuestion) => void) {
 }
 
 describe("resolveSubagentGuidance", () => {
-  it("exposes worker dispatch only for explicit, suggested, or high-confidence auto candidates", () => {
+  it("exposes worker dispatch only for explicit, suggested, or auto-assessed tasks", () => {
     assert.equal(allowsSubagentDispatch("none"), false);
     assert.equal(allowsSubagentDispatch("explicit-sequential"), false);
     assert.equal(allowsSubagentDispatch("explicit-delegate"), true);
@@ -98,26 +98,21 @@ describe("resolveSubagentGuidance", () => {
     assert.match(result.directive ?? "", /normal permission prompt is the required user confirmation/);
   });
 
-  it("automatically recommends only above the stronger threshold and preserves permission gates", async () => {
-    const medium = await resolveSubagentGuidance({
-      prompt: "Compare authentication options across this repository.",
+  it("lets the coordinator assess substantial task structure without magic words or Jev", async () => {
+    let calls = 0;
+    const result = await resolveSubagentGuidance({
+      prompt: "Review the startup flow, configuration, and test coverage, then propose a coherent improvement plan.",
       tier: "heavy",
       policy: "auto",
-      apiKey,
-      ask: mockAsk(choose(0.79)),
+      customEndpoint: true,
+      ask: async () => { calls++; return choose(0); },
     });
-    assert.equal(medium.kind, "suggest");
-
-    const high = await resolveSubagentGuidance({
-      prompt: "Compare authentication options across this repository.",
-      tier: "heavy",
-      policy: "auto",
-      apiKey,
-      ask: mockAsk(choose(0.8)),
-    });
-    assert.equal(high.kind, "auto-delegate");
-    assert.match(high.directive ?? "", /normal permission prompt/);
-    assert.match(high.directive ?? "", /spend cap/);
+    assert.equal(result.kind, "auto-delegate");
+    assert.equal(result.reason, "substantial task; coordinator assesses independence");
+    assert.match(result.directive ?? "", /assess its structure, dependencies, and coordination cost/);
+    assert.match(result.directive ?? "", /normal permission approval/);
+    assert.match(result.directive ?? "", /spend cap/);
+    assert.equal(calls, 0);
   });
 
   it("short-circuits clear independent research without spending a Jev call", async () => {
@@ -163,7 +158,7 @@ describe("resolveSubagentGuidance", () => {
     const unavailable = await resolveSubagentGuidance({
       prompt: "Audit this repository for security issues.",
       tier: "heavy",
-      policy: "auto",
+      policy: "suggest",
       apiKey,
       ask: async () => { throw new Error("offline"); },
     });
@@ -173,7 +168,7 @@ describe("resolveSubagentGuidance", () => {
     const noKey = await resolveSubagentGuidance({
       prompt: "Audit this repository for security issues.",
       tier: "heavy",
-      policy: "auto",
+      policy: "suggest",
     });
     assert.equal(noKey.kind, "none");
   });
@@ -185,7 +180,7 @@ describe("resolveSubagentGuidance", () => {
     const result = await resolveSubagentGuidance({
       prompt: "Audit this repository for security issues.",
       tier: "heavy",
-      policy: "auto",
+      policy: "suggest",
       apiKey,
       signal: controller.signal,
       ask: async () => { calls++; return choose(0.99); },
@@ -199,7 +194,7 @@ describe("resolveSubagentGuidance", () => {
     const result = await resolveSubagentGuidance({
       prompt: "Audit this repository for security issues.",
       tier: "heavy",
-      policy: "auto",
+      policy: "suggest",
       apiKey,
       customEndpoint: true,
       ask: async () => { calls++; return choose(0.99); },

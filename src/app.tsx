@@ -2012,7 +2012,7 @@ function App({
       const delegationGuidance = await resolveSubagentGuidance({
         prompt: display,
         tier: classification.tier,
-        policy: cfg.subagentPolicy ?? "suggest",
+        policy: cfg.subagentPolicy ?? "auto",
         apiKey: cfg.openrouterApiKey,
         customEndpoint: Boolean(cfg.baseUrl),
         signal: turnScope.signal,
@@ -2026,7 +2026,7 @@ function App({
           : delegationGuidance.kind === "explicit-sequential"
             ? "Subagent policy: respecting your instruction to work without delegation."
             : delegationGuidance.kind === "auto-delegate"
-              ? `Subagent policy: auto recommends independent research${probability}; worker calls remain permission-gated.`
+              ? "Subagent policy: auto will assess this substantial task for independent work; worker calls remain permission-gated."
               : `Subagent suggestion: independent work may help${probability}. No worker will launch without your confirmation.`;
         setEvents((events) => [...events, { kind: "info", key: mkKey(), text }]);
       }

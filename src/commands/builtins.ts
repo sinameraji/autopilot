@@ -8,7 +8,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "help", description: "Show keybindings and command list", source: "builtin" },
   { name: "model", argHint: "[list|<id>]", description: "Pick model (no args opens picker)", source: "builtin" },
   { name: "jev", argHint: "[yes|choose|score]", description: "Ask Jev for a one-shot decision with scoped chat/project context", source: "builtin" },
-  { name: "subagents", argHint: "[off|suggest|auto]", description: "Choose when the harness recommends or dispatches subagents", source: "builtin" },
+  { name: "subagents", argHint: "[off|suggest|auto]", description: "Control proactive delegation for substantial independent work", source: "builtin" },
   { name: "mode", argHint: "[edit|plan|auto]", description: "Switch agent mode", source: "builtin" },
   { name: "multi-agent", argHint: "[enable|disable|status|setup]", description: "Configure multi-agent (endpoint, auto-implement, set up)", source: "builtin" },
   { name: "theme", argHint: "[<name>]", description: "Switch color theme", source: "builtin" },

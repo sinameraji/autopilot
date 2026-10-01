@@ -33,7 +33,6 @@ const AMBIGUOUS_CANDIDATE = /\b(?:research|investigat\w*|audit|compare|contrast|
 export const SUBAGENT_JEV_TIMEOUT_MS = Math.min(JEV_TIMEOUT_MS, 4_000);
 export const SUBAGENT_JEV_OPTIONS = ["delegate", "sequential"] as const;
 const SUGGEST_THRESHOLD = 0.65;
-const AUTO_THRESHOLD = 0.8;
 const MAX_JEV_PROMPT_CHARS = 1_200;
 
 function directiveFor(kind: SubagentGuidanceKind): string | undefined {
@@ -41,13 +40,13 @@ function directiveFor(kind: SubagentGuidanceKind): string | undefined {
     return "The user explicitly asked not to delegate. Do not call spawn_worker; handle the task in the main session and respect any stated dependencies.";
   }
   if (kind === "explicit-delegate") {
-    return "The user explicitly requested subagents. Identify bounded, independent read-only research missions and use spawn_worker where useful; keep dependent implementation in the coordinator. The tool's normal permission prompt and all configured safety limits still apply.";
+    return "The user explicitly requested subagents. Before acting, split the request into bounded missions that can make progress independently; use spawn_worker in plan mode for useful parallel read-only research, wait for the workers, and synthesize their findings before dependent implementation. Do not delegate tightly coupled or sequential steps. The tool's normal permission prompt and all configured safety limits still apply.";
   }
   if (kind === "suggest") {
     return "The harness sees a possible parallel-work opportunity, but the user did not request delegation. Use spawn_worker only if you can define bounded, independent missions that materially help. The tool's normal permission prompt is the required user confirmation; never assume approval. Keep dependent implementation in the coordinator.";
   }
   if (kind === "auto-delegate") {
-    return "The opt-in automatic subagent policy found a strong parallel-work opportunity. Delegate only bounded, independent research missions with spawn_worker, then synthesize the findings and do dependent work in the coordinator. The tool's normal permission prompt, provider restrictions, spend cap, concurrency, timeout, and read-only profile still apply; never bypass them.";
+    return "Proactive subagent delegation is enabled for this substantial task. First assess its structure, dependencies, and coordination cost. If two or more bounded research tracks can make meaningful progress independently, delegate them with spawn_worker in plan mode in parallel, wait for their results, and synthesize the findings before doing dependent work in the coordinator. Keep trivial, tightly coupled, and sequential work local. Worker calls still require the normal permission approval and remain subject to the configured provider/backend, spend cap, concurrency, timeout, and read-only restrictions; never bypass them. If a worker cannot run or fails, explain that plainly and continue locally without implying delegation succeeded.";
   }
   return undefined;
 }
@@ -73,6 +72,12 @@ export async function resolveSubagentGuidance(options: ResolveSubagentGuidanceOp
     return result(options.policy === "auto" ? "auto-delegate" : "suggest", "independent work is explicit");
   }
   if (options.tier === "light") return result("none", "routine or sequential task");
+  // In auto mode the coordinator, which sees the full task and can reason about
+  // dependencies, makes the parallelizability decision. Do not require users to
+  // name subagents or match a narrow list of research keywords to enable it.
+  if (options.policy === "auto") {
+    return result("auto-delegate", "substantial task; coordinator assesses independence");
+  }
   if (!AMBIGUOUS_CANDIDATE.test(prompt)) return result("none", "no parallel-work signal");
   if (!options.apiKey || options.customEndpoint) return result("none", "Jev is unavailable for this provider configuration");
   if (options.signal?.aborted) return result("none", "turn cancelled before Jev advice");
@@ -95,9 +100,6 @@ export async function resolveSubagentGuidance(options: ResolveSubagentGuidanceOp
     const probability = answer.type === "choice" ? answer.probabilities?.delegate : undefined;
     if (probability === undefined || !Number.isFinite(probability) || probability < 0 || probability > 1) {
       return result("none", "Jev returned no usable delegation probability");
-    }
-    if (options.policy === "auto" && probability >= AUTO_THRESHOLD) {
-      return result("auto-delegate", "Jev recommends independent work", probability);
     }
     if (probability >= SUGGEST_THRESHOLD) return result("suggest", "Jev sees a possible parallel-work benefit", probability);
     return result("none", "Jev recommends sequential work", probability);
