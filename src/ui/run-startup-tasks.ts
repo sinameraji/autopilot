@@ -100,9 +100,9 @@ export function runStartupTasks(deps: RunStartupTasksDeps): void {
     const cwd = process.cwd();
     sessionStartRecallRef.current = manager.recall({ text: cwd, repoPath: cwd, limit: 5 });
 
-    // Session-start drift check (Trigger A): if KIMI.md exists and high-signal
+    // Session-start drift check (Trigger A): if a project context file exists and high-signal
     // memories have been learned since the last refresh, mark as stale.
-    if (existsSync(join(cwd, "KIMI.md"))) {
+    if (["AGENTS.md", "KIMI.md", "KIMIFLARE.md", "AGENT.md"].some((name) => existsSync(join(cwd, name)))) {
       const lastRefresh = manager.getLastKimiMdRefreshTime(cwd);
       const driftCount = manager.countHighSignalMemoriesSince(cwd, lastRefresh);
       if (driftCount >= 5) {

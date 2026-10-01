@@ -142,7 +142,7 @@ export const CATEGORIES: Category[] = [
     key: "config",
     label: "Config",
     commands: [
-      { command: "/init", description: "scan this repo and write a KIMI.md" },
+      { command: "/init", description: "scan this repo and write an AGENTS.md" },
       { command: "/settings", description: "show feature settings" },
       { command: "/key", description: "show your OpenRouter key status and credit" },
       { command: "/key set <key>", description: "replace your OpenRouter key", selectable: false },

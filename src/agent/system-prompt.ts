@@ -28,7 +28,7 @@ export interface SystemPromptOpts {
   delegationDirective?: string;
 }
 
-const CONTEXT_FILENAMES = ["KIMI.md", "KIMIFLARE.md", "AGENT.md"];
+const CONTEXT_FILENAMES = ["AGENTS.md", "KIMI.md", "KIMIFLARE.md", "AGENT.md"];
 const MAX_CONTEXT_BYTES = 20 * 1024;
 
 export interface ContextFile {
@@ -92,7 +92,7 @@ Tool output reduction:
 }
 
 /** Build the session-stable prefix that changes only when session-level
- *  context changes (mode, tools, KIMI.md, environment). */
+ *  context changes (mode, tools, project context, environment). */
 export function buildSessionPrefix(opts: SystemPromptOpts): string {
   const now = opts.now ?? new Date();
   const date = now.toISOString().slice(0, 10);

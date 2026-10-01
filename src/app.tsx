@@ -1605,7 +1605,7 @@ function App({
       turnCounterRef.current += 1;
       if (
         turnCounterRef.current % 15 === 0 &&
-        existsSync(join(process.cwd(), "KIMI.md")) &&
+        ["AGENTS.md", "KIMI.md", "KIMIFLARE.md", "AGENT.md"].some((name) => existsSync(join(process.cwd(), name))) &&
         !kimiMdStale
       ) {
         setEvents((e) => [
@@ -1936,7 +1936,7 @@ function App({
             setKimiMdStale(true);
             setEvents((e) => [
               ...e,
-              { kind: "info", key: mkKey(), text: "Project context may be stale. Run /init to refresh KIMI.md based on recent changes." },
+              { kind: "info", key: mkKey(), text: "Project context may be stale. Run /init to refresh AGENTS.md based on recent changes." },
             ]);
           }
         },

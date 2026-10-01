@@ -466,11 +466,11 @@ export interface InitPromptResult {
 }
 
 export function buildInitPrompt(cwd: string): InitPromptResult {
-  const existingName = ["KIMI.md", "KIMIFLARE.md", "AGENT.md"].find((n) =>
+  const existingName = ["AGENTS.md", "KIMI.md", "KIMIFLARE.md", "AGENT.md"].find((n) =>
     existsSync(join(cwd, n))
   );
   const isRefresh = existingName !== undefined;
-  const targetFilename = existingName ?? "KIMI.md";
+  const targetFilename = existingName ?? "AGENTS.md";
 
   const profile = analyzeProject(cwd);
   const checklist = discoveryChecklist(profile);

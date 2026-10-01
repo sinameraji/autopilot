@@ -575,7 +575,7 @@ class InternalSession implements KimiFlareSession {
     });
 
     // Update system prompt if KIMI.md was generated
-    if (existsSync(join(this.cwd, "KIMI.md"))) {
+    if (["AGENTS.md", "KIMI.md", "KIMIFLARE.md", "AGENT.md"].some((name) => existsSync(join(this.cwd, name)))) {
       this.messages[0] = {
         role: "system",
         content: buildSystemPrompt({

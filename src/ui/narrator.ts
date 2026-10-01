@@ -278,11 +278,11 @@ export function humanizeInfo(text: string, tier?: IntentTier): string {
     });
   }
 
-  // KIMI.md
-  if (text === "KIMI.md generated; context loaded for future turns") {
+  // Project context file
+  if (/^(AGENTS|KIMI|KIMIFLARE|AGENT)\.md generated; context loaded for future turns$/.test(text)) {
     return pick(tier, {
       light: "Project context refreshed",
-      medium: "KIMI.md generated — context loaded",
+      medium: "Project context generated — loaded",
       heavy: "Project context snapshot updated",
     });
   }
