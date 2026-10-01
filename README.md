@@ -32,6 +32,7 @@ autopilot sends every model call to **[OpenRouter](https://openrouter.ai)** usin
 - **Up to 1M+ context** (model-dependent) — Read entire modules, large configs, and full stack traces without the model losing track.
 - **Image understanding** — Drop image paths (PNG, JPG, WebP, GIF, BMP up to 5 MB) into any prompt. Great for UI reviews, diagrams, and screenshots.
 - **Plan / Edit / Auto modes** — `plan` is a whitelist-only research mode: only read-only tools (read, glob, grep, web search, GitHub read-only, browser fetch) are allowed. Writes, edits, mutating bash, MCP tools, and LSP renames are all blocked. `edit` (default) prompts per mutating call. `auto` approves everything for trusted tasks.
+- **Subagents** — By default, the coordinator assesses substantial tasks for independent research and may delegate without special phrasing. Worker calls still go through permission checks and need a configured backend. See the [subagents guide](docs/subagents.md) for examples, controls, limits, and setup.
 - **Windows support** — OS-aware shell auto-detects `cmd.exe` / PowerShell on Windows, `bash` on Unix. The `bash` tool works out of the box on all platforms.
 - **Message queuing** — Submit multiple messages while the agent is busy; they queue and auto-drain. Escape interrupts the current turn but preserves the queue.
 - **Smart permission modal** — Denying a tool opens inline feedback so you can tell the agent what to do instead. Keyboard-native navigation (`↑/↓`, `j/k`, `Alt+1/2/3`).

@@ -22,7 +22,7 @@ export function Welcome() {
 
       <Box flexDirection="column">
         <Text color={theme.info.color} dimColor>
-          Type / for commands
+          Type / for commands · try /subagents help
         </Text>
       </Box>
 
