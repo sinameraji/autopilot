@@ -51,6 +51,8 @@ export interface AppSnapshot {
   events: ChatEvent[];
   busy: boolean;
   mode: Mode;
+  /** Plan/edit/auto modes are on (off by default: every turn is auto). */
+  modesEnabled: boolean;
   model: string;
   usage: Usage | null;
   sessionUsage: DailyUsage | null;

@@ -299,7 +299,8 @@ class View implements AppBridge {
 
   private syncStatus(s: AppSnapshot): void {
     const next: Record<string, string> = {
-      mode: s.mode === "auto" ? "auto" : s.mode === "plan" ? "plan" : "edit",
+      // With modes off (the default) every turn is auto; show no mode badge.
+      mode: !s.modesEnabled ? "" : s.mode === "auto" ? "auto" : s.mode === "plan" ? "plan" : "edit",
       phase: s.busy ? "thinking" : "idle",
       model: shortModel(s.model),
       tokens: s.usage ? `${formatK(s.usage.prompt_tokens)} tokens` : "",
