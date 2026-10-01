@@ -13,7 +13,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "multi-agent", argHint: "[enable|disable|status|setup]", description: "Configure multi-agent (endpoint, auto-implement, set up)", source: "builtin" },
   { name: "theme", argHint: "[<name>]", description: "Switch color theme", source: "builtin" },
   // Ink is the only UI engine; handler remains for manual use.
-  // { name: "ui", argHint: "ink", description: "Switch UI engine to React Ink (takes effect on next launch). Camouflage is temporarily unavailable.", source: "builtin" },
+  { name: "ui", argHint: "ink|camouflage", description: "Switch between the Ink and Camouflage UIs (takes effect on next launch)", source: "builtin" },
   { name: "memory", argHint: "[on|off|clear|search ...]", description: "Manage memory", source: "builtin" },
   { name: "cost", argHint: "[verify|on|off]", description: "Show cost report or toggle attribution", source: "builtin" },
   { name: "settings", argHint: "[modes on|off]", description: "Show or change feature settings (e.g. plan/edit/auto modes)", source: "builtin" },

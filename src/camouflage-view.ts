@@ -21,7 +21,8 @@ import type { ChatEvent } from "./ui/chat.js";
 import type { ToolEventState } from "./ui/tool-view.js";
 import type { Cfg } from "./app.js";
 import { BUILTIN_COMMANDS } from "./commands/builtins.js";
-import { listModels } from "./models/registry.js";
+import { featuredModels, listModels, type ModelEntry } from "./models/registry.js";
+import { formatContext, formatModelPrice } from "./ui/model-picker.js";
 import { MODES, type Mode } from "./mode.js";
 import { logger } from "./util/logger.js";
 
@@ -73,9 +74,6 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     ],
     accent: "orange",
     assistant_label: "autopilot",
-  });
-  cam.send("SlashCommandsRegistered", {
-    commands: BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint })),
   });
   const files = listFiles(cwd);
   if (files.length > 0) {
@@ -140,6 +138,7 @@ class View implements AppBridge {
   private todos = "";
   private permission: unknown = null;
   private openPrompt: string | null = null;
+  private commandsKey = "";
 
   constructor(
     private cam: CamouflageHandle,
@@ -151,6 +150,7 @@ class View implements AppBridge {
   }
 
   sync(s: AppSnapshot): void {
+    this.syncCommands(s.customCommands);
     this.syncEvents(s.events);
     this.syncStatus(s);
     const todos = JSON.stringify(s.tasks.map((t) => ({ id: t.id, title: t.title, status: t.status })));
@@ -160,6 +160,17 @@ class View implements AppBridge {
     }
     this.syncPermission(s);
     this.syncPrompts(s);
+  }
+
+  /** Built-in plus the user's custom commands, re-sent when they change. */
+  private syncCommands(custom: { name: string; description?: string }[]): void {
+    const key = custom.map((c) => `${c.name}:${c.description ?? ""}`).join("|");
+    if (key === this.commandsKey && this.commandsKey !== "") return;
+    this.commandsKey = key || "(none)";
+    const builtin = BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint }));
+    const names = new Set(builtin.map((c) => c.name));
+    const mine = custom.filter((c) => !names.has(c.name)).map((c) => ({ name: c.name, description: c.description ? `${c.description} (custom)` : "Custom command" }));
+    this.cam.send("SlashCommandsRegistered", { commands: [...builtin, ...mine] });
   }
 
   private syncEvents(events: ChatEvent[]): void {
@@ -324,7 +335,15 @@ class View implements AppBridge {
           a.pickResume(null);
           return void this.cam.send("RuntimeError", { message: "No earlier conversations in this directory.", severity: "info" });
         }
-        const r = await this.select("Resume a conversation", sessions.map((x) => ({ value: x.id, label: x.title ?? x.firstPrompt, description: `${relTime(x.updatedAt)} · ${x.messageCount} messages` })));
+        const r = await this.select(
+          "Resume a conversation",
+          sessions.map((x) => ({
+            value: x.id,
+            label: truncateText(x.title ?? x.firstPrompt, 60),
+            columns: [relTime(x.updatedAt), `${x.messageCount} msgs`],
+            keywords: `${x.firstPrompt} ${x.id}`,
+          })),
+        );
         a.pickResume(sessions.find((x) => x.id === r) ?? null);
       });
     }
@@ -347,8 +366,8 @@ class View implements AppBridge {
     switch (modal) {
       case "model":
         return want("model", async () => {
-          const models = listModels();
-          const r = await this.select("Select a model", models.map((m) => ({ value: m.id, label: m.id, description: m.name })), s.model);
+          const models = pickableModels();
+          const r = await this.select("Select a model", modelOptions(models, s.model), s.model, "Context · price per Mtok (input / output / cached) · type to search all models");
           a.pickModel(models.find((m) => m.id === r) ?? null);
         });
       case "mode":
@@ -382,18 +401,56 @@ class View implements AppBridge {
     }
   }
 
-  private async select(prompt: string, options: { value: string; label: string; description?: string }[], current?: string): Promise<string | null> {
+  private async select(prompt: string, options: PickOption[], current?: string, subtitle?: string): Promise<string | null> {
     const r = await this.sdk.selectList(this.cam, {
       id: `pick-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       prompt,
       options,
       ...(current ? { default: current } : {}),
+      ...(subtitle ? { subtitle } : {}),
     });
     return r.cancelled || r.value === undefined ? null : r.value;
   }
 }
 
 // ----- helpers ---------------------------------------------------------------
+
+type PickOption = { value: string; label: string; description?: string; section?: string; columns?: string[]; state?: "on" | "off"; keywords?: string };
+
+/** The Ink model picker's set: tool-capable models, no `:batch` variants. */
+function pickableModels(): ModelEntry[] {
+  return listModels().filter((m) => m.supports.tools && !m.id.endsWith(":batch"));
+}
+
+/**
+ * The Ink model picker's layout: the current model (if it isn't featured),
+ * then "Best & latest" (featuredModels), then every other model, which Ink
+ * reaches by searching. Context and price as columns.
+ */
+export function modelOptions(models: ModelEntry[], current: string): PickOption[] {
+  const featured = featuredModels(models);
+  const featuredIds = new Set(featured.map((m) => m.id));
+  const row = (m: ModelEntry, section: string): PickOption => ({
+    value: m.id,
+    label: m.id,
+    section,
+    columns: [formatContext(m.contextWindow), formatModelPrice(m.pricing)],
+    keywords: m.name ?? "",
+  });
+  const out: PickOption[] = [];
+  const cur = models.find((m) => m.id === current);
+  if (cur && !featuredIds.has(cur.id)) out.push(row(cur, "Current"));
+  for (const m of featured) out.push(row(m, "Best & latest — ranked by agentic + coding benchmarks"));
+  for (const m of models) {
+    if (!featuredIds.has(m.id) && m.id !== cur?.id) out.push(row(m, "All models"));
+  }
+  return out;
+}
+
+function truncateText(s: string, max: number): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > max ? `${one.slice(0, max - 1)}…` : one;
+}
 
 /**
  * Entries of the folder a path mention points into, as tokens prefixed with

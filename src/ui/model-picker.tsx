@@ -18,7 +18,7 @@ interface Props {
 const PAGE_SIZE = 30;
 const MIN_ID_WIDTH = 18;
 
-function formatContext(n: number): string {
+export function formatContext(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(n);

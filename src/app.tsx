@@ -2606,6 +2606,7 @@ function App({
       resumeSessions,
       checkpoints: checkpointSession ? { session: checkpointSession, list: checkpointList } : null,
       planOptions,
+      customCommands: customCommandsRef.current.map((c) => ({ name: c.name, description: c.description })),
     });
   });
 

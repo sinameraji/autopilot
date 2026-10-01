@@ -57,6 +57,8 @@ export interface AppSnapshot {
   resumeSessions: SessionSummary[] | null;
   checkpoints: { session: SessionSummary; list: Checkpoint[] } | null;
   planOptions: PlanOption[] | null;
+  /** The user's custom slash commands, for the `/` picker. */
+  customCommands: { name: string; description?: string }[];
 }
 
 export interface AppActions {

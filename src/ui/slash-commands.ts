@@ -942,39 +942,24 @@ const handleTheme: Handler = (ctx, _rest, arg) => {
 
 const handleUi: Handler = (ctx, _rest, arg) => {
   const { setEvents, mkKey } = ctx;
-  // Camouflage UI access is temporarily disabled; only Ink is available.
-  if (!arg || arg === "ink") {
-    ctx.setCfg((prev) => {
-      if (!prev) return prev;
-      const updated = { ...prev, uiEngine: "ink" } as Cfg;
-      void saveConfig(updated).catch(() => {});
-      return updated;
-    });
-    setEvents((e) => [
-      ...e,
-      {
-        kind: "info",
-        key: mkKey(),
-        text: "UI engine set to \"ink\". React Ink is the only available engine.",
-      },
-    ]);
+  const say = (text: string, kind: "info" | "error" = "info") =>
+    setEvents((e) => [...e, { kind, key: mkKey(), text }]);
+  if (!arg) {
+    const current = ctx.cfg?.uiEngine ?? "ink";
+    say(`UI: ${current}. Use /ui ink or /ui camouflage (takes effect next launch; --ui overrides for one run).`);
     return true;
   }
-  if (arg === "camouflage") {
-    setEvents((e) => [
-      ...e,
-      {
-        kind: "error",
-        key: mkKey(),
-        text: "Camouflage UI is temporarily unavailable.",
-      },
-    ]);
+  if (arg !== "ink" && arg !== "camouflage") {
+    say(`unknown UI "${arg}" — use ink or camouflage`, "error");
     return true;
   }
-  setEvents((e) => [
-    ...e,
-    { kind: "info", key: mkKey(), text: `unknown UI engine "${arg}" — only "ink" is available` },
-  ]);
+  ctx.setCfg((prev) => {
+    if (!prev) return prev;
+    const updated = { ...prev, uiEngine: arg } as Cfg;
+    void saveConfig(updated).catch(() => {});
+    return updated;
+  });
+  say(`UI set to ${arg}. It takes effect the next time you start autopilot.`);
   return true;
 };
 
@@ -1299,7 +1284,7 @@ const handleUpdate: Handler = (ctx, _rest, arg) => {
   if (arg === "camouflage") {
     setEvents((e) => [
       ...e,
-      { kind: "error", key: mkKey(), text: "Camouflage UI is temporarily unavailable; no update checks for camouflage-tui." },
+      { kind: "info", key: mkKey(), text: "The Camouflage renderer ships with autopilot; updating autopilot updates it." },
     ]);
     return true;
   }

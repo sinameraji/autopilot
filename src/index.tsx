@@ -411,10 +411,11 @@ async function main() {
   // alt-screen and flash for a fraction of a second.
   const logoText = renderLogo(getAppVersion(), opts.model ?? cfg?.model);
 
-  // UI engine: Ink by default. `--ui camouflage` (or KIMIFLARE_UI=camouflage)
+  // UI engine: Ink by default. `--ui camouflage`, KIMIFLARE_UI=camouflage or
+  // `/ui camouflage` (saved as uiEngine)
   // runs the experimental Camouflage inline renderer; it needs credentials,
   // so first-run setup always goes through Ink.
-  const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? "ink").toLowerCase();
+  const uiEngine = (opts.ui ?? process.env.KIMIFLARE_UI ?? cfg?.uiEngine ?? "ink").toLowerCase();
   if (uiEngine === "camouflage" && cfg) {
     const model = opts.model ?? cfg.model ?? DEFAULT_MODEL;
     const { runCamouflageView } = await import("./camouflage-view.js");
