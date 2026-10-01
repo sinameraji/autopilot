@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -13,6 +14,62 @@ interface Fixture {
 }
 
 describe("RunStore", () => {
+  it("migrates existing run databases with nullable worktree metadata", async () => withFixture(({ dir }) => {
+    const dbPath = join(dir, "legacy.db");
+    const legacy = new Database(dbPath);
+    legacy.exec(`CREATE TABLE runs (
+      id TEXT PRIMARY KEY,
+      session_id TEXT,
+      cwd TEXT NOT NULL,
+      task TEXT NOT NULL,
+      status TEXT NOT NULL,
+      stop_reason TEXT,
+      allowed_tools_json TEXT NOT NULL DEFAULT '[]',
+      max_tool_iterations INTEGER NOT NULL DEFAULT 100,
+      max_runtime_ms INTEGER NOT NULL DEFAULT 28800000,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER
+    )`);
+    legacy.prepare(`INSERT INTO runs (id, cwd, task, status, created_at, updated_at)
+      VALUES ('legacy-run', ?, 'Old run', 'completed', 1, 2)`).run(dir);
+    legacy.close();
+
+    const migrated = new RunStore(dbPath);
+    try {
+      const run = migrated.getRun("legacy-run");
+      assert.equal(run?.status, "completed");
+      assert.equal(run?.sourceCwd, null);
+      assert.equal(run?.repositoryRoot, null);
+      assert.equal(run?.worktreePath, null);
+      assert.equal(run?.branch, null);
+    } finally {
+      migrated.close();
+    }
+  }));
+
+  it("persists worktree metadata and the worktree cwd", async () => withFixture(({ dir, store, reopen }) => {
+    const worktree = {
+      runId: "run-123",
+      repositoryRoot: join(dir, "repo"),
+      sourceCwd: join(dir, "repo", "packages", "app"),
+      worktreePath: join(dir, "worktrees", "run-123"),
+      cwd: join(dir, "worktrees", "run-123", "packages", "app"),
+      branch: "autopilot/run/run-123",
+    };
+    const run = store.createRun({ id: worktree.runId, task: "Implement safely", cwd: dir, worktree });
+    assert.equal(run.id, worktree.runId);
+    assert.equal(run.cwd, worktree.cwd);
+    assert.equal(run.sourceCwd, worktree.sourceCwd);
+    assert.equal(run.repositoryRoot, worktree.repositoryRoot);
+    assert.equal(run.worktreePath, worktree.worktreePath);
+    assert.equal(run.branch, worktree.branch);
+
+    const restarted = reopen();
+    assert.deepEqual(restarted.getRun(run.id), run);
+  }));
+
   it("persists run state and tool boundary hashes without raw input/output", async () => withFixture(({ dir, store }) => {
     const run = store.createRun({
       task: "Build the feature",

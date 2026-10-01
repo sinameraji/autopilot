@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { access, chmod, mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 export interface RunWorktree {
   runId: string;
@@ -30,12 +30,15 @@ export class RunWorktreeManager {
     }
 
     const configuredRoot = resolve(this.rootDir);
+    if (configuredRoot === parse(configuredRoot).root || isWithin(repository, configuredRoot)) {
+      throw new Error("worktree root must be outside the source repository and not the filesystem root");
+    }
     await mkdir(configuredRoot, { recursive: true, mode: 0o700 });
-    await chmod(configuredRoot, 0o700);
     const worktreesRoot = await realpath(configuredRoot);
     if (isWithin(repository, worktreesRoot)) {
       throw new Error("worktree root must be outside the source repository");
     }
+    await chmod(worktreesRoot, 0o700);
 
     const worktreePath = join(worktreesRoot, runId);
     try {
@@ -56,6 +59,21 @@ export class RunWorktreeManager {
       cwd: resolve(worktreePath, sourceRelativePath),
       branch,
     };
+  }
+
+  /** Remove a newly-created, still-clean worktree when run initialization fails. */
+  async discard(worktree: RunWorktree): Promise<void> {
+    const root = await realpath(this.rootDir);
+    const target = await realpath(worktree.worktreePath);
+    const repository = await realpath(worktree.repositoryRoot);
+    if (target === root || !isWithin(root, target)) {
+      throw new Error("worktree path is outside the configured worktree root");
+    }
+    if (worktree.branch !== `autopilot/run/${worktree.runId}`) {
+      throw new Error("worktree branch does not match its run ID");
+    }
+    await runGit(["worktree", "remove", target], repository);
+    await runGit(["branch", "-D", "--quiet", worktree.branch], repository);
   }
 }
 

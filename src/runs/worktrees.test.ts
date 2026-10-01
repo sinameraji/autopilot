@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -35,6 +35,19 @@ describe("RunWorktreeManager", () => {
     assert.equal(git(["worktree", "list", "--porcelain"], repo).includes(worktree.worktreePath), true);
   });
 
+  it("discards a clean worktree and its branch", async () => {
+    const root = await mkdtemp(join(tmpdir(), "autopilot-worktrees-"));
+    tempDirs.push(root);
+    const repo = await createRepo(root);
+    const manager = new RunWorktreeManager(join(root, "state", "worktrees"));
+    const worktree = await manager.create("run-discard", repo);
+
+    await manager.discard(worktree);
+
+    await assert.rejects(access(worktree.worktreePath), { code: "ENOENT" });
+    assert.equal(git(["branch", "--list", worktree.branch], repo), "");
+  });
+
   it("rejects a source directory that is not in a Git repository", async () => {
     const root = await mkdtemp(join(tmpdir(), "autopilot-worktrees-"));
     tempDirs.push(root);
@@ -53,6 +66,7 @@ describe("RunWorktreeManager", () => {
     await assert.rejects(manager.create(".", repo), /runId must contain/);
     await assert.rejects(manager.create("..", repo), /runId must contain/);
     await assert.rejects(manager.create("run-123", repo), /worktree root must be outside/);
+    await assert.rejects(access(join(repo, ".autopilot")), { code: "ENOENT" });
   });
 });
 
