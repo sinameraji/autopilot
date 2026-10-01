@@ -13,7 +13,9 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import type { AppActions, AppBridge, AppModal, AppSnapshot } from "./ui/app-bridge.js";
 import type { ChatEvent } from "./ui/chat.js";
 import type { ToolEventState } from "./ui/tool-view.js";
@@ -86,6 +88,18 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     view.actions?.submit(text);
   });
   cam.on("cancelRequested", () => view.actions?.interrupt());
+  // `@../`, `@~/`, `@/`: list the folder being typed (same rules as the Ink
+  // picker). Read off the raw stream so any SDK version works.
+  cam.on("event", (ev: { event_type?: string; payload?: { query?: string } }) => {
+    if (ev.event_type !== "MentionQuery") return;
+    const query = ev.payload?.query ?? "";
+    void listMentionDir(cwd, query).then(({ dir, entries }) => {
+      cam.send("MentionCandidatesRegistered", {
+        for_query: dir,
+        candidates: entries.map((e) => ({ token: e, kind: e.endsWith("/") ? "dir" : "file" })),
+      });
+    });
+  });
   cam.on("modeChangeRequested", () => view.actions?.cycleMode());
 
   let closing = false;
@@ -380,6 +394,30 @@ class View implements AppBridge {
 }
 
 // ----- helpers ---------------------------------------------------------------
+
+/**
+ * Entries of the folder a path mention points into, as tokens prefixed with
+ * the folder exactly as typed ("../src/a.ts", folders end in "/"). Mirrors
+ * the Ink file picker: hidden files skipped, folders first, 300 at most.
+ */
+export async function listMentionDir(cwd: string, query: string): Promise<{ dir: string; entries: string[] }> {
+  const exact = query === "~" || query === "." || query === ".." || query.endsWith("/..");
+  const dir = exact ? `${query}/` : query.slice(0, query.lastIndexOf("/") + 1);
+  const expanded = dir.startsWith("~") ? join(homedir(), dir.slice(1)) : dir;
+  const target = resolve(cwd, expanded || ".");
+  try {
+    const items = await readdir(target, { withFileTypes: true });
+    const entries = items
+      .filter((d) => !d.name.startsWith("."))
+      .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
+      .sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name)))
+      .slice(0, 300)
+      .map((d) => `${dir}${d.name}${d.isDir ? "/" : ""}`);
+    return { dir, entries };
+  } catch {
+    return { dir, entries: [] };
+  }
+}
 
 function modalName(m: AppModal): string {
   const names: Record<AppModal, string> = {
