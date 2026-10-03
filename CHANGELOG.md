@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.12.0](https://github.com/sinameraji/autopilot/compare/v1.11.0...v1.12.0) (2026-10-03)
+
+
+### Features
+
+* **ui:** browse background jobs and agents ([944da72](https://github.com/sinameraji/autopilot/commit/944da726c8472da95f877fa58c22cce35dbfd187))
+* **ui:** browse background jobs and agents ([04da3dd](https://github.com/sinameraji/autopilot/commit/04da3dda9b857a2ef934cfcf879c57cf3a63b083))
+
+
+### Bug Fixes
+
+* **ui:** edit the latest submitted prompt ([e9d4f79](https://github.com/sinameraji/autopilot/commit/e9d4f79d587b8f2d3591862ab811ee5a8e626e5e))
+* **ui:** edit the latest submitted prompt ([8238d7d](https://github.com/sinameraji/autopilot/commit/8238d7d85eded65cac2e533e746e2bb6d6fcd29b))
+
 ## [1.11.0](https://github.com/sinameraji/autopilot/compare/v1.10.1...v1.11.0) (2026-10-01)
 
 
