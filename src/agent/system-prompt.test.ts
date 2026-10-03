@@ -30,6 +30,13 @@ describe("buildStaticPrefix", () => {
     assert.ok(!p.includes("`read`"), "should not include formatted tool names");
   });
 
+  it("prioritizes the newest request over old conversation history", () => {
+    const p = buildStaticPrefix();
+    assert.match(p, /Always respond to the newest user message/);
+    assert.match(p, /Use prior messages to interpret follow-ups and maintain context/);
+    assert.match(p, /do not answer an earlier message instead of addressing the latest one/);
+  });
+
   it("directs the agent to recover from blockers or give a concrete next action", () => {
     const p = buildStaticPrefix();
     assert.match(p, /Treat blockers as problems to work through/);
