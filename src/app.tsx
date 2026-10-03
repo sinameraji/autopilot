@@ -2820,6 +2820,7 @@ function App({
     bridge.sync({
       events,
       busy,
+      workers: activeWorkers,
       mode,
       model: cfg?.model ?? "",
       usage,

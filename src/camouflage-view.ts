@@ -41,6 +41,9 @@ import { setHookEnabled, appendHook, deriveHookId } from "./hooks/settings.js";
 import { EVENT_DESCRIPTIONS, EVENT_COMMAND_EXAMPLES, MATCHER_EXAMPLES } from "./ui/hooks-wizard.js";
 import { MODES, type Mode } from "./mode.js";
 import { logger } from "./util/logger.js";
+import { JobManager, type JobRecord } from "./jobs/manager.js";
+import { activityFromJob, activityFromWorker, diffActivityItems, isActiveJob, type ActivityItem } from "./ui/activity.js";
+import type { ActiveWorker } from "./agent/supervisor.js";
 
 interface CamouflageHandle {
   send(eventType: string, payload?: Record<string, unknown>): boolean;
@@ -118,6 +121,7 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     resume: () => sdk.resumeTerminal?.(cam),
   });
   cam.on("userInput", (text: string) => {
+    if (view.routeActivityCommand(text)) return;
     view.echoed.push(text.trim());
     view.actions?.submit(text);
   });
@@ -135,11 +139,16 @@ export async function runCamouflageView(opts: CamouflageViewOpts): Promise<void>
     });
   });
   cam.on("modeChangeRequested", () => view.actions?.cycleMode());
+  cam.on("activityStopRequested", ({ id }: { id: string }) => view.stopActivity(id));
+  cam.on("activityViewChanged", (change: { view: "list" | "detail" | "closed"; id?: string }) => {
+    view.activityViewChanged(change);
+  });
 
   let closing = false;
   const finish = async () => {
     if (closing) return;
     closing = true;
+    view.dispose();
     registerTerminalHandoff(null);
     await cam.close().catch(() => undefined);
     restoreConsole();
@@ -178,6 +187,22 @@ class View implements AppBridge {
   private permission: unknown = null;
   private openPrompt: string | null = null;
   private commandsKey = "";
+  private readonly jobs = new JobManager();
+  private readonly sentActivities = new Map<string, string>();
+  private readonly workerActivities = new Map<string, {
+    item: ActivityItem;
+    logs: string[];
+    active: boolean;
+    expiresAt: number;
+  }>();
+  private readonly jobLogOffsets = new Map<string, number>();
+  private readonly workerLogOffsets = new Map<string, number>();
+  private latestJobs: JobRecord[] = [];
+  private latestWorkers: ActiveWorker[] = [];
+  private activitySnapshotSent = false;
+  private activityDetailId: string | null = null;
+  private activityPoll: ReturnType<typeof setInterval> | null = null;
+  private disposed = false;
 
   constructor(
     private cam: CamouflageHandle,
@@ -199,14 +224,159 @@ class View implements AppBridge {
     }
     this.syncPermission(s);
     this.syncPrompts(s);
+    this.syncActivity(s.workers);
   }
 
   /** Built-in plus the user's custom commands, re-sent when they change. */
+  routeActivityCommand(text: string): boolean {
+    if (!/^\/(?:jobs|agents)$/i.test(text.trim())) return false;
+    this.cam.send("ActivityBrowserOpen", {});
+    return true;
+  }
+
+  activityViewChanged(change: { view: "list" | "detail" | "closed"; id?: string }): void {
+    this.activityDetailId = change.view === "detail" ? change.id ?? null : null;
+    this.jobLogOffsets.clear();
+    this.workerLogOffsets.clear();
+    if (this.activityDetailId) {
+      if (this.activityDetailId.startsWith("agent:")) this.streamWorkerLogs(this.activityDetailId, true);
+      else this.streamJobLogs(this.activityDetailId, true);
+    }
+    this.ensureActivityPolling();
+  }
+
+  stopActivity(id: string): void {
+    try {
+      const job = this.jobs.get(id);
+      if (!job || !isActiveJob(job)) return;
+      this.jobs.cancel(id);
+      this.refreshActivities();
+    } catch (error) {
+      logger.warn("camouflage.activity_stop_failed", { id, error: String(error) });
+      this.cam.send("RuntimeError", { message: `Unable to stop background job: ${(error as Error).message}`, severity: "error" });
+    }
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.activityPoll) clearInterval(this.activityPoll);
+    this.activityPoll = null;
+    this.jobs.close();
+  }
+
+  private syncActivity(workers: ActiveWorker[]): void {
+    this.latestWorkers = workers;
+    try {
+      const records = this.jobs.list({ limit: 100 });
+      this.latestJobs = [
+        ...records.filter(isActiveJob),
+        ...records.filter((job) => !isActiveJob(job)).slice(0, 5),
+      ];
+    } catch (error) {
+      logger.warn("camouflage.activity_jobs_read_failed", { error: String(error) });
+    }
+
+    const now = Date.now();
+    const currentWorkers = new Set<string>();
+    for (const worker of workers) {
+      const id = `agent:${worker.id}`;
+      currentWorkers.add(id);
+      this.workerActivities.set(id, {
+        item: activityFromWorker(worker),
+        logs: [...worker.logs],
+        active: true,
+        expiresAt: Number.POSITIVE_INFINITY,
+      });
+    }
+    for (const [id, activity] of this.workerActivities) {
+      if (currentWorkers.has(id) || !activity.active) continue;
+      activity.active = false;
+      activity.expiresAt = now + 10 * 60_000;
+      if (activity.item.status === "running" || activity.item.status === "waiting") {
+        const cancelled = activity.logs.some((line) => /cancelled by user|cancelling worker/i.test(line));
+        const failed = activity.logs.some((line) => line.includes("[coordinator] Fetch failed:"));
+        activity.item = {
+          ...activity.item,
+          status: cancelled ? "stopped" : failed ? "failed" : "done",
+          summary: cancelled ? "Stopped" : failed ? activity.item.summary ?? "Worker failed" : "Worker finished",
+          updated_at_ms: now,
+        };
+      }
+    }
+    for (const [id, activity] of this.workerActivities) {
+      if (!activity.active && activity.expiresAt <= now) this.workerActivities.delete(id);
+    }
+    const finishedWorkers = [...this.workerActivities.entries()]
+      .filter(([, activity]) => !activity.active)
+      .sort((a, b) => (b[1].item.updated_at_ms ?? b[1].item.started_at_ms ?? 0) - (a[1].item.updated_at_ms ?? a[1].item.started_at_ms ?? 0));
+    for (const [id] of finishedWorkers.slice(20)) this.workerActivities.delete(id);
+
+    const next = new Map<string, ActivityItem>();
+    for (const job of this.latestJobs) next.set(job.id, activityFromJob(job));
+    for (const [id, activity] of this.workerActivities) next.set(id, activity.item);
+
+    for (const event of diffActivityItems(this.sentActivities, [...next.values()], this.activitySnapshotSent)) {
+      this.cam.send(event.type, event.payload as unknown as Record<string, unknown>);
+    }
+    this.activitySnapshotSent = true;
+    this.sentActivities.clear();
+    for (const [id, item] of next) this.sentActivities.set(id, JSON.stringify(item));
+
+    if (this.activityDetailId?.startsWith("agent:")) this.streamWorkerLogs(this.activityDetailId, false);
+    this.ensureActivityPolling();
+  }
+
+  private ensureActivityPolling(): void {
+    const needsPolling = this.latestJobs.some(isActiveJob);
+    if (needsPolling && !this.activityPoll && !this.disposed) {
+      this.activityPoll = setInterval(() => this.refreshActivities(), 1000);
+      this.activityPoll.unref?.();
+    } else if (!needsPolling && this.activityPoll) {
+      clearInterval(this.activityPoll);
+      this.activityPoll = null;
+    }
+  }
+
+  private refreshActivities(): void {
+    if (this.disposed) return;
+    this.syncActivity(this.latestWorkers);
+    const id = this.activityDetailId;
+    if (id && !id.startsWith("agent:")) this.streamJobLogs(id, false);
+  }
+
+  private streamWorkerLogs(id: string, reset: boolean): void {
+    const activity = this.workerActivities.get(id);
+    if (!activity) return;
+    const offset = reset ? 0 : this.workerLogOffsets.get(id) ?? 0;
+    const chunk = activity.logs.slice(offset).join("\n");
+    if (chunk) this.cam.send("ActivityLog", { id, chunk: `${chunk}\n`, stream: "stdout" });
+    this.workerLogOffsets.set(id, activity.logs.length);
+  }
+
+  private streamJobLogs(id: string, initial: boolean): void {
+    for (const stream of ["stdout", "stderr"] as const) {
+      const key = `${id}:${stream}`;
+      try {
+        const result = initial
+          ? this.jobs.logs(id, stream, { tail: 1000 })
+          : this.jobs.logs(id, stream, { offset: this.jobLogOffsets.get(key) ?? 0 });
+        this.jobLogOffsets.set(key, result.offset);
+        if (result.content) this.cam.send("ActivityLog", { id, chunk: result.content, stream });
+      } catch {
+        // The selected item may have been removed while the detail view opened.
+      }
+    }
+  }
+
   private syncCommands(custom: { name: string; description?: string }[]): void {
     const key = custom.map((c) => `${c.name}:${c.description ?? ""}`).join("|");
     if (key === this.commandsKey && this.commandsKey !== "") return;
     this.commandsKey = key || "(none)";
-    const builtin = BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint }));
+    const builtin = [
+      ...BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint })),
+      { name: "jobs", description: "Browse background jobs and agents", args_hint: undefined },
+      { name: "agents", description: "Browse background agents and jobs", args_hint: undefined },
+    ];
     const names = new Set(builtin.map((c) => c.name));
     const mine = custom.filter((c) => !names.has(c.name)).map((c) => ({ name: c.name, description: c.description ? `${c.description} (custom)` : "Custom command" }));
     this.cam.send("SlashCommandsRegistered", { commands: [...builtin, ...mine] });
