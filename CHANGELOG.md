@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.13.0](https://github.com/sinameraji/autopilot/compare/v1.12.2...v1.13.0) (2026-10-03)
+
+
+### Features
+
+* **subagents:** use local Hotcell workers only ([bec8486](https://github.com/sinameraji/autopilot/commit/bec848677b9e1f772b4baea8d6609a52c334be19))
+* **subagents:** use local Hotcell workers only ([c6f2da2](https://github.com/sinameraji/autopilot/commit/c6f2da2dc82e4bc426aa6b2434c8c9bedc7fb87b))
+
+
+### Bug Fixes
+
+* **agent:** preserve complete turns during compaction ([bdd3233](https://github.com/sinameraji/autopilot/commit/bdd32336c4f3fe1c49a5c3eef2f8f6c3f3bcc70c))
+* **agent:** preserve complete turns during compaction ([29011cd](https://github.com/sinameraji/autopilot/commit/29011cd8508cddbe18b195975442101b15e69f2d))
+
 ## [1.12.2](https://github.com/sinameraji/autopilot/compare/v1.12.1...v1.12.2) (2026-10-03)
 
 
