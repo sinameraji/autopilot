@@ -30,6 +30,14 @@ describe("buildStaticPrefix", () => {
     assert.ok(!p.includes("`read`"), "should not include formatted tool names");
   });
 
+  it("directs the agent to recover from blockers or give a concrete next action", () => {
+    const p = buildStaticPrefix();
+    assert.match(p, /Treat blockers as problems to work through/);
+    assert.match(p, /try a safe, materially different recovery/);
+    assert.match(p, /the single most useful next action/);
+    assert.match(p, /never imply unverified work succeeded/);
+  });
+
   it("does NOT contain the model name (it lives in the session prefix so /model takes effect mid-session)", () => {
     const p = buildStaticPrefix({ model: "@cf/moonshotai/kimi-k2.6" });
     assert.ok(!p.includes("kimi-k2.6"), "static prefix must not name a specific model");
