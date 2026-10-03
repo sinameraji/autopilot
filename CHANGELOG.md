@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.2](https://github.com/sinameraji/autopilot/compare/v1.12.1...v1.12.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **agent:** provide actionable blocker handoffs ([d0d6f3f](https://github.com/sinameraji/autopilot/commit/d0d6f3fcf17b2476d1118baa0b9eec52e93ea09c))
+* **agent:** provide actionable blocker handoffs ([6052531](https://github.com/sinameraji/autopilot/commit/6052531823e19aa2baf9650756b36c1507773b60))
+
 ## [1.12.1](https://github.com/sinameraji/autopilot/compare/v1.12.0...v1.12.1) (2026-10-03)
 
 
