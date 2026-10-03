@@ -186,7 +186,8 @@ class View implements AppBridge {
   private todos = "";
   private permission: unknown = null;
   private openPrompt: string | null = null;
-  private commandsKey = "";
+  private commandsKey: string | undefined;
+  private readonly sentSubagentPolicyNotices = new Set<string>();
   private readonly jobs = new JobManager();
   private readonly sentActivities = new Map<string, string>();
   private readonly workerActivities = new Map<string, {
@@ -369,17 +370,9 @@ class View implements AppBridge {
   }
 
   private syncCommands(custom: { name: string; description?: string }[]): void {
-    const key = custom.map((c) => `${c.name}:${c.description ?? ""}`).join("|");
-    if (key === this.commandsKey && this.commandsKey !== "") return;
-    this.commandsKey = key || "(none)";
-    const builtin = [
-      ...BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint })),
-      { name: "jobs", description: "Browse background jobs and agents", args_hint: undefined },
-      { name: "agents", description: "Browse background agents and jobs", args_hint: undefined },
-    ];
-    const names = new Set(builtin.map((c) => c.name));
-    const mine = custom.filter((c) => !names.has(c.name)).map((c) => ({ name: c.name, description: c.description ? `${c.description} (custom)` : "Custom command" }));
-    this.cam.send("SlashCommandsRegistered", { commands: [...builtin, ...mine] });
+    this.commandsKey = syncSlashCommands(custom, this.commandsKey, (commands) => {
+      this.cam.send("SlashCommandsRegistered", { commands });
+    });
   }
 
   private syncEvents(events: ChatEvent[]): void {
@@ -437,6 +430,9 @@ class View implements AppBridge {
         return this.syncTool(e, prev);
       case "info":
       case "memory":
+        if (e.kind === "info" && !shouldSendSubagentPolicyNotice(e.text, this.sentSubagentPolicyNotices)) {
+          return this.mark(e.key, 0, true);
+        }
         return this.notice(e.key, e.text, "info");
       case "error":
         return this.notice(e.key, e.text, "error");
@@ -460,12 +456,14 @@ class View implements AppBridge {
     if (e.status === "queued" || e.status === "running") return this.mark(e.key, 0, false);
     const ok = e.status === "done";
     const content = e.result ?? "";
+    const bang = splitBangResult(e.render?.title, content);
+    const output = e.status === "rejected" ? "" : bang.output;
     this.cam.send("ToolExecutionFinished", {
       tool_id: e.key,
-      exit_code: ok ? 0 : 1,
+      exit_code: bang.exitCode ?? (ok ? 0 : 1),
       status: e.status === "rejected" ? "rejected" : e.status === "cancelled" ? "cancelled" : ok ? "done" : "error",
-      summary: toolSummary(e.name, ok, e.status === "rejected", content),
-      output: e.status === "rejected" ? "" : content,
+      summary: bang.status ?? toolSummary(e.name, ok, e.status === "rejected", output),
+      output,
       ...(ok && e.render?.diff ? { diff: e.render.diff } : {}),
     });
     return this.mark(e.key, 0, true);
@@ -1211,6 +1209,55 @@ function runShell(command: string): Promise<{ ok: boolean; output: string }> {
 }
 
 type PickOption = { value: string; label: string; description?: string; section?: string; columns?: string[]; state?: "on" | "off"; keywords?: string };
+
+type RegisteredSlashCommand = { name: string; description?: string; args_hint?: string };
+
+/** Send the complete command list only when the serialized renderer payload changes. */
+export function syncSlashCommands(
+  custom: { name: string; description?: string }[],
+  lastKey: string | undefined,
+  send: (commands: RegisteredSlashCommand[]) => void,
+): string {
+  const builtin: RegisteredSlashCommand[] = [
+    ...BUILTIN_COMMANDS.map((c) => ({ name: c.name, description: c.description, args_hint: c.argHint })),
+    { name: "jobs", description: "Browse background jobs and agents" },
+    { name: "agents", description: "Browse background agents and jobs" },
+  ];
+  const names = new Set(builtin.map((c) => c.name));
+  const commands = [
+    ...builtin,
+    ...custom
+      .filter((c) => !names.has(c.name))
+      .map((c) => ({ name: c.name, description: c.description ? `${c.description} (custom)` : "Custom command" })),
+  ];
+  const key = JSON.stringify(commands);
+  if (key !== lastKey) send(commands);
+  return key;
+}
+
+/** Deduplicate repeated policy notices in Camouflage without hiding user-directed decisions. */
+export function shouldSendSubagentPolicyNotice(message: string, sent: Set<string>): boolean {
+  if (!message.startsWith("Subagent policy:") || message.startsWith("Subagent policy: respecting your ")) return true;
+  if (sent.has(message)) return false;
+  sent.add(message);
+  return true;
+}
+
+/** Split the status prefix stored for `!` tool events from the actual command output. */
+export function splitBangResult(
+  title: string | undefined,
+  content: string,
+): { output: string; status?: string; exitCode?: number } {
+  if (!title?.startsWith("! ")) return { output: content };
+  const match = /^(exit=\d+|signal=[^\r\n]+|exit=\?)(?:\r?\n)/.exec(content);
+  if (!match) return { output: content };
+  const exit = /^exit=(\d+)$/.exec(match[1]!);
+  return {
+    output: content.slice(match[0].length),
+    status: match[1],
+    ...(exit ? { exitCode: Number(exit[1]) } : {}),
+  };
+}
 
 /** The Ink command wizard's name rules. */
 export function validateCommandName(name: string, existing: string[]): string | null {

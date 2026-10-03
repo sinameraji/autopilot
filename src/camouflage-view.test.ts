@@ -3,9 +3,40 @@ import assert from "node:assert";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { helpOptions, listMentionDir, modelOptions, toolRow, toolSummary, validateCommandName } from "./camouflage-view.js";
+import { helpOptions, listMentionDir, modelOptions, shouldSendSubagentPolicyNotice, splitBangResult, syncSlashCommands, toolRow, toolSummary, validateCommandName } from "./camouflage-view.js";
 import { listModels } from "./models/registry.js";
 
+describe("Camouflage event sync helpers", () => {
+  it("registers slash commands only when the complete payload changes", () => {
+    const sent: { name: string; description?: string; args_hint?: string }[][] = [];
+    const send = (commands: { name: string; description?: string; args_hint?: string }[]) => sent.push(commands);
+    let key = syncSlashCommands([], undefined, send);
+    key = syncSlashCommands([], key, send);
+    key = syncSlashCommands([{ name: "review", description: "Review changes" }], key, send);
+    key = syncSlashCommands([{ name: "review", description: "Review changes" }], key, send);
+    key = syncSlashCommands([{ name: "review", description: "Review carefully" }], key, send);
+    assert.equal(sent.length, 3, "startup sends once, then only the add and edit changes");
+    assert.ok(sent[0]!.some((command) => command.args_hint), "built-in argument hints are in the registered payload");
+    assert.deepEqual(sent[2]!.at(-1), { name: "review", description: "Review carefully (custom)" });
+  });
+
+  it("deduplicates repeated policy notices but keeps user-directed decisions", () => {
+    const sent = new Set<string>();
+    const automatic = "Subagent policy: auto will assess this substantial task for independent work; worker calls remain permission-gated.";
+    assert.equal(shouldSendSubagentPolicyNotice(automatic, sent), true);
+    assert.equal(shouldSendSubagentPolicyNotice(automatic, sent), false);
+    assert.equal(shouldSendSubagentPolicyNotice("Subagent policy: auto policy changed.", sent), true);
+    const explicit = "Subagent policy: respecting your explicit request to delegate. Worker calls still require permission.";
+    assert.equal(shouldSendSubagentPolicyNotice(explicit, sent), true);
+    assert.equal(shouldSendSubagentPolicyNotice(explicit, sent), true);
+  });
+
+  it("strips bang status from output and preserves ordinary tool output", () => {
+    assert.deepEqual(splitBangResult("! false", "exit=7\nfailed\n"), { output: "failed\n", status: "exit=7", exitCode: 7 });
+    assert.deepEqual(splitBangResult("! kill", "signal=SIGTERM\npartial output"), { output: "partial output", status: "signal=SIGTERM" });
+    assert.deepEqual(splitBangResult("Bash", "exit=1\nnot a bang command"), { output: "exit=1\nnot a bang command" });
+  });
+});
 describe("listMentionDir", () => {
   it("lists the folder being typed, folders first, prefixed as typed", async () => {
     const root = await mkdtemp(join(tmpdir(), "mention-"));
