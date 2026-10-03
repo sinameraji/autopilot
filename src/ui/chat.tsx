@@ -234,8 +234,12 @@ const EventView = React.memo(function EventView({
     return <ToolView evt={evt} verbose={verbose} isRepeated={isRepeated} intentTier={intentTier} />;
   }
   if (evt.kind === "info") {
+    const isSubagentHint = /^(Subagent policy|Subagent suggestion):/.test(evt.text);
     return (
-      <Text color={theme.info.color}>
+      <Text
+        color={isSubagentHint ? (theme.muted?.color ?? theme.info.color) : theme.info.color}
+        dimColor={isSubagentHint || undefined}
+      >
         · {humanizeInfo(evt.text, intentTier)}
       </Text>
     );
