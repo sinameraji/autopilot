@@ -149,10 +149,26 @@ import {
   openBrowser,
   rebuildSystemPromptForMode,
   trackRecentFile,
+  replaceQueuedPrompt,
+  replaceUserPromptEvent,
 } from "./ui/app-helpers.js";
 
 /** The TUI's config is exactly the loaded config. */
 export type Cfg = KimiConfig;
+
+interface PromptEditTarget {
+  key: string;
+  historyText: string;
+  messagesBefore: ChatMessage[] | null;
+}
+
+interface PendingPromptEdit {
+  key: string;
+  full: string;
+  display: string;
+  messagesBefore: ChatMessage[];
+}
+
 function App({
   initialCfg,
   initialUpdateResult,
@@ -270,6 +286,8 @@ function App({
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [draftInput, setDraftInput] = useState("");
+  const latestPromptRef = useRef<PromptEditTarget | null>(null);
+  const pendingPromptEditRef = useRef<PendingPromptEdit | null>(null);
 
   // Plan/edit/auto modes are behind a feature flag (cfg.modesEnabled, off by
   // default): with it off every session runs in auto and the mode UI is hidden.
@@ -1433,10 +1451,23 @@ function App({
   );
 
   const processMessage = useCallback(
-    async (text: string, displayText?: string, opts?: { queuedKeys?: string[]; userPromptForHooks?: string }) => {
+    async (text: string, displayText?: string, opts?: { queuedKeys?: string[]; userPromptForHooks?: string; eventKey?: string; historyText?: string }) => {
       if (!cfg) return;
       let trimmed = text.trim();
       if (!trimmed) return;
+
+      let display = displayText?.trim() || trimmed;
+      const promptKey = opts?.eventKey ?? opts?.queuedKeys?.[0];
+      if (promptKey && !trimmed.startsWith("/") && parseBangCommand(trimmed) === null) {
+        const previousTarget = latestPromptRef.current;
+        if (opts?.eventKey || previousTarget?.key === promptKey) {
+          latestPromptRef.current = {
+            key: promptKey,
+            historyText: opts?.historyText ?? previousTarget?.historyText ?? display,
+            messagesBefore: [...messagesRef.current],
+          };
+        }
+      }
 
       // Mark busy immediately so no other path can race into processMessage
       // while async setup (image encoding, hooks, etc.) is in flight.
@@ -1444,7 +1475,6 @@ function App({
 
       let overrideModel: string | undefined;
       let overrideEffort: ReasoningEffort | undefined;
-      let display = displayText?.trim() || trimmed;
 
       const bangCommand = parseBangCommand(trimmed);
       if (bangCommand !== null) {
@@ -1541,7 +1571,7 @@ function App({
           ),
         );
       } else {
-        setEvents((e) => [...e, { kind: "user", key: mkKey(), text: display, images: images.length > 0 ? images : undefined }]);
+        setEvents((e) => [...e, { kind: "user", key: opts?.eventKey ?? mkKey(), text: display, images: images.length > 0 ? images : undefined }]);
       }
 
       // LSP nudge: if user references code files and LSP is not configured
@@ -2394,13 +2424,27 @@ function App({
   );
 
   useEffect(() => {
-    if (!busy && queuePlanDraft === null && queue.length > 0 && supervisorRef.current.phase === "idle") {
-      const next = queue[0]!;
-      setQueue((q) => q.slice(1));
-      processMessage(next.full, next.display, {
-        queuedKeys: next.sourceKeys ?? [next.key],
-        ...(next.batchPrompts ? { userPromptForHooks: next.batchPrompts.join("\n\n") } : {}),
-      });
+    if (!busy && queuePlanDraft === null && supervisorRef.current.phase === "idle") {
+      const pendingEdit = pendingPromptEditRef.current;
+      if (pendingEdit) {
+        pendingPromptEditRef.current = null;
+        messagesRef.current = [...pendingEdit.messagesBefore];
+        setEvents((events) => replaceUserPromptEvent(events, pendingEdit.key, pendingEdit.display, true));
+        processMessage(pendingEdit.full, pendingEdit.display, {
+          queuedKeys: [pendingEdit.key],
+          historyText: pendingEdit.display,
+        });
+        return;
+      }
+
+      if (queue.length > 0) {
+        const next = queue[0]!;
+        setQueue((q) => q.slice(1));
+        processMessage(next.full, next.display, {
+          queuedKeys: next.sourceKeys ?? [next.key],
+          ...(next.batchPrompts ? { userPromptForHooks: next.batchPrompts.join("\n\n") } : {}),
+        });
+      }
     }
   }, [busy, queue, queuePlanDraft, processMessage]);
 
@@ -2443,11 +2487,65 @@ function App({
       }
 
       const historyEntry = trimmedDisplay;
+      const editTarget = latestPromptRef.current;
+      const selectedHistoryEntry = history[historyIndex];
+      const isEditedLatestPrompt =
+        historyIndex === history.length - 1 &&
+        editTarget !== null &&
+        events.some((event) => event.kind === "user" && event.key === editTarget.key) &&
+        selectedHistoryEntry === editTarget.historyText;
+
+      if (isEditedLatestPrompt && editTarget) {
+        if (trimmedDisplay === selectedHistoryEntry) {
+          setInput("");
+          setHistoryIndex(-1);
+          return;
+        }
+        const updatedQueue = replaceQueuedPrompt(queue, editTarget.key, trimmedFull, trimmedDisplay);
+        if (updatedQueue || editTarget.messagesBefore) {
+          setHistory((items) =>
+            items.length > 0 && items[items.length - 1] === editTarget.historyText
+              ? [...items.slice(0, -1), trimmedDisplay]
+              : items,
+          );
+          setInput("");
+          setHistoryIndex(-1);
+          latestPromptRef.current = { ...editTarget, historyText: trimmedDisplay };
+          setEvents((events) => replaceUserPromptEvent(events, editTarget.key, trimmedDisplay));
+
+          if (updatedQueue) {
+            setQueue(updatedQueue);
+            return;
+          }
+
+          const edit: PendingPromptEdit = {
+            key: editTarget.key,
+            full: trimmedFull,
+            display: trimmedDisplay,
+            messagesBefore: editTarget.messagesBefore!,
+          };
+          if (busyRef.current || supervisorRef.current.isRunning) {
+            pendingPromptEditRef.current = edit;
+            runInterruptTurn(interruptDepsRef.current!);
+          } else {
+            messagesRef.current = [...edit.messagesBefore];
+            setEvents((events) => replaceUserPromptEvent(events, edit.key, edit.display, true));
+            processMessage(edit.full, edit.display, {
+              queuedKeys: [edit.key],
+              historyText: edit.display,
+            });
+          }
+          return;
+        }
+      }
 
       if (busyRef.current || supervisorRef.current.isRunning) {
         const key = mkKey();
         setEvents((e) => [...e, { kind: "user", key, text: trimmedDisplay, queued: true }]);
         setQueue((q) => [...q, { full: trimmedFull, display: trimmedDisplay, key }]);
+        if (!trimmedFull.startsWith("/") && parseBangCommand(trimmedFull) === null) {
+          latestPromptRef.current = { key, historyText: historyEntry, messagesBefore: null };
+        }
         setHistory((h) => (h.length > 0 && h[h.length - 1] === historyEntry ? h : [...h, historyEntry]));
         setInput("");
         setHistoryIndex(-1);
@@ -2457,9 +2555,13 @@ function App({
       setHistory((h) => (h.length > 0 && h[h.length - 1] === historyEntry ? h : [...h, historyEntry]));
       setInput("");
       setHistoryIndex(-1);
-      processMessage(trimmedFull, trimmedDisplay !== trimmedFull ? trimmedDisplay : undefined);
+      const key = mkKey();
+      processMessage(trimmedFull, trimmedDisplay !== trimmedFull ? trimmedDisplay : undefined, {
+        eventKey: key,
+        historyText: historyEntry,
+      });
     },
-    [processMessage, queue],
+    [processMessage, queue, history, historyIndex, events],
   );
   submitRef.current = submit;
 
@@ -2991,6 +3093,12 @@ function App({
               <Text dimColor>! shell command — runs in your terminal (logins and prompts work); output is shared with the agent</Text>
             </Box>
           )}
+          {historyIndex === history.length - 1 &&
+            latestPromptRef.current?.historyText === history[history.length - 1] && (
+              <Box marginTop={1}>
+                <Text dimColor>editing last message — Enter replaces it</Text>
+              </Box>
+            )}
           <Box marginTop={parseBangCommand(input) !== null ? 0 : 1}>
             <Text color={theme.prompt ?? theme.accent}>› </Text>
             <CustomTextInput

@@ -21,6 +21,7 @@ import { buildSystemMessages, buildSystemPrompt } from "../agent/system-prompt.j
 import type { ToolSpec } from "../tools/registry.js";
 import { isImagePath } from "../util/image.js";
 import type { ChatEvent } from "./chat.js";
+import { createQueueBatch, type QueuedPrompt } from "../agent/queue-batch.js";
 import type { Cfg } from "../app.js";
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -32,6 +33,57 @@ export const MAX_EVENTS = 500;
 export const DEFAULT_AUTO_FRESH_SUGGESTION_TURNS = 30;
 export const MAX_IMAGES_PER_MESSAGE = 10;
 export const FEEDBACK_WORKER_URL = "https://hello.kimiflare.com";
+
+/** Replace a queued prompt without appending a second queue item. */
+export function replaceQueuedPrompt(
+  queue: QueuedPrompt[],
+  key: string,
+  full: string,
+  display: string,
+): QueuedPrompt[] | null {
+  const index = queue.findIndex((item) => item.key === key);
+  if (index >= 0) {
+    const next = [...queue];
+    next[index] = { ...next[index]!, full, display };
+    return next;
+  }
+
+  const groupedIndex = queue.findIndex((item) => item.sourceKeys?.includes(key));
+  if (groupedIndex < 0) return null;
+  const grouped = queue[groupedIndex]!;
+  if (!grouped.sourceKeys || !grouped.batchPrompts) return null;
+  const promptIndex = grouped.sourceKeys.indexOf(key);
+  const replacement = createQueueBatch(
+    grouped.batchPrompts.map((prompt, index) => ({
+      key: grouped.sourceKeys![index]!,
+      full: index === promptIndex ? full : prompt,
+      display: index === promptIndex ? display : prompt,
+    })),
+  );
+  if (!replacement) return null;
+  const next = [...queue];
+  next[groupedIndex] = replacement;
+  return next;
+}
+
+/** Update a submitted user event, optionally discarding that turn's old output. */
+export function replaceUserPromptEvent(
+  events: ChatEvent[],
+  key: string,
+  text: string,
+  discardTurnOutput = false,
+): ChatEvent[] {
+  const index = events.findIndex((event) => event.kind === "user" && event.key === key);
+  if (index < 0) return events;
+  const event = events[index]!;
+  if (event.kind !== "user") return events;
+  const replacement: ChatEvent = { ...event, text, images: undefined };
+  if (!discardTurnOutput) {
+    return events.map((item, i) => (i === index ? replacement : item));
+  }
+  const queuedFollowUps = events.slice(index + 1).filter((item) => item.kind === "user" && item.queued);
+  return [...events.slice(0, index), replacement, ...queuedFollowUps];
+}
 
 // ── Event key generator ──────────────────────────────────────────────────
 
