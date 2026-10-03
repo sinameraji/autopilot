@@ -330,7 +330,7 @@ export function useSessionManager(deps: SessionManagerDeps): SessionManager {
           if (
             threshold > 0 &&
             nonSystemCount >= threshold &&
-            (d.mode === "auto" || d.mode === "edit" || d.mode === "multi-agent-experimental")
+            (d.mode === "auto" || d.mode === "edit")
           ) {
             d.setEvents((es) => [
               ...es,

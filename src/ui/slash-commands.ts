@@ -118,7 +118,6 @@ export interface SlashContext {
   setShowModelPicker: (v: boolean) => void;
   setShowModePicker: (v: boolean) => void;
   setShowInboxModal: (v: boolean) => void;
-  setShowMultiAgentModal: (v: boolean) => void;
   setShowLspWizard: (v: boolean) => void;
   setShowRemoteDashboard: (v: boolean) => void;
   setShowCommandList: (v: boolean) => void;
@@ -475,7 +474,7 @@ const handleSubagents: Handler = (ctx, _rest, arg) => {
     setEvents((events) => [...events, {
       kind: "info",
       key: mkKey(),
-      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Remote setup: KIMIFLARE_WORKER_ENDPOINT (or workerEndpoint in config). Hotcell: KIMIFLARE_WORKER_BACKEND=hotcell; plan mode only.`,
+      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean committed Git checkout; workers are read-only.`,
     }]);
     return true;
   }
@@ -843,76 +842,12 @@ const handleMode: Handler = (ctx, _rest, arg) => {
   return true;
 };
 
-const handleMultiAgent: Handler = (ctx, rest, _arg) => {
-  const { cfg, setCfg, setEvents, mkKey, setMode, mode } = ctx;
-  if (!cfg) {
-    setEvents((e) => [...e, { kind: "error", key: mkKey(), text: "no config loaded — credentials not set up" }]);
-    return true;
-  }
-  const sub = (rest[0] ?? "").toLowerCase();
-  // No subcommand → open the proper arrow-nav settings modal.
-  if (!sub) {
-    ctx.setShowMultiAgentModal(true);
-    return true;
-  }
-  const value = rest.slice(1).join(" ").trim();
-  const persist = (patch: Partial<typeof cfg>, msg: string, kind: "info" | "success" | "error" = "success") => {
-    const next = { ...cfg, ...patch };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    setEvents((e) => [...e, { kind: kind === "success" ? "info" : kind, key: mkKey(), text: msg }]);
-  };
-
-  if (sub === "enable") {
-    persist({ multiAgentEnabled: true }, "multi-agent enabled — Shift-Tab to switch modes");
-    if (!cfg.workerEndpoint) {
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "tip: run /multi-agent endpoint <url> to set your endpoint, or open /multi-agent and pick Set up to deploy one" }]);
-    }
-    return true;
-  }
-  if (sub === "disable") {
-    persist({ multiAgentEnabled: false }, "multi-agent disabled");
-    return true;
-  }
-  if (sub === "execute") {
-    persist({ autoExecute: true }, "auto-execute on — after research, a 4th worker will implement + open a PR");
-    return true;
-  }
-  if (sub === "no-execute") {
-    persist({ autoExecute: false }, "auto-execute off — research only");
-    return true;
-  }
-  if (sub === "endpoint") {
-    if (!value) {
-      setEvents((e) => [...e, { kind: "error", key: mkKey(), text: "usage: /multi-agent endpoint <url>" }]);
-      return true;
-    }
-    persist({ workerEndpoint: value }, `endpoint set: ${value}`);
-    return true;
-  }
-  if (sub === "worker-secret" || sub === "api-key") {
-    // api-key kept as a deprecated alias.
-    if (!value) {
-      setEvents((e) => [...e, { kind: "error", key: mkKey(), text: "usage: /multi-agent worker-secret <secret>" }]);
-      return true;
-    }
-    persist({ workerApiKey: value }, "worker secret set");
-    return true;
-  }
-  if (sub === "status" || sub === "") {
-    const lines = [
-      "multi-agent status:",
-      `  enabled:        ${cfg.multiAgentEnabled ? "yes" : "no"}`,
-      `  endpoint:       ${cfg.workerEndpoint ?? "(not set)"}`,
-      `  worker secret:  ${cfg.workerApiKey ? "(set)" : "(auto-managed by Set up)"}`,
-      `  auto-implement: ${cfg.autoExecute ? "yes" : "no"}`,
-      "",
-      "subcommands: enable | disable | execute | no-execute | endpoint <url> | worker-secret <secret> | status",
-    ];
-    setEvents((e) => [...e, { kind: "info", key: mkKey(), text: lines.join("\n") }]);
-    return true;
-  }
-  setEvents((e) => [...e, { kind: "error", key: mkKey(), text: `unknown subcommand: ${sub}. Run /multi-agent status for help.` }]);
+const handleMultiAgent: Handler = (ctx) => {
+  ctx.setEvents((events) => [...events, {
+    kind: "info",
+    key: ctx.mkKey(),
+    text: "Remote multi-agent workers and Cloudflare setup are disabled. Research delegation now runs locally through Hotcell; use /subagents auto (or /subagents off).",
+  }]);
   return true;
 };
 

@@ -41,7 +41,6 @@ import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
 import { QueuePlanPicker } from "./ui/queue-plan-picker.js";
 import { createQueueBatch, type QueuedPrompt } from "./agent/queue-batch.js";
 import { TaskList } from "./ui/task-list.js";
-import { WorkerList } from "./ui/worker-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -95,7 +94,6 @@ import { SlashPicker } from "./ui/slash-picker.js";
 import { usePickerController } from "./ui/use-picker-controller.js";
 import { useModalHost } from "./ui/use-modal-host.js";
 import type { AppBridge, AppModal } from "./ui/app-bridge.js";
-import type { MultiAgentSettings } from "./ui/multi-agent-modal.js";
 import type { HookConfig, HookEvent } from "./hooks/types.js";
 import { ModalHost } from "./ui/modal-host.js";
 import { PlanCompletePicker } from "./ui/plan-complete-picker.js";
@@ -271,7 +269,6 @@ function App({
     showModePicker, setShowModePicker,
     showRemoteDashboard, setShowRemoteDashboard,
     showInboxModal, setShowInboxModal,
-    showMultiAgentModal, setShowMultiAgentModal,
     showHelpMenu, setShowHelpMenu,
     showMemoryPicker, setShowMemoryPicker,
     showSkillsPicker, setShowSkillsPicker,
@@ -295,23 +292,8 @@ function App({
   const [mode, setMode] = useState<Mode>(initialCfg?.modesEnabled ? "edit" : "auto");
   useEffect(() => {
     // Toggling the flag from /settings: off → back to auto; on → start in edit.
-    setMode((m) => (modesEnabled ? (m === "auto" ? "edit" : m) : m === "multi-agent-experimental" ? m : "auto"));
+    setMode((m) => (modesEnabled ? (m === "auto" ? "edit" : m) : "auto"));
   }, [modesEnabled]);
-  // Auto-open the /multi-agent settings modal the moment the user switches
-  // into multi-agent mode without an endpoint configured. Same fallback
-  // chain the supervisor uses (cfg.workerEndpoint, then cfg.remoteWorkerUrl).
-  useEffect(() => {
-    if (
-      mode === "multi-agent-experimental" &&
-      cfg &&
-      !cfg.workerEndpoint &&
-      !cfg.remoteWorkerUrl &&
-      !showMultiAgentModal
-    ) {
-      setShowMultiAgentModal(true);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, cfg?.workerEndpoint, cfg?.remoteWorkerUrl]);
   const [codeMode, setCodeMode] = useState<boolean>(false);
   const filePickerEnabled = initialCfg?.filePicker ?? true;
   const [effort, setEffort] = useState<ReasoningEffort>(
@@ -329,9 +311,6 @@ function App({
   const [kimiMdStale, setKimiMdStale] = useState(false);
   const [gitBranch, setGitBranch] = useState<string | null>(null);
   const [lastSessionTopic, setLastSessionTopic] = useState<string | null>(null);
-  const [activeWorkers, setActiveWorkers] = useState<import("./agent/supervisor.js").ActiveWorker[]>([]);
-  const [isSynthesizing, setIsSynthesizing] = useState(false);
-  const [coordinatorNarration, setCoordinatorNarration] = useState<string>("");
   const [changelogImageRepo, setChangelogImageRepo] = useState<{ owner: string; name: string } | null>(null);
 
   useEffect(() => {
@@ -425,9 +404,6 @@ function App({
   const mcpToolsRef = useRef<ToolSpec[]>([]);
   const mcpInitRef = useRef(false);
   const submitRef = useRef<(full: string, display?: string) => void>(() => {});
-  /** AbortController for the current multi-agent spawn. Used by Escape to
-   *  cancel in-flight workers via the remote /cancel endpoint. */
-  const multiAgentAbortRef = useRef<AbortController | null>(null);
   const lspManagerRef = useRef(new LspManager());
   const lspToolsRef = useRef<ToolSpec[]>([]);
   const lspInitRef = useRef(false);
@@ -914,11 +890,6 @@ function App({
       });
       // Multi-agent cancel path: abort the dedicated controller so the
       // polling loop breaks and /cancel fires on each active worker.
-      if (multiAgentAbortRef.current) {
-        multiAgentAbortRef.current.abort();
-        setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "cancelling multi-agent workers…" }]);
-        return;
-      }
       const outcome = runInterruptOrExit(interruptDepsRef.current!);
       if (!outcome.didInterruptTurn && !outcome.hadPermission) {
         logger.info("input:ctrl+c:exiting");
@@ -943,15 +914,6 @@ function App({
         queuePlanDraft !== null ||
         showThemePicker;
       if (!modalOpen && !isAbortingRef.current && now - lastEscapeAtRef.current > 500) {
-        // Multi-agent cancel path: workers are in flight but there is no
-        // activeScopeRef (multi-agent bypasses runAgentTurn). Abort the
-        // dedicated controller so the polling loop breaks and /cancel fires.
-        if (multiAgentAbortRef.current) {
-          lastEscapeAtRef.current = now;
-          multiAgentAbortRef.current.abort();
-          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "cancelling multi-agent workers…" }]);
-          return;
-        }
         if ((busyRef.current || supervisorRef.current.isRunning) && activeScopeRef.current) {
           lastEscapeAtRef.current = now;
           runInterruptTurn(interruptDepsRef.current!);
@@ -983,13 +945,6 @@ function App({
       isAborting: isAbortingRef.current,
       hasPerm: hasPendingPermission(),
     });
-    // Multi-agent cancel path: abort the dedicated controller so the
-    // polling loop breaks and /cancel fires on each active worker.
-    if (multiAgentAbortRef.current) {
-      multiAgentAbortRef.current.abort();
-      setEvents((e) => [...e, { kind: "info", key: mkKey(), text: "cancelling multi-agent workers…" }]);
-      return;
-    }
     // SIGINT preserves the pre-refactor asymmetry: it does NOT iterate
     // pendingToolCalls to mark them cancelled (the Ctrl+C path does).
     // Pass `skipPendingToolCleanup: true` so interruptTurn matches.
@@ -1234,7 +1189,6 @@ function App({
     setShowModelPicker,
     setShowModePicker,
     setShowInboxModal,
-    setShowMultiAgentModal,
     setShowHooksDashboard: modals.setShowHooksDashboard,
     setShowHelpMenu,
     setShowLspWizard,
@@ -1649,7 +1603,7 @@ function App({
       if (
         autoFreshThreshold > 0 &&
         turnCounterRef.current >= autoFreshThreshold &&
-        (modeRef.current === "auto" || modeRef.current === "edit" || modeRef.current === "multi-agent-experimental") &&
+        (modeRef.current === "auto" || modeRef.current === "edit") &&
         !freshSuggestedRef.current
       ) {
         freshSuggestedRef.current = true;
@@ -1726,113 +1680,6 @@ function App({
       const turnReasoningEffort = overrideEffort ?? effortForTier[classification.tier] ?? effortRef.current;
       const effectiveCodeMode = classification.tier === "heavy";
       setCodeMode(effectiveCodeMode);
-
-      // Two-gate check for multi-agent mode:
-      // 1. Mode gate: multi-agent-experimental must be active
-      // 2. Tier gate: task must be classified as "heavy"
-      // 3. Activity gate: don't spawn new workers if some are already in flight
-      if (modeRef.current === "multi-agent-experimental") {
-        if (classification.tier !== "heavy") {
-          setEvents((e) => [
-            ...e,
-            { kind: "info", key: mkKey(), text: `multi-agent mode active, but task is ${classification.tier} — running locally` },
-          ]);
-        } else if (activeWorkers.length > 0) {
-          setEvents((e) => [
-            ...e,
-            { kind: "info", key: mkKey(), text: `multi-agent workers already active (${activeWorkers.length}) — routing to coordinator` },
-          ]);
-        } else {
-          setEvents((e) => [
-            ...e,
-            { kind: "info", key: mkKey(), text: "multi-agent mode: spawning parallel research workers..." },
-          ]);
-          setCoordinatorNarration("");
-          const controller = new AbortController();
-          multiAgentAbortRef.current = controller;
-          try {
-            // Wire coordinator managers so workers get memory/LSP/MCP context
-            supervisorRef.current!.memoryManager = memoryManagerRef.current;
-            supervisorRef.current!.lspManager = lspManagerRef.current;
-            supervisorRef.current!.mcpManager = mcpManagerRef.current;
-
-            const { plan, conflicts, recommendations, prUrl, executor } = await supervisorRef.current!.autoSpawnWorkers(
-              trimmed,
-              `Current project: ${process.cwd()}`,
-              (workers) => setActiveWorkers(workers),
-              (phase) => setIsSynthesizing(phase === "synthesizing"),
-              controller.signal,
-              (text) => setCoordinatorNarration(text),
-            );
-            setCoordinatorNarration("");
-            setEvents((e) => [
-              ...e,
-              { kind: "info", key: mkKey(), text: "workers completed — synthesizing findings" },
-            ]);
-            // Present the synthesized plan as a visible assistant message
-            // so the user can actually read what the workers discovered.
-            const asstId = mkAssistantId();
-            setEvents((e) => [
-              ...e,
-              {
-                kind: "assistant",
-                key: `asst_${asstId}`,
-                id: asstId,
-                text: plan,
-                reasoning: "",
-                streaming: false,
-              },
-            ]);
-            messagesRef.current.push({ role: "assistant", content: plan });
-            setActiveWorkers([]);
-            supervisorRef.current!.clearWorkers();
-            if (conflicts.length > 0) {
-              setEvents((e) => [
-                ...e,
-                { kind: "info", key: mkKey(), text: `conflicts detected:\n${conflicts.join("\n")}` },
-              ]);
-            }
-            setEvents((e) => [
-              ...e,
-              { kind: "info", key: mkKey(), text: `synthesized ${recommendations.length} recommendation(s)` },
-            ]);
-            if (executor) {
-              setEvents((e) => [
-                ...e,
-                executor.status === "completed" && prUrl
-                  ? { kind: "info", key: mkKey(), text: `executor opened PR: ${prUrl}` }
-                  : executor.status === "completed"
-                  ? { kind: "info", key: mkKey(), text: "executor completed (no file changes to commit)" }
-                  : { kind: "error", key: mkKey(), text: `executor failed: ${executor.error ?? "unknown"}` },
-              ]);
-            }
-            await saveSessionSafe();
-            endTurn();
-            return;
-          } catch (e) {
-            setIsSynthesizing(false);
-            setCoordinatorNarration("");
-            const err = e as Error;
-            if (err.message === "Cancelled by user") {
-              setEvents((e) => [
-                ...e,
-                { kind: "info", key: mkKey(), text: "multi-agent cancelled" },
-              ]);
-            } else {
-              setEvents((e) => [
-                ...e,
-                { kind: "error", key: mkKey(), text: `multi-agent spawn failed: ${err.message}` },
-              ]);
-            }
-            setActiveWorkers([]);
-            supervisorRef.current!.clearWorkers();
-            endTurn();
-            return;
-          } finally {
-            multiAgentAbortRef.current = null;
-          }
-        }
-      }
 
       const turnScope = sessionScopeRef.current.createChild();
       activeScopeRef.current = turnScope;
@@ -1990,9 +1837,6 @@ function App({
               memoryRecalled: info.memoryRecalled,
             },
           ]);
-        },
-        onWorkersUpdated: (workers: import("./agent/supervisor.js").ActiveWorker[]) => {
-          setActiveWorkers(workers);
         },
       };
 
@@ -2673,17 +2517,6 @@ function App({
     return out;
   }
 
-  async function handleMultiAgentSave(patch: MultiAgentSettings) {
-    const fresh = await loadConfig().catch(() => cfg);
-    if (!fresh) return;
-    const next = { ...fresh, ...patch };
-    setCfg(next);
-    void saveConfig(next).catch(() => {});
-    if (patch.multiAgentEnabled === false && mode === "multi-agent-experimental") {
-      setMode("edit");
-    }
-  }
-
   function handlePlanOptionPick(option: PlanOption | null) {
               setPlanOptions(null);
               planOptionsRef.current = null;
@@ -2731,16 +2564,11 @@ function App({
     if (modals.showLspWizard) open.push("lspWizard");
     if (modals.showRemoteDashboard) open.push("remoteDashboard");
     if (modals.showInboxModal) open.push("inbox");
-    if (modals.showMultiAgentModal) open.push("multiAgent");
     if (modals.showHooksDashboard) open.push("hooksDashboard");
     if (modals.showChangelogImagePicker) open.push("changelogImage");
     bridge.connect({
       submit: (text) => submitRef.current(text),
       interrupt: () => {
-        if (multiAgentAbortRef.current) {
-          multiAgentAbortRef.current.abort();
-          return;
-        }
         if (busyRef.current || supervisorRef.current.isRunning) runInterruptTurn(interruptDepsRef.current!);
       },
       cycleMode: () => {
@@ -2776,7 +2604,6 @@ function App({
           lspWizard: () => modals.setShowLspWizard(false),
           remoteDashboard: () => modals.setShowRemoteDashboard(false),
           inbox: () => modals.setShowInboxModal(false),
-          multiAgent: () => modals.setShowMultiAgentModal(false),
           hooksDashboard: () => modals.setShowHooksDashboard(false),
           changelogImage: () => modals.setShowChangelogImagePicker(false),
         };
@@ -2796,7 +2623,6 @@ function App({
         modals.setShowShellPicker(false);
       },
       generateChangelogImage: handleChangelogImageGenerate,
-      saveMultiAgent: (patch) => void handleMultiAgentSave(patch),
       reloadHooks: () => {
         hooksManagerRef.current.reload();
         return configuredHooks();
@@ -2820,7 +2646,7 @@ function App({
     bridge.sync({
       events,
       busy,
-      workers: activeWorkers,
+      workers: [],
       mode,
       model: cfg?.model ?? "",
       usage,
@@ -2841,14 +2667,6 @@ function App({
       commandPickerMode: modals.commandPicker?.mode ?? null,
       changelogImageRepo,
       modesEnabled,
-      multiAgent: {
-        multiAgentEnabled: cfg?.multiAgentEnabled,
-        workerEndpoint: cfg?.workerEndpoint,
-        workerApiKey: cfg?.workerApiKey,
-        workerName: cfg?.workerName,
-        autoExecute: cfg?.autoExecute,
-      },
-      remoteWorkerUrl: cfg?.remoteWorkerUrl,
       hooks: configuredHooks(),
       lsp: {
         servers: cfg?.lspServers ?? {},
@@ -2954,16 +2772,6 @@ function App({
         onSelectRemoteSession={setSelectedRemoteSession}
         onCancelRemoteSession={handleRemoteCancel}
         onInboxOpen={openBrowser}
-        multiAgentSettings={cfg ? {
-          multiAgentEnabled: cfg.multiAgentEnabled,
-          workerEndpoint: cfg.workerEndpoint,
-          workerApiKey: cfg.workerApiKey,
-          workerName: cfg.workerName,
-          autoExecute: cfg.autoExecute,
-        } : undefined}
-        onMultiAgentSave={handleMultiAgentSave}
-        multiAgentRemoteWorkerUrl={cfg?.remoteWorkerUrl}
-        multiAgentRemoteAuthSecret={cfg?.remoteAuthSecret}
         getConfiguredHooks={configuredHooks}
         cwd={process.cwd()}
         onHooksMutate={() => hooksManagerRef.current.reload()}
@@ -3030,9 +2838,6 @@ function App({
           <QueuePlanPicker prompts={queuePlanDraft} onPick={handleQueuePlanPick} />
         ) : (
           <Box flexDirection="column" marginTop={1}>
-            {(activeWorkers.length > 0 || coordinatorNarration) && (
-              <WorkerList workers={activeWorkers} isSynthesizing={isSynthesizing} narration={coordinatorNarration} />
-            )}
             {tasks.length > 0 && (
               <TaskList
                 tasks={tasks}

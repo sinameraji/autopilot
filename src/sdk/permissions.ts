@@ -20,7 +20,7 @@ export function createDefaultPermissionHandler(options: {
       return "allow";
     }
 
-    // edit mode and multi-agent-experimental mode: emit event and wait for external decision
+    // edit mode: emit event and wait for external decision
     options.onRequest?.(req);
     // If no external handler resolves it, deny to avoid hanging.
     // The SDK session will override this with its own event-based waiter.

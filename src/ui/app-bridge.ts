@@ -22,7 +22,6 @@ import type { PermissionDecision, PermissionRequest } from "../tools/executor.js
 import type { PlanCompleteChoice } from "./plan-complete-picker.js";
 import type { CustomCommand } from "../commands/types.js";
 import type { SaveCustomCommandOptions } from "../commands/save.js";
-import type { MultiAgentSettings } from "./multi-agent-modal.js";
 import type { LspServerConfig } from "../config.js";
 import type { HookConfig, HookEvent } from "../hooks/types.js";
 import type { ActiveWorker } from "../agent/supervisor.js";
@@ -44,7 +43,6 @@ export type AppModal =
   | "lspWizard"
   | "remoteDashboard"
   | "inbox"
-  | "multiAgent"
   | "hooksDashboard"
   | "changelogImage";
 
@@ -80,9 +78,6 @@ export interface AppSnapshot {
   commandPickerMode: "edit" | "delete" | null;
   /** The repo /changelog-image detected, if any. */
   changelogImageRepo: { owner: string; name: string } | null;
-  multiAgent: MultiAgentSettings;
-  /** Commute URL from /remote setup, used when no worker endpoint is set. */
-  remoteWorkerUrl?: string;
   /** Every configured hook, by event. */
   hooks: { event: HookEvent; hook: HookConfig }[];
   lsp: { servers: Record<string, LspServerConfig>; scope: "project" | "global"; hasProjectDir: boolean };
@@ -106,8 +101,6 @@ export interface AppActions {
   pickTheme: (name: string | null) => void;
   pickShell: (shell: string | null) => void;
   generateChangelogImage: (owner: string, repo: string, days: number) => void;
-  /** Save multi-agent settings (as the Ink modal does). */
-  saveMultiAgent: (patch: MultiAgentSettings) => void;
   /** Save LSP servers (closes the LSP wizard). */
   saveLsp: (servers: Record<string, LspServerConfig>, enabled: boolean, scope: "project" | "global") => void;
   /** Reload hooks after the view changed settings.json; returns the fresh list. */
