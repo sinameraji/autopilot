@@ -59,7 +59,6 @@ describe("loadConfig", () => {
     "KIMI_MODEL",
     "KIMIFLARE_BASE_URL",
     "KIMIFLARE_API_KEY",
-    "KIMIFLARE_WORKER_BACKEND",
     "KIMIFLARE_SUBAGENT_POLICY",
     "REQUESTY_API_KEY",
     "XDG_CONFIG_HOME",
@@ -113,18 +112,6 @@ describe("loadConfig", () => {
     assert.strictEqual(cfg.model, DEFAULT_MODEL);
     assert.strictEqual(cfg.coauthorName, "autopilot");
     assert.strictEqual(cfg.coauthorEmail, "kimiflare@proton.me");
-  });
-
-  it("keeps remote workers as the compatibility default and supports explicit Hotcell opt-in", async () => {
-    process.env.OPENROUTER_API_KEY = "sk-or-env";
-    assert.strictEqual((await loadConfig())?.workerBackend, "remote");
-    process.env.KIMIFLARE_WORKER_BACKEND = "hotcell";
-    assert.strictEqual((await loadConfig())?.workerBackend, "hotcell");
-    delete process.env.KIMIFLARE_WORKER_BACKEND;
-    await writeConfigFile({ openrouterApiKey: "sk-or-file", workerBackend: "hotcell" });
-    assert.strictEqual((await loadConfig())?.workerBackend, "hotcell");
-    process.env.KIMIFLARE_WORKER_BACKEND = "remote";
-    assert.strictEqual((await loadConfig())?.workerBackend, "remote");
   });
 
   it("defaults subagent routing to auto, migrates the old implicit default, and preserves explicit choices", async () => {

@@ -1,4 +1,4 @@
-export type Mode = "edit" | "plan" | "auto" | "multi-agent-experimental";
+export type Mode = "edit" | "plan" | "auto";
 
 export const MODES: Mode[] = ["edit", "plan", "auto"];
 
@@ -15,8 +15,6 @@ export function modeDescription(m: Mode): string {
       return "plan — read-only research; blocks writes/edits/mutating bash until you exit plan mode";
     case "auto":
       return "auto — autonomous; auto-approves every tool call (use with care)";
-    case "multi-agent-experimental":
-      return "multi-agent — experimental; for heavy tasks, spawns parallel research workers automatically";
   }
 }
 
@@ -181,9 +179,6 @@ export function systemPromptForMode(m: Mode): string {
   }
   if (m === "auto") {
     return "\n\nAUTO MODE is active. The user has opted into autonomous execution — every tool call will be auto-approved. Work efficiently, but do not take irreversible destructive actions (rm -rf, git push --force, dropping tables, etc.) without pausing to describe them in chat first. Prefer smaller reversible steps.";
-  }
-  if (m === "multi-agent-experimental") {
-    return "\n\nMULTI-AGENT EXPERIMENTAL MODE is active. For heavy tasks, the coordinator will automatically spawn parallel research workers instead of handling everything locally. Do not manually call spawn_worker — the coordinator handles worker orchestration. For light or medium tasks, the turn runs locally with normal edit-mode permissions. When workers complete, their findings are synthesized into a coherent plan for your review.";
   }
   return "";
 }

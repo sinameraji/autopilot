@@ -77,8 +77,8 @@ export interface KimiConfig {
   apiKey?: string;
   /**
    * Cloudflare account id + API token (env: CLOUDFLARE_ACCOUNT_ID /
-   * CLOUDFLARE_API_TOKEN). Not used for model calls. Only `/multi-agent`
-   * Commute reads these, to deploy its Worker into the user's own account.
+   * CLOUDFLARE_API_TOKEN). Not used for model calls. Remote session
+   * deployment uses these credentials to provision infrastructure.
    */
   accountId?: string;
   apiToken?: string;
@@ -156,11 +156,7 @@ export interface KimiConfig {
    * picks Ink for one run). Kept so existing configs still load.
    */
   uiEngine?: "ink" | "camouflage";
-  /** Worker endpoint URL for spawning standalone research/executor workers. */
-  workerEndpoint?: string;
-  /** Worker provider. Remote remains the compatibility default. */
-  workerBackend?: "remote" | "hotcell";
-  /** Max cost per worker in USD (default: 1.0). */
+  /** Max cost per Hotcell worker in USD (default: 1.0). */
   workerBudgetUsd?: number;
   /** Hard ceiling for workerBudgetUsd. Any configured or programmatic value above this is silently capped. Default: 5.0. */
   workerBudgetMaxUsd?: number;
@@ -168,8 +164,6 @@ export interface KimiConfig {
   workerMaxParallel?: number;
   /** Timeout per worker in milliseconds (default: 300000 = 5 min). */
   workerTimeoutMs?: number;
-  /** Enable multi-agent-experimental mode in the mode cycle. Default: false. */
-  multiAgentEnabled?: boolean;
   /** Turn count at which KimiFlare suggests /fresh in auto/edit mode. 0 = disabled. Default: 30. */
   autoFreshSuggestionTurns?: number;
   /** If true, automatically execute /fresh when the threshold is hit instead of just suggesting it. Default: false. */
@@ -178,23 +172,6 @@ export interface KimiConfig {
   autoCompactTokenThreshold?: number;
   /** Estimated in-memory token threshold to trigger auto-fresh when compaction cannot reduce below this. Default: 2_000_000. */
   autoFreshTokenThreshold?: number;
-  /** Bearer/secret for the worker endpoint (sent as X-Worker-Api-Key). */
-  workerApiKey?: string;
-  /** Name of the deployed multi-agent Worker. Used for tear-down. */
-  workerName?: string;
-  /** When true, after plan workers synthesize, spawn one executor worker
-   *  to implement the synthesized plan and open a PR. Off by default. */
-  autoExecute?: boolean;
-  /** Use shallow clone (`--depth 1`) for sandbox workers. Default: true. */
-  workerShallowClone?: boolean;
-  /** Enable repo caching / reuse hints for the Commute worker. Default: true. */
-  workerRepoCache?: boolean;
-  /** Forward memory context to multi-agent workers. Default: true. */
-  workerProxyMemory?: boolean;
-  /** Forward LSP context to multi-agent workers. Default: false. */
-  workerProxyLsp?: boolean;
-  /** Forward MCP context to multi-agent workers. Default: false. */
-  workerProxyMcp?: boolean;
   /** Model used for LLM-based task decomposition in multi-agent mode.
    *  Default: DEFAULT_PLUMBING_MODEL (fast and cheap). */
   decompositionModel?: string;
@@ -396,30 +373,14 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     githubRefreshToken: persisted.githubRefreshToken,
     githubTokenExpiry: persisted.githubTokenExpiry,
     githubRepo: persisted.githubRepo,
-    workerEndpoint: process.env.KIMIFLARE_WORKER_ENDPOINT ?? persisted.workerEndpoint,
-    workerBackend:
-      process.env.KIMIFLARE_WORKER_BACKEND === "hotcell"
-        ? "hotcell"
-        : process.env.KIMIFLARE_WORKER_BACKEND === "remote"
-          ? "remote"
-          : persisted.workerBackend === "hotcell" ? "hotcell" : "remote",
     workerBudgetUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_USD") ?? persisted.workerBudgetUsd,
     workerBudgetMaxUsd: readNumberEnv("KIMIFLARE_WORKER_BUDGET_MAX_USD") ?? persisted.workerBudgetMaxUsd,
     workerMaxParallel: readNumberEnv("KIMIFLARE_WORKER_MAX_PARALLEL") ?? persisted.workerMaxParallel,
     workerTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_TIMEOUT_MS") ?? persisted.workerTimeoutMs,
-    multiAgentEnabled: readBooleanEnv("KIMIFLARE_MULTI_AGENT_ENABLED") ?? persisted.multiAgentEnabled,
     autoFreshSuggestionTurns: persisted.autoFreshSuggestionTurns,
     autoFreshEnabled: persisted.autoFreshEnabled,
     autoCompactTokenThreshold: persisted.autoCompactTokenThreshold,
     autoFreshTokenThreshold: persisted.autoFreshTokenThreshold,
-    workerApiKey: process.env.KIMIFLARE_WORKER_API_KEY ?? persisted.workerApiKey,
-    workerName: persisted.workerName,
-    autoExecute: readBooleanEnv("KIMIFLARE_AUTO_EXECUTE") ?? persisted.autoExecute,
-    workerShallowClone: readBooleanEnv("KIMIFLARE_WORKER_SHALLOW_CLONE") ?? persisted.workerShallowClone ?? true,
-    workerRepoCache: readBooleanEnv("KIMIFLARE_WORKER_REPO_CACHE") ?? persisted.workerRepoCache ?? true,
-    workerProxyMemory: persisted.workerProxyMemory,
-    workerProxyLsp: persisted.workerProxyLsp,
-    workerProxyMcp: persisted.workerProxyMcp,
     decompositionModel: m(persisted.decompositionModel) ?? requestyPlumbing,
     decompositionStrategy: persisted.decompositionStrategy,
     synthesisModel: m(persisted.synthesisModel),
@@ -564,7 +525,7 @@ export function resolveWorkerBudgetUsd(cfg: KimiConfig | null): number {
   const raw = cfg?.workerBudgetUsd ?? DEFAULT_WORKER_BUDGET_USD;
   if (raw <= 0) {
     throw new Error(
-      `Invalid workerBudgetUsd (${raw}). Must be > 0. Set via /multi-agent or KIMIFLARE_WORKER_BUDGET_USD.`,
+      `Invalid workerBudgetUsd (${raw}). Must be > 0. Set via KIMIFLARE_WORKER_BUDGET_USD.`,
     );
   }
   if (raw > HARD_CEILING) {

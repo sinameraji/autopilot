@@ -1,6 +1,6 @@
 # Hotcell-Backed Local Subagents for Autopilot
 
-**Status:** proposal; a manual two-sandbox spike was validated on 2026-09-28. Product integration is not implemented.
+**Status:** Historical proposal; the product now uses local Hotcell-only, read-only research workers. Remote worker routing and legacy Cloudflare multi-agent orchestration have been removed. See [docs/subagents.md](../subagents.md) for current behavior and setup.
 
 **Related code:** `src/tools/spawn-worker.ts`, `src/agent/supervisor.ts`, `src/agent/messages.ts`, `src/config.ts`
 
@@ -9,7 +9,7 @@
 
 ## Summary
 
-Add an optional **local Hotcell worker backend** alongside Autopilot's existing remote HTTP worker endpoint. A coordinator running on the user's machine should be able to launch several isolated Hotcell sandboxes, run one ordinary Autopilot agent in each, and collect typed results/artifacts for synthesis. This is not a replacement for the current remote `spawn_worker` path; it is a local execution provider for users who have Hotcell and want private, disposable workspaces on their own hardware.
+The implemented worker path is local Hotcell only: `spawn_worker` launches an isolated read-only research agent against a clean, committed repository snapshot. The coordinator remains responsible for implementation and review. The earlier remote HTTP worker and Cloudflare multi-agent designs described below are historical and are not active product paths.
 
 The coordinator owns the user conversation. Each worker receives a specific, bounded mission, the project/model context it needs, and an explicit resource/permission budget. Workers must not share a writable checkout. The parent reviews and integrates results; a sandbox must not silently commit, push, publish, send mail, or perform another external side effect.
 

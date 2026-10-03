@@ -159,7 +159,7 @@ async function runKimiText(opts: {
  * Generate a mode-aware continuation summary for `/fresh`.
  *
  * - `plan` mode: returns the distilled plan text (fast, no LLM call).
- * - `auto` / `edit` / `multi-agent-experimental`: gathers evidence and makes
+ * - `auto` / `edit`: gathers evidence and makes
  *   one lightweight LLM call to produce a handoff document.
  */
 export async function generateContinuationSummary(
@@ -171,7 +171,7 @@ export async function generateContinuationSummary(
     return distillSessionPlan(messages);
   }
 
-  // For auto / edit / multi-agent-experimental, build a handoff document
+  // For auto / edit, build a handoff document
   const goal = extractFirstUserGoal(messages);
   const recentAssistant = extractRecentAssistantMessages(messages);
   const gitEvidence = gatherGitEvidence();

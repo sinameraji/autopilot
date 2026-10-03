@@ -61,8 +61,6 @@ export interface AgentCallbacks {
   onRunYield?: (request: RunWaitRequest) => void;
   /** Called when a durable run budget is exhausted at a tool boundary. */
   onRunBudgetExceeded?: (reason: string) => void;
-  /** Called when worker status changes during multi-agent orchestration. */
-  onWorkersUpdated?: (workers: import("./supervisor.js").ActiveWorker[]) => void;
 }
 
 /** Credentials come in as `LlmAuth` fields — spread `llmAuthFromConfig(cfg)`. */

@@ -10,7 +10,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "jev", argHint: "[yes|choose|score]", description: "Ask Jev for a one-shot decision with scoped chat/project context", source: "builtin" },
   { name: "subagents", argHint: "[off|suggest|auto]", description: "Control proactive delegation for substantial independent work", source: "builtin" },
   { name: "mode", argHint: "[edit|plan|auto]", description: "Switch agent mode", source: "builtin" },
-  { name: "multi-agent", argHint: "[enable|disable|status|setup]", description: "Configure multi-agent (endpoint, auto-implement, set up)", source: "builtin" },
+  { name: "multi-agent", argHint: "[status]", description: "Legacy remote worker setup is disabled; use local Hotcell subagents", source: "builtin" },
   { name: "theme", argHint: "[<name>]", description: "Switch color theme", source: "builtin" },
   // Ink is the only UI engine; handler remains for manual use.
   { name: "memory", argHint: "[on|off|clear|search ...]", description: "Manage memory", source: "builtin" },

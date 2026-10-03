@@ -28,8 +28,6 @@ import { formatContext, formatModelPrice } from "./ui/model-picker.js";
 import { CATEGORIES, SINGLE_COMMANDS } from "./ui/help-menu.js";
 import { FEEDBACK_WORKER_URL, openBrowser } from "./ui/app-helpers.js";
 import { registerTerminalHandoff } from "./ui/bang-command.js";
-import { deployCommute, teardownCommute, findExistingCommuteWorkers } from "./remote/deploy-commute.js";
-import type { MultiAgentSettings } from "./ui/multi-agent-modal.js";
 import { loadRemoteSessions, formatSessionLine, formatTokens } from "./ui/remote-dashboard.js";
 import { cancelRemoteSession } from "./remote/worker-client.js";
 import { PRESETS as LSP_PRESETS } from "./ui/lsp-wizard.js";
@@ -699,9 +697,6 @@ class View implements AppBridge {
           ], "7");
           if (days) a.generateChangelogImage(owner, name, Number(days));
         });
-      case "multiAgent":
-        a.closeModal("multiAgent");
-        return want("multiAgent", () => this.multiAgent(s.multiAgent, s.remoteWorkerUrl));
       case "remoteDashboard":
         a.closeModal("remoteDashboard");
         return want("remoteDashboard", () => this.remoteDashboard());
@@ -812,81 +807,6 @@ class View implements AppBridge {
   }
 
   /**
-   * /multi-agent settings (Ink's MultiAgentModal): toggles flip in place,
-   * text fields open a form, Set up / Tear down stream their progress into
-   * the transcript. Loops until the user leaves.
-   */
-  private async multiAgent(initial: MultiAgentSettings, remoteUrl?: string): Promise<void> {
-    let st: MultiAgentSettings = { ...initial };
-    const save = (patch: MultiAgentSettings) => {
-      st = { ...st, ...patch };
-      this.actions?.saveMultiAgent(patch);
-    };
-    const say = (message: string, severity: "info" | "warn" | "error" = "info") => this.cam.send("RuntimeError", { message, severity });
-    const stream = async (steps: AsyncIterable<{ message: string; error?: boolean; done?: boolean; ok?: boolean }>, onDone: () => void) => {
-      try {
-        for await (const step of steps) {
-          say(`${step.error ? "✗" : step.done || step.ok ? "✓" : "·"} ${step.message}`, step.error ? "error" : "info");
-          if (step.done) onDone();
-          if (step.error) break;
-        }
-      } catch (err) {
-        say(`✗ ${err instanceof Error ? err.message : String(err)}`, "error");
-      }
-    };
-    for (;;) {
-      const endpoint = st.workerEndpoint ?? "";
-      const options: PickOption[] = [
-        { value: "enabled", label: "Multi-agent mode", state: st.multiAgentEnabled ? "on" : "off" },
-        { value: "endpoint", label: "Endpoint", description: endpoint || (remoteUrl ? `${remoteUrl} (via /remote)` : "not set") },
-        { value: "secret", label: "Worker secret", description: st.workerApiKey ? "•".repeat(8) : "not set" },
-        { value: "autoExecute", label: "Auto-implement after research", state: st.autoExecute ? "on" : "off" },
-        { value: "deploy", label: "Set up", description: "deploys to your Cloudflare account, one-time" },
-      ];
-      if (endpoint) options.push({ value: "teardown", label: "Tear down", description: "delete from your Cloudflare account" });
-      const r = await this.select("Multi-agent", options);
-      if (r === null) return;
-      if (r === "enabled") save({ multiAgentEnabled: !st.multiAgentEnabled });
-      else if (r === "autoExecute") save({ autoExecute: !st.autoExecute });
-      else if (r === "endpoint" || r === "secret") {
-        const f = await this.sdk.form(this.cam, {
-          id: `ma-${Date.now()}`,
-          title: r === "endpoint" ? "Worker endpoint" : "Worker secret",
-          fields: [
-            r === "endpoint"
-              ? { name: "v", label: "Endpoint", default: endpoint, placeholder: "https://<your-worker>.workers.dev" }
-              : { name: "v", label: "Secret", kind: "password", default: st.workerApiKey ?? "" },
-          ],
-        });
-        if (!f.cancelled && f.values) {
-          const v = f.values.v?.trim() || undefined;
-          save(r === "endpoint" ? { workerEndpoint: v } : { workerApiKey: v });
-        }
-      } else if (r === "deploy") {
-        say("Scanning your Cloudflare account for existing Workers…");
-        const existing = await findExistingCommuteWorkers().catch(() => [] as string[]);
-        let workerName: string | undefined;
-        if (existing.length > 0) {
-          const pick = await this.select("Deploy to", [
-            ...existing.map((n) => ({ value: n, label: `Reuse ${n}` })),
-            { value: "", label: "Create new: kimiflare-multi-agent", description: "recommended — isolated" },
-          ], "");
-          if (pick === null) continue;
-          workerName = pick || undefined;
-        }
-        say(`Starting deploy${workerName ? ` to ${workerName}` : ""}…`);
-        await stream(deployCommute({ workerName }), () => save({ multiAgentEnabled: true }));
-      } else if (r === "teardown") {
-        const ok = await this.sdk.confirm(this.cam, { id: `td-${Date.now()}`, prompt: "Delete the multi-agent worker from your Cloudflare account?", default: "no" });
-        if (!ok.value) continue;
-        say("Starting tear-down…");
-        await stream(teardownCommute({ workerName: st.workerName }), () =>
-          save({ workerEndpoint: undefined, workerApiKey: undefined, workerName: undefined, multiAgentEnabled: false, autoExecute: false }),
-        );
-      }
-    }
-  }
-
   /** /hooks (Ink's HooksDashboard + HooksWizard): Enter toggles a
    *  configured hook or installs a recommended one; loops until Esc. */
   private async hooksDashboard(initial: AppSnapshot["hooks"]): Promise<void> {
@@ -1358,7 +1278,6 @@ function modalName(m: AppModal): string {
     lspWizard: "The LSP setup wizard",
     remoteDashboard: "The remote dashboard",
     inbox: "The inbox",
-    multiAgent: "Multi-agent settings",
     hooksDashboard: "The hooks dashboard",
     changelogImage: "/changelog-image",
   };
