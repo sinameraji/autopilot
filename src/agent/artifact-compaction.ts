@@ -29,8 +29,10 @@ export interface CompactionResult {
 
 interface Turn {
   user: ChatMessage;
-  assistant: ChatMessage;
+  assistants: ChatMessage[];
   tools: ChatMessage[];
+  /** Preserve every message in the turn, including interstitial system messages. */
+  messages: ChatMessage[];
 }
 
 // Approximate tokens from a character count. Char-per-token of 4 is the
@@ -63,36 +65,29 @@ export function estimatePromptTokens(messages: ChatMessage[]): number {
   return messages.reduce((sum, m) => sum + estimateMessageTokens(m), 0);
 }
 
-/** Group messages into turns: user → assistant → [tool...].
- *  Returns turns and any prefix messages (leading system messages). */
+/** Group each user message with all following messages up to the next user.
+ *  Turns can contain interstitial system context and multiple assistant/tool
+ *  cycles, so grouping by a fixed user → assistant → tool pattern loses data. */
 function groupIntoTurns(messages: ChatMessage[]): { prefix: ChatMessage[]; turns: Turn[] } {
-  const prefix: ChatMessage[] = [];
-  let i = 0;
-  while (i < messages.length && messages[i]!.role === "system") {
-    prefix.push(messages[i]!);
-    i++;
-  }
+  const firstUserIndex = messages.findIndex((message) => message.role === "user");
+  if (firstUserIndex === -1) return { prefix: messages, turns: [] };
 
+  const prefix = messages.slice(0, firstUserIndex);
   const turns: Turn[] = [];
-  while (i < messages.length) {
-    if (messages[i]!.role !== "user") {
-      i++;
-      continue;
-    }
-    const user = messages[i]!;
-    i++;
-    if (i >= messages.length || messages[i]!.role !== "assistant") {
-      // Incomplete turn — treat as orphaned user message, skip
-      continue;
-    }
-    const assistant = messages[i]!;
-    i++;
-    const tools: ChatMessage[] = [];
-    while (i < messages.length && messages[i]!.role === "tool") {
-      tools.push(messages[i]!);
-      i++;
-    }
-    turns.push({ user, assistant, tools });
+  let start = firstUserIndex;
+
+  while (start < messages.length) {
+    const user = messages[start]!;
+    let end = start + 1;
+    while (end < messages.length && messages[end]!.role !== "user") end++;
+    const turnMessages = messages.slice(start, end);
+    turns.push({
+      user,
+      assistants: turnMessages.filter((message) => message.role === "assistant"),
+      tools: turnMessages.filter((message) => message.role === "tool"),
+      messages: turnMessages,
+    });
+    start = end;
   }
 
   return { prefix, turns };
@@ -114,12 +109,14 @@ function extractArtifactsFromTurn(turn: Turn, startIndex: number, store: Artifac
     next_actions: [],
   };
 
-  // Parse assistant tool calls to understand what was requested
-  const toolCalls: ToolCall[] = turn.assistant.tool_calls ?? [];
+  // Match tool results against calls across every assistant cycle in the turn.
+  const toolCallsById = new Map<string, ToolCall>(
+    turn.assistants.flatMap((assistant) => assistant.tool_calls ?? []).map((call) => [call.id, call]),
+  );
 
   for (let ti = 0; ti < turn.tools.length; ti++) {
     const tm = turn.tools[ti]!;
-    const tc = toolCalls[ti];
+    const tc = tm.tool_call_id ? toolCallsById.get(tm.tool_call_id) : undefined;
     const name = tm.name ?? tc?.function.name ?? "unknown";
     const content = typeof tm.content === "string" ? tm.content : "";
 
@@ -214,8 +211,11 @@ function extractArtifactsFromTurn(turn: Turn, startIndex: number, store: Artifac
     }
   }
 
-  // Extract decisions from assistant text
-  const assistantText = typeof turn.assistant.content === "string" ? turn.assistant.content : "";
+  // Extract decisions from all assistant messages in the turn.
+  const assistantText = turn.assistants
+    .map((assistant) => (typeof assistant.content === "string" ? assistant.content : ""))
+    .filter(Boolean)
+    .join("\n");
   if (assistantText.length > 0) {
     // Look for decision-like sentences
     const decisionPatterns = [
@@ -331,11 +331,7 @@ export function compactMessagesViaArtifacts(opts: CompactionOpts): CompactionRes
   // Build new message array
   const workingMemory: ChatMessage[] = [];
   for (const turn of toKeep) {
-    workingMemory.push(turn.user);
-    workingMemory.push(turn.assistant);
-    for (const tm of turn.tools) {
-      workingMemory.push(tm);
-    }
+    workingMemory.push(...turn.messages);
   }
 
   const stateMsg = buildSessionStateMessage(newState);

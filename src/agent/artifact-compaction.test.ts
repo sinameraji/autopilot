@@ -104,6 +104,47 @@ describe("compactMessagesViaArtifacts", () => {
     assert.ok(result.newMessages[2]!.content?.toString().includes("compiled session state"));
   });
 
+  it("counts and preserves complete turns with interstitial system messages and tool cycles", () => {
+    const messages: ChatMessage[] = [{ role: "system", content: "sys" }];
+    const turns: ChatMessage[][] = [];
+    for (let i = 0; i < 100; i++) {
+      const callId = `tc_${i}`;
+      const turn: ChatMessage[] = [
+        { role: "user", content: `question ${i}` },
+        // Artifact recall can insert a system message after the user prompt.
+        { role: "system", content: `recalled context ${i}` },
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [{
+            id: callId,
+            type: "function",
+            function: { name: "read", arguments: JSON.stringify({ path: `src/file${i}.ts` }) },
+          }],
+        },
+        { role: "tool", tool_call_id: callId, name: "read", content: `result ${i}` },
+        { role: "assistant", content: `final answer ${i}` },
+      ];
+      messages.push(...turn);
+      turns.push(turn);
+    }
+
+    assert.strictEqual(shouldCompact({ messages, tokenThreshold: 1_000_000, turnThreshold: 5 }), true);
+
+    const result = compactMessagesViaArtifacts({
+      messages,
+      state: emptySessionState(),
+      store: new ArtifactStore(),
+      keepLastTurns: 2,
+    });
+
+    assert.strictEqual(result.metrics.rawTurnsRemoved, 98);
+    assert.strictEqual(result.metrics.rawTurnsKept, 2);
+    assert.deepStrictEqual(result.newMessages.slice(-turns.slice(-2).flat().length), turns.slice(-2).flat());
+    assert.ok(result.newMessages.some((m) => m.content === "final answer 98"));
+    assert.ok(result.newMessages.some((m) => m.content === "final answer 99"));
+  });
+
   it("extracts decisions from assistant text", () => {
     const messages: ChatMessage[] = [
       { role: "system", content: "sys" },
