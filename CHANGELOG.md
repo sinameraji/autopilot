@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.1](https://github.com/sinameraji/autopilot/compare/v1.12.0...v1.12.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **ui:** deduplicate Camouflage events ([798161e](https://github.com/sinameraji/autopilot/commit/798161e7d4ce5d41c3fa175c38de0a26b9436d83))
+* **ui:** deduplicate Camouflage UI events ([8e21e7f](https://github.com/sinameraji/autopilot/commit/8e21e7f1b7052cf8d8658e1c0def43164d0e7a2a))
+
 ## [1.12.0](https://github.com/sinameraji/autopilot/compare/v1.11.0...v1.12.0) (2026-10-03)
 
 
