@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export type AsterScope = "workspaces:read" | "models:read" | "conversations:read" | "conversations:write" | "approvals:resolve";
-export type AsterConversationStatus = "ready" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted";
+export type AsterConversationStatus = "provisioning" | "ready" | "running" | "waiting_approval" | "completed" | "failed" | "cancelled" | "interrupted" | "paused" | "destroying" | "cleanup_pending" | "destroyed";
 export type AsterApprovalStatus = "pending" | "approved" | "denied" | "expired" | "cancelled";
 
 export interface AsterPrincipal {
@@ -31,6 +31,26 @@ export interface AsterConversation {
   createdAt: number;
   updatedAt: number;
 }
+
+export interface AsterCellMapping {
+  conversationId: string;
+  credentialId: string;
+  workspaceId: string;
+  model: string;
+  sessionId: string;
+  cellName: string;
+  cellId: string | null;
+  status: "provisioning" | "ready" | "running" | "paused" | "destroying" | "cleanup_pending" | "destroyed" | "failed";
+  createAttempted: boolean;
+  eventCursor: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type AsterCellReservation =
+  | { kind: "created"; mapping: AsterCellMapping }
+  | { kind: "replay"; mapping: AsterCellMapping }
+  | { kind: "conflict" };
 
 export interface AsterEvent {
   sequence: number;
@@ -209,12 +229,98 @@ export class AsterStore {
         created_at INTEGER NOT NULL,
         PRIMARY KEY (conversation_id, client_turn_id)
       );
+      CREATE TABLE IF NOT EXISTS aster_cell_mappings (
+        conversation_id TEXT PRIMARY KEY,
+        credential_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        session_id TEXT NOT NULL UNIQUE,
+        cell_name TEXT NOT NULL UNIQUE,
+        cell_id TEXT,
+        create_key_hash TEXT NOT NULL,
+        create_fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL,
+        create_attempted INTEGER NOT NULL DEFAULT 0,
+        event_cursor INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(credential_id, create_key_hash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_aster_cells_lifecycle ON aster_cell_mappings(status, updated_at);
     `);
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
 
   close(): void {
     this.db.close();
+  }
+
+  reserveCellConversation(input: {
+    conversationId: string;
+    credentialId: string;
+    workspaceId: string;
+    model: string;
+    sessionId: string;
+    cellName: string;
+    idempotencyKey: string;
+  }): AsterCellReservation {
+    const keyHash = createHash("sha256").update(input.idempotencyKey).digest("hex");
+    const fingerprint = createHash("sha256").update(JSON.stringify([input.workspaceId, input.model])).digest("hex");
+    const reserve = this.db.transaction((): AsterCellReservation => {
+      const existing = this.db.prepare("SELECT * FROM aster_cell_mappings WHERE credential_id = ? AND create_key_hash = ?")
+        .get(input.credentialId, keyHash) as Record<string, unknown> | undefined;
+      if (existing) {
+        const mapping = cellMappingFromRow(existing);
+        return mapping.workspaceId === input.workspaceId && mapping.model === input.model
+          ? { kind: "replay", mapping }
+          : { kind: "conflict" };
+      }
+      const now = Date.now();
+      this.db.prepare(`INSERT INTO aster_cell_mappings
+        (conversation_id, credential_id, workspace_id, model, session_id, cell_name, create_key_hash, create_fingerprint, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'provisioning', ?, ?)`)
+        .run(input.conversationId, input.credentialId, input.workspaceId, input.model, input.sessionId, input.cellName, keyHash, fingerprint, now, now);
+      return { kind: "created", mapping: this.getCellMapping(input.conversationId)! };
+    });
+    return reserve.immediate();
+  }
+
+  getCellMapping(conversationId: string): AsterCellMapping | undefined {
+    const row = this.db.prepare("SELECT * FROM aster_cell_mappings WHERE conversation_id = ?").get(conversationId) as Record<string, unknown> | undefined;
+    return row ? cellMappingFromRow(row) : undefined;
+  }
+
+  listCellMappings(): AsterCellMapping[] {
+    const rows = this.db.prepare("SELECT * FROM aster_cell_mappings ORDER BY created_at").all() as Array<Record<string, unknown>>;
+    return rows.map(cellMappingFromRow);
+  }
+
+  getCredentialCellMapping(conversationId: string, credentialId: string): AsterCellMapping | undefined {
+    const row = this.db.prepare("SELECT * FROM aster_cell_mappings WHERE conversation_id = ? AND credential_id = ?")
+      .get(conversationId, credentialId) as Record<string, unknown> | undefined;
+    return row ? cellMappingFromRow(row) : undefined;
+  }
+
+  markCellCreateAttempted(conversationId: string): void {
+    this.db.prepare("UPDATE aster_cell_mappings SET create_attempted = 1, updated_at = ? WHERE conversation_id = ?")
+      .run(Date.now(), conversationId);
+  }
+
+  setCellId(conversationId: string, cellId: string): void {
+    this.db.prepare("UPDATE aster_cell_mappings SET cell_id = ?, updated_at = ? WHERE conversation_id = ?")
+      .run(cellId, Date.now(), conversationId);
+  }
+
+  setCellStatus(conversationId: string, status: AsterCellMapping["status"]): void {
+    this.db.prepare("UPDATE aster_cell_mappings SET status = ?, updated_at = ? WHERE conversation_id = ?")
+      .run(status, Date.now(), conversationId);
+  }
+
+  advanceCellEventCursor(conversationId: string, cursor: number): boolean {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("invalid Hotcell event cursor");
+    const result = this.db.prepare("UPDATE aster_cell_mappings SET event_cursor = ?, updated_at = ? WHERE conversation_id = ? AND event_cursor < ?")
+      .run(cursor, Date.now(), conversationId, cursor);
+    return result.changes === 1;
   }
 
   createCredential(input: { name: string; workspaceIds: string[]; scopes: AsterScope[]; expiresAt: number }): CreatedAsterCredential {
@@ -359,6 +465,18 @@ export class AsterStore {
     return update.immediate();
   }
 
+  setConversationStatus(conversationId: string, status: AsterConversationStatus, data: Record<string, unknown> = {}): boolean {
+    const update = this.db.transaction(() => {
+      const now = Date.now();
+      const result = this.db.prepare("UPDATE aster_conversations SET status = ?, updated_at = ? WHERE id = ? AND active_run_id IS NULL")
+        .run(status, now, conversationId);
+      if (result.changes !== 1) return false;
+      this.insertEvent(conversationId, null, "status", { status, ...data }, now);
+      return true;
+    });
+    return update.immediate();
+  }
+
   appendEvent(conversationId: string, runId: string | null, type: string, data: Record<string, unknown>): AsterEvent {
     const append = this.db.transaction(() => this.insertEvent(conversationId, runId, type, data, Date.now()));
     return append.immediate();
@@ -481,6 +599,23 @@ function defaultAsterDbPath(): string {
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function cellMappingFromRow(row: Record<string, unknown>): AsterCellMapping {
+  return {
+    conversationId: row.conversation_id as string,
+    credentialId: row.credential_id as string,
+    workspaceId: row.workspace_id as string,
+    model: row.model as string,
+    sessionId: row.session_id as string,
+    cellName: row.cell_name as string,
+    cellId: (row.cell_id as string | null) ?? null,
+    status: row.status as AsterCellMapping["status"],
+    createAttempted: row.create_attempted === 1,
+    eventCursor: row.event_cursor as number,
+    createdAt: row.created_at as number,
+    updatedAt: row.updated_at as number,
+  };
 }
 
 function rowToConversation(row: ConversationRow): AsterConversation {

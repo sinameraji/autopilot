@@ -11,15 +11,18 @@ import { URL } from "node:url";
 import type { KimiConfig } from "../config.js";
 import { logger } from "../util/logger.js";
 import { setupRoutes } from "./routes.js";
+import type { AsterApiRuntime } from "./aster-api.js";
 
 export interface ServerOpts {
   port: number;
   hostname: string;
   config: KimiConfig;
+  /** Injectable Aster runtime; defaults to the Hotcell-backed runtime when its env is configured. */
+  asterRuntime?: AsterApiRuntime;
 }
 
 export async function startServer(opts: ServerOpts): Promise<Server> {
-  const { handleRequest, cleanup } = setupRoutes(opts.config);
+  const { handleRequest, cleanup } = setupRoutes(opts.config, { asterRuntime: opts.asterRuntime });
 
   const server = createServer((req, res) => {
     const isAsterApi = req.url?.startsWith("/api/v1/") === true;

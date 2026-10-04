@@ -28,8 +28,19 @@ import { RunStore } from "../runs/store.js";
 import { RunWorktreeManager, type RunWorktree } from "../runs/worktrees.js";
 import { RunWakeScheduler, type RunWakeEvent } from "../runs/wake-scheduler.js";
 import type { RunBudgetUpdate, RunRecord } from "../runs/store.js";
-import { AsterApi } from "./aster-api.js";
+import { AsterApi, type AsterApiRuntime } from "./aster-api.js";
+import { AsterHotcellRuntime } from "./aster-cell-runtime.js";
+import { HotcellProvider, HotcellProviderError } from "./hotcell-provider.js";
 import { redactLikelySecrets } from "./aster-tools.js";
+
+function createHotcellAsterRuntime(): AsterApiRuntime | undefined {
+  try {
+    return new AsterHotcellRuntime(HotcellProvider.fromEnvironment());
+  } catch (error) {
+    if (error instanceof HotcellProviderError && error.code === "hotcell_not_configured") return undefined;
+    throw error;
+  }
+}
 
 interface ActiveSession {
   sessionFile: SessionFile;
@@ -163,7 +174,7 @@ async function buildUserMessage(prompt: string, files: string[], cwd: string): P
   return text;
 }
 
-export function setupRoutes(config: KimiConfig) {
+export function setupRoutes(config: KimiConfig, options: { asterRuntime?: AsterApiRuntime } = {}) {
   async function getOrRestoreActiveRun(run: RunRecord): Promise<ActiveSession> {
     if (!run.sessionId) throw new Error("Cannot restore run without a session id: " + run.id);
     const existing = activeRuns.get(run.id) ?? activeSessions.get(run.sessionId);
@@ -213,28 +224,10 @@ export function setupRoutes(config: KimiConfig) {
       store.close();
     }
   }
-  const asterApi = new AsterApi(config, {
-    startTurn: (turn) => {
-      const active: ActiveSession = {
-        sessionFile: turn.sessionFile,
-        messages: turn.messages,
-        executor: turn.executor,
-        sseClients: new Set(),
-        runId: turn.runId,
-        allowedTools: turn.allowedTools,
-        maxToolIterations: turn.maxToolIterations,
-        maxRuntimeMs: turn.maxRuntimeMs,
-        conversationId: turn.conversation.id,
-        workspaceRoot: turn.conversation.worktreePath,
-        askAsterPermission: turn.askPermission,
-        publishAsterEvent: turn.publishEvent,
-        finishAsterTurn: turn.finish,
-      };
-      activeSessions.set(turn.sessionFile.id, active);
-      activeRuns.set(turn.runId, active);
-      launchAgentTurnForSession(active, config, false);
-    },
-    cancelRun: (runId) => activeRuns.get(runId)?.controller?.abort(new Error("cancelled_by_aster_client")),
+  const asterRuntime = options.asterRuntime ?? createHotcellAsterRuntime();
+  const asterApi = new AsterApi(config, asterRuntime ?? {
+    startTurn: (turn) => turn.finish("failed", "hotcell_unavailable"),
+    cancelRun: () => {},
   });
 
   const wakeScheduler = new RunWakeScheduler({

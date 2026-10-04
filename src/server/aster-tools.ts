@@ -52,6 +52,33 @@ export async function assertAsterWorkspacePath(workspaceRoot: string, value: unk
   return candidate;
 }
 
+export function assertAsterCellPath(value: unknown): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error("workspace_path_invalid");
+  const root = "/workspace";
+  const candidate = value.startsWith("/") ? posixNormalize(value) : posixNormalize(`${root}/${value}`);
+  if (candidate !== root && !candidate.startsWith(root + "/")) throw new Error("workspace_path_forbidden");
+  const parts = candidate.slice(root.length).split("/").filter(Boolean).map((part) => part.toLowerCase());
+  if (parts.some((part) => part === ".env" || part.startsWith(".env.") || SENSITIVE_NAMES.has(part))) {
+    throw new Error("workspace_sensitive_path_forbidden");
+  }
+  return candidate;
+}
+
+function posixNormalize(value: string): string {
+  const parts = value.split("/");
+  const out: string[] = [];
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (out.length === 0) return "/__escape__";
+      out.pop();
+      continue;
+    }
+    out.push(part);
+  }
+  return "/" + out.join("/");
+}
+
 export function containsLikelyProviderSecret(value: string): boolean {
   return /(?:sk-or-(?:v1-)?[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:CLOUDFLARE|OPENROUTER|REQUESTY)_API_(?:KEY|TOKEN)\s*=)/i.test(value);
 }

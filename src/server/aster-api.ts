@@ -13,12 +13,13 @@ import { loadSession, saveSession, sessionsDir, type SessionFile } from "../sess
 import { getAppVersion } from "../util/version.js";
 import { AsterStore, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
 import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig } from "./aster-workspaces.js";
-import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterWorkspacePath } from "./aster-tools.js";
+import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_USER_TURN_CHARS = 20_000;
 const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CREATE_IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_APPROVAL_ARG_BYTES = 24 * 1024;
 const CONVERSATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_ASTER_TOOLS = ["read", "write", "edit"] as const;
@@ -26,6 +27,9 @@ const ALLOWED_ASTER_TOOLS = ["read", "write", "edit"] as const;
 export interface AsterTurnStart {
   runId: string;
   conversation: AsterConversation;
+  cellId: string;
+  cellEventCursor: number;
+  userText: string;
   sessionFile: SessionFile;
   messages: ChatMessage[];
   executor: ToolExecutor;
@@ -34,10 +38,16 @@ export interface AsterTurnStart {
   maxRuntimeMs: number | null;
   askPermission: (request: PermissionRequest) => Promise<PermissionDecision>;
   publishEvent: (type: string, data: Record<string, unknown>) => void;
+  onCellCursor?: (cursor: number) => void;
   finish: (status: "completed" | "failed" | "cancelled", reason?: string) => void;
 }
 
 export interface AsterApiRuntime {
+  provisionConversation?: (input: { conversationId: string; sessionId: string; cellName: string; workspaceId: string; workspaceRoot: string; model: string; allowCreate: boolean; onCellCreated: (cellId: string) => void }) => Promise<{ cellId: string }>;
+  findConversationCell?: (conversationId: string) => Promise<{ cellId: string } | undefined>;
+  destroyCell?: (cellId: string) => Promise<void>;
+  pauseCell?: (cellId: string) => Promise<void>;
+  resumeCell?: (cellId: string) => Promise<void>;
   startTurn: (turn: AsterTurnStart) => void;
   cancelRun: (runId: string) => void;
 }
@@ -86,7 +96,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals"],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy"],
         });
       }
 
@@ -118,7 +128,11 @@ export class AsterApi {
         if (typeof body.model !== "string" || !config.models.includes(body.model)) {
           return sendError(res, 400, "model_not_allowed", "Select a model from the configured model list");
         }
-        return await this.createConversation(res, store, workspace, body.model);
+        const idempotencyKey = req.headers["idempotency-key"];
+        if (typeof idempotencyKey !== "string" || !CREATE_IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
+          return sendError(res, 400, "idempotency_key_required", "Conversation creation requires an Idempotency-Key header of 1-128 safe characters");
+        }
+        return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey);
       }
 
       const eventsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/events$/);
@@ -156,7 +170,23 @@ export class AsterApi {
         return this.cancelConversation(res, store, conversation);
       }
 
+      const lifecycleMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/(pause|resume)$/);
+      if (lifecycleMatch && method === "POST") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const conversation = await this.authorizedConversation(store, principal, lifecycleMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        return lifecycleMatch[2] === "pause"
+          ? this.pauseConversation(res, store, conversation)
+          : this.resumeConversation(res, store, conversation);
+      }
+
       const conversationMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)$/);
+      if (conversationMatch && method === "DELETE") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const conversation = await this.authorizedConversation(store, principal, conversationMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        return this.destroyConversation(res, store, conversation);
+      }
       if (conversationMatch && method === "GET") {
         if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
         const conversation = await this.authorizedConversation(store, principal, conversationMatch[1]!);
@@ -170,7 +200,8 @@ export class AsterApi {
         const approval = store.getApproval(approvalMatch[1]!);
         if (!approval) return sendError(res, 404, "approval_not_found", "Approval not found");
         const conversation = store.getConversation(approval.conversationId);
-        if (!conversation || !principal.workspaceIds.includes(conversation.workspaceId)) return sendError(res, 404, "approval_not_found", "Approval not found");
+        const mapping = store.getCellMapping(approval.conversationId);
+        if (!conversation || mapping?.credentialId !== principal.credentialId || !principal.workspaceIds.includes(conversation.workspaceId)) return sendError(res, 404, "approval_not_found", "Approval not found");
         return json(res, 200, publicApproval(approval));
       }
       if (approvalMatch && method === "POST") {
@@ -178,7 +209,8 @@ export class AsterApi {
         const approval = store.getApproval(approvalMatch[1]!);
         if (!approval) return sendError(res, 404, "approval_not_found", "Approval not found");
         const conversation = store.getConversation(approval.conversationId);
-        if (!conversation || !principal.workspaceIds.includes(conversation.workspaceId)) return sendError(res, 404, "approval_not_found", "Approval not found");
+        const mapping = store.getCellMapping(approval.conversationId);
+        if (!conversation || mapping?.credentialId !== principal.credentialId || !principal.workspaceIds.includes(conversation.workspaceId)) return sendError(res, 404, "approval_not_found", "Approval not found");
         const body = await readJsonBody(req);
         if (Object.keys(body).some((key) => key !== "decision")) return sendError(res, 400, "unsupported_field", "Approval resolution accepts decision only");
         if (body.decision !== "allow" && body.decision !== "deny") return sendError(res, 400, "invalid_approval_decision", "decision must be allow or deny");
@@ -214,7 +246,8 @@ export class AsterApi {
   private async authorizedConversation(store: AsterStore, principal: AsterPrincipal, id: string): Promise<AsterConversation | undefined> {
     if (!CONVERSATION_ID_RE.test(id)) return undefined;
     const conversation = store.getConversation(id);
-    if (!conversation || !principal.workspaceIds.includes(conversation.workspaceId)) return undefined;
+    const mapping = store.getCellMapping(id);
+    if (!conversation || mapping?.credentialId !== principal.credentialId || !principal.workspaceIds.includes(conversation.workspaceId)) return undefined;
     const activeRunId = conversation.activeRunId;
     if (activeRunId) {
       const runs = new RunStore();
@@ -264,48 +297,87 @@ export class AsterApi {
     return this.recovery;
   }
 
-  private async createConversation(res: ServerResponse, store: AsterStore, workspace: { id: string; displayName: string; rootPath: string }, model: string): Promise<void> {
-    const id = randomUUID();
-    const sessionId = randomUUID();
-    const worktreeManager = new RunWorktreeManager();
-    let worktree;
-    try {
-      worktree = await worktreeManager.create(id, workspace.rootPath);
-    } catch {
-      sendError(res, 409, "workspace_repository_unavailable", "Configured workspace must be an accessible Git repository");
-      return;
-    }
-    const tools = createAsterTools(worktree.cwd);
-    const messages: ChatMessage[] = [
-      { role: "system", content: buildSystemPrompt({ cwd: worktree.cwd, tools, model, preferPullRequests: true }) },
-      { role: "system", content: "You are operating through Aster. Only read, write, and edit tools are available. All file access is confined to the selected workspace. Never request, reveal, store, or repeat provider credentials or secrets." },
-    ];
-    const sessionFile: SessionFile = {
-      id: sessionId,
-      cwd: worktree.cwd,
+  private async createConversation(
+    res: ServerResponse,
+    store: AsterStore,
+    principal: AsterPrincipal,
+    workspace: { id: string; displayName: string; rootPath: string },
+    model: string,
+    idempotencyKey: string,
+  ): Promise<void> {
+    const candidateId = randomUUID();
+    const candidateSessionId = randomUUID();
+    const reservation = store.reserveCellConversation({
+      conversationId: candidateId,
+      credentialId: principal.credentialId,
+      workspaceId: workspace.id,
       model,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      messages,
-      title: "Aster conversation",
-    };
+      sessionId: candidateSessionId,
+      cellName: `aster-${candidateId}`,
+      idempotencyKey,
+    });
+    if (reservation.kind === "conflict") return sendError(res, 409, "idempotency_conflict", "Idempotency-Key was already used for different conversation parameters");
+
+    const mapping = reservation.mapping;
+    if (mapping.status === "destroyed") return sendError(res, 410, "conversation_destroyed", "Conversation was already destroyed");
+    if (mapping.status === "ready") {
+      const existing = store.getConversation(mapping.conversationId);
+      if (existing) return json(res, 200, publicConversation(existing));
+    }
+    if (!this.runtime.provisionConversation) {
+      store.setCellStatus(mapping.conversationId, "failed");
+      return sendError(res, 503, "hotcell_unavailable", "Hotcell conversation runtime is not configured");
+    }
+
     try {
-      await saveSession(sessionFile);
-      const conversation = store.createConversation({
-        id,
+      const allowCreate = !mapping.createAttempted;
+      if (allowCreate) store.markCellCreateAttempted(mapping.conversationId);
+      const provisioned = await this.runtime.provisionConversation({
+        conversationId: mapping.conversationId,
+        sessionId: mapping.sessionId,
+        cellName: mapping.cellName,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.rootPath,
+        model,
+        allowCreate,
+        onCellCreated: (cellId) => store.setCellId(mapping.conversationId, cellId),
+      });
+      store.setCellId(mapping.conversationId, provisioned.cellId);
+      const conversation = store.getConversation(mapping.conversationId) ?? store.createConversation({
+        id: mapping.conversationId,
         workspaceId: workspace.id,
         model,
-        sessionId,
-        worktreePath: worktree.worktreePath,
-        cwd: worktree.cwd,
-        branch: worktree.branch,
+        sessionId: mapping.sessionId,
+        worktreePath: "/workspace",
+        cwd: "/workspace",
+        branch: "cell",
       });
-      store.appendEvent(id, null, "conversation.created", { conversationId: id, workspaceId: workspace.id, model });
-      json(res, 201, publicConversation(conversation));
+      const sessionFile: SessionFile = {
+        id: mapping.sessionId,
+        cwd: "/workspace",
+        model,
+        createdAt: new Date(mapping.createdAt).toISOString(),
+        updatedAt: new Date().toISOString(),
+        messages: [],
+        title: "Aster conversation",
+      };
+      await saveSession(sessionFile);
+      store.setCellStatus(mapping.conversationId, "ready");
+      store.appendEvent(mapping.conversationId, null, "conversation.created", { conversationId: mapping.conversationId, workspaceId: workspace.id, model });
+      json(res, reservation.kind === "created" ? 201 : 200, publicConversation(conversation));
     } catch {
-      await unlink(resolve(sessionsDir(), `${sessionId}.json`)).catch(() => {});
-      await worktreeManager.discard(worktree).catch(() => {});
-      sendError(res, 500, "conversation_create_failed", "Conversation could not be created");
+      const current = store.getCellMapping(mapping.conversationId);
+      if (current?.cellId && this.runtime.destroyCell) {
+        try {
+          await this.runtime.destroyCell(current.cellId);
+          store.setCellStatus(mapping.conversationId, "failed");
+        } catch {
+          store.setCellStatus(mapping.conversationId, "cleanup_pending");
+        }
+      } else {
+        store.setCellStatus(mapping.conversationId, "failed");
+      }
+      sendError(res, 503, "conversation_provisioning_failed", "Conversation provisioning failed; retry with the same Idempotency-Key to reconcile its state");
     }
   }
 
@@ -328,6 +400,16 @@ export class AsterApi {
         sendError(res, 409, "idempotency_conflict", "clientTurnId was already used with different text");
         return;
       }
+    }
+
+    const cellMapping = store.getCellMapping(conversation.id);
+    if (cellMapping?.status === "paused") {
+      sendError(res, 409, "conversation_paused", "Conversation is paused; resume it before submitting a turn");
+      return;
+    }
+    if (!cellMapping?.cellId || ["provisioning", "destroying", "cleanup_pending", "destroyed", "failed"].includes(cellMapping.status)) {
+      sendError(res, 409, "conversation_cell_unavailable", "Conversation cell is not available");
+      return;
     }
 
     const runId = randomUUID();
@@ -413,6 +495,9 @@ export class AsterApi {
       const active: AsterTurnStart = {
         runId,
         conversation,
+        cellId: cellMapping.cellId,
+        cellEventCursor: cellMapping.eventCursor,
+        userText: text,
         sessionFile,
         messages: sessionFile.messages,
         executor,
@@ -421,6 +506,7 @@ export class AsterApi {
         maxRuntimeMs: run.maxRuntimeMs,
         askPermission: (request) => this.askForApproval(store, conversation, runId, request, publishEvent),
         publishEvent,
+        onCellCursor: (cursor) => store.advanceCellEventCursor(conversation.id, cursor),
         finish: (status, reason) => {
           const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
           if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
@@ -461,9 +547,8 @@ export class AsterApi {
       publish("tool.activity", { tool: request.tool.name, activity: "rejected", reason: "unsafe_payload" });
       return "deny";
     }
-    const workspaceRoot = conversation.cwd;
     try {
-      await assertAsterWorkspacePath(workspaceRoot, request.args.path, request.tool.name === "write");
+      assertAsterCellPath(request.args.path);
     } catch {
       publish("tool.activity", { tool: request.tool.name, activity: "rejected", reason: "workspace_path_forbidden" });
       return "deny";
@@ -544,6 +629,69 @@ export class AsterApi {
       clearTimeout(waiter.timer);
       this.waiters.delete(approval.id);
       waiter.resolve(status === "expired" ? "deny" : decision);
+    }
+  }
+
+  private async pauseConversation(res: ServerResponse, store: AsterStore, conversation: AsterConversation): Promise<void> {
+    const mapping = store.getCellMapping(conversation.id);
+    if (!mapping || !mapping.cellId) return sendError(res, 409, "cell_not_ready", "Conversation cell is not ready");
+    if (mapping.status === "paused") return json(res, 200, { ...publicConversation(conversation), cellStatus: "paused" });
+    if (conversation.activeRunId) return sendError(res, 409, "turn_active", "Pause is only available at a safe boundary; cancel or wait for the active turn first");
+    if (!this.runtime.pauseCell) return sendError(res, 503, "hotcell_pause_unavailable", "Hotcell pause is not configured");
+    try {
+      await this.runtime.pauseCell(mapping.cellId);
+      store.setCellStatus(conversation.id, "paused");
+      store.setConversationStatus(conversation.id, "paused", { reason: "safe_boundary" });
+      store.appendEvent(conversation.id, null, "conversation.paused", { strategy: "safe_boundary" });
+      const updated = store.getConversation(conversation.id)!;
+      json(res, 200, { ...publicConversation(updated), cellStatus: "paused" });
+    } catch {
+      sendError(res, 503, "pause_failed", "Conversation could not be paused; its lifecycle state was not changed");
+    }
+  }
+
+  private async resumeConversation(res: ServerResponse, store: AsterStore, conversation: AsterConversation): Promise<void> {
+    const mapping = store.getCellMapping(conversation.id);
+    if (!mapping || !mapping.cellId) return sendError(res, 409, "cell_not_ready", "Conversation cell is not ready");
+    if (mapping.status !== "paused") return json(res, 200, { ...publicConversation(conversation), cellStatus: mapping.status });
+    if (!this.runtime.resumeCell) return sendError(res, 503, "hotcell_resume_unavailable", "Hotcell resume is not configured");
+    try {
+      await this.runtime.resumeCell(mapping.cellId);
+      store.setCellStatus(conversation.id, "ready");
+      store.setConversationStatus(conversation.id, "ready", { reason: "resumed" });
+      store.appendEvent(conversation.id, null, "conversation.resumed", { sessionId: mapping.sessionId });
+      const updated = store.getConversation(conversation.id)!;
+      json(res, 200, { ...publicConversation(updated), cellStatus: "ready" });
+    } catch {
+      sendError(res, 503, "resume_failed", "Conversation could not be resumed; the persisted cell state is unchanged");
+    }
+  }
+
+  private async destroyConversation(res: ServerResponse, store: AsterStore, conversation: AsterConversation): Promise<void> {
+    const mapping = store.getCellMapping(conversation.id);
+    if (!mapping) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+    if (mapping.status === "destroyed") return json(res, 200, { conversationId: conversation.id, status: "destroyed" });
+    if (!this.runtime.destroyCell) return sendError(res, 503, "hotcell_destroy_unavailable", "Hotcell cleanup is not configured");
+
+    store.setCellStatus(conversation.id, "destroying");
+    if (conversation.activeRunId) {
+      for (const approval of store.cancelPendingApprovals(conversation.id)) {
+        const waiter = this.waiters.get(approval.id);
+        if (waiter) { clearTimeout(waiter.timer); this.waiters.delete(approval.id); waiter.resolve("deny"); }
+      }
+      this.runtime.cancelRun(conversation.activeRunId);
+      store.updateConversationStatus(conversation.id, conversation.activeRunId, "cancelled", { reason: "conversation_destroyed" });
+    }
+    try {
+      if (mapping.cellId) await this.runtime.destroyCell(mapping.cellId);
+      await unlink(resolve(sessionsDir(), mapping.sessionId + ".json")).catch(() => {});
+      store.setCellStatus(conversation.id, "destroyed");
+      store.setConversationStatus(conversation.id, "destroyed");
+      store.appendEvent(conversation.id, null, "conversation.destroyed", { conversationId: conversation.id });
+      json(res, 200, { conversationId: conversation.id, status: "destroyed" });
+    } catch {
+      store.setCellStatus(conversation.id, "cleanup_pending");
+      sendError(res, 503, "cleanup_pending", "Cell cleanup is pending; retry DELETE to revoke credentials and remove the cell");
     }
   }
 
@@ -652,7 +800,8 @@ export class AsterApi {
   private async requireConversation(store: AsterStore, principal: AsterPrincipal, id: string): Promise<AsterConversation | undefined> {
     if (!CONVERSATION_ID_RE.test(id)) return undefined;
     const conversation = store.getConversation(id);
-    return conversation && principal.workspaceIds.includes(conversation.workspaceId) ? conversation : undefined;
+    const mapping = store.getCellMapping(id);
+    return conversation && mapping?.credentialId === principal.credentialId && principal.workspaceIds.includes(conversation.workspaceId) ? conversation : undefined;
   }
 }
 
