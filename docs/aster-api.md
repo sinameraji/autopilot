@@ -9,6 +9,24 @@ Aster is a native iOS client. Autopilot on the VM owns model credentials, prompt
 - `/api/v1/*` requires `Authorization: Bearer aster_…`. Credentials are workspace-scoped, expire (default 30 days), are stored only as SHA-256 hashes, and can be revoked. Legacy routes keep their separate Basic auth.
 - The API exposes only `read`, `write`, and `edit`; no shell, external job, browser, web, GitHub, or artifact-expansion tools. Reads/writes/edits resolve inside the conversation worktree, reject traversal/symlinks out of root, and block credential/VCS paths. `write` and `edit` require a per-action human approval.
 - Provider credentials remain in the VM service environment/config. They are never sent to Aster or included in API responses/events. Provider-like secrets in turn text or proposed write arguments are rejected; assistant deltas are redacted defensively.
+- Each conversation runs inside its own Hotcell microVM with no host network and no host filesystem. Model access is brokered by Hotcell's credential gateway with a per-conversation, per-model, spend-capped, TTL-bound egress token that is revoked on destroy. Prompts and file contents never appear in Hotcell exec commands or logs; control traffic uses fixed commands with request bodies passed through `0600` files inside the cell.
+
+## Configure the Hotcell provider
+
+Aster conversation cells require a Hotcell deployment reachable from the service. Set these on `autopilot.service` (conversation creation returns `503 hotcell_unavailable` without them):
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTOPILOT_HOTCELL_ENDPOINT` | Hotcell control API; HTTPS required unless loopback |
+| `AUTOPILOT_HOTCELL_API_KEY` | Hotcell API key (kept server-side only) |
+| `AUTOPILOT_HOTCELL_DRIVER` | `firecracker` or `applevz`; the container driver is refused |
+| `AUTOPILOT_HOTCELL_MEMORY_MB` | Per-cell memory (default 4096) |
+| `AUTOPILOT_HOTCELL_CPUS` | Per-cell vCPUs (default 2) |
+| `AUTOPILOT_HOTCELL_PIDS` | Per-cell PID limit (default 256) |
+| `AUTOPILOT_HOTCELL_SPEND_CAP_USD` | Per-conversation egress spend cap (default 10) |
+| `AUTOPILOT_HOTCELL_TOKEN_TTL_MS` | Egress token TTL (default 24h) |
+
+The provider fails closed: it refuses to create a cell if the Hotcell API auth is disabled, the configured microVM driver is unavailable, or the OpenRouter egress gateway is missing. Creation is label-adoptive: cells carry a stable `autopilot.conversation_id` label, and a retry after an uncertain create adopts the labeled cell instead of provisioning a duplicate.
 
 ## Configure server-owned workspaces and models
 
@@ -28,7 +46,7 @@ Create `/etc/autopilot/aster.json` (do not put credentials in it):
 }
 ```
 
-`id` is the only workspace selector accepted from clients. The API never accepts a client-supplied cwd or filesystem path. Roots must be existing, non-overlapping directories; current implementation requires each selected workspace root to be a Git repository so a conversation can get its own worktree.
+`id` is the only workspace selector accepted from clients. The API never accepts a client-supplied cwd or filesystem path. Roots must be existing, non-overlapping directories; each workspace root must be a Git repository so its tracked tree can be seeded into the conversation cell at creation.
 
 On the VM, provision the root for the dedicated service identity, seed an initial commit, and install the config as root-owned/read-only to the service:
 
@@ -102,7 +120,11 @@ All paths below require the scoped Bearer credential. Unknown IDs outside the to
 
 ### Conversations and turns
 
+Every conversation is bound to exactly one private Hotcell microVM at creation. The cell owns the Autopilot session (`autopilot-ai` JSON-RPC bridge), the `/workspace` volume seeded from the configured workspace's Git tree, and a scoped OpenRouter egress token (conversation model only, spend-capped, TTL-bound). Provider credentials never enter the cell image, its env, or its logs; only structured SDK events leave it. Server restart or cell pause never loses the session: on resume the bridge restores the same session ID from the cell volume, and the event cursor survives because it is journaled in the cell.
+
 `POST /api/v1/conversations`
+
+Requires an `Idempotency-Key` header (1-128 safe characters). The key is hashed with the credential ID and bound to one durable conversation/cell/session reservation before any Hotcell create call, so retries across timeouts and server restarts return the original conversation (`200`) instead of duplicating a cell, and reuse with different parameters returns `409 idempotency_conflict`. After an uncertain create (timeout between Hotcell create and record), the retry adopts the cell by its stable conversation label; the server never blindly creates a second cell.
 
 ```json
 {"workspaceId":"default","model":"moonshotai/kimi-k2.6"}
@@ -138,7 +160,15 @@ The first accepted keyed request returns `202` with `{conversationId,clientTurnI
 
 Only one active turn per conversation is allowed. A different, previously unused keyed request submitted while another turn is active returns `409 conversation_busy` and does not consume its ID; it may be retried after the active turn ends. An exact retry of an already accepted keyed request replays its response rather than returning busy. If `clientTurnId` is present but malformed (including `null`), the server returns `400 invalid_client_turn_id`; it never silently falls back to legacy mode.
 
-`POST /api/v1/conversations/{conversationId}/cancel` is idempotent. It aborts the active agent signal, updates durable run state, cancels pending approvals, and returns the current conversation.
+`POST /api/v1/conversations/{conversationId}/cancel` is idempotent. It aborts the in-cell turn (`abort` RPC over the bridge), updates durable run state, cancels pending approvals, and returns the current conversation.
+
+`POST /api/v1/conversations/{conversationId}/pause` suspends the cell. On microVM drivers (firecracker/applevz) Hotcell snapshots memory, so the Autopilot session resumes alive; on other drivers the workspace volume survives and the session is restored from it. Pause is only accepted at a safe boundary: with an active turn it returns `409 turn_active`. Turns submitted while paused return `409 conversation_paused`. Pausing is idempotent.
+
+`POST /api/v1/conversations/{conversationId}/resume` restarts the cell, restores the same session ID from the cell volume, and returns to `ready`. Resuming a non-paused conversation is a no-op.
+
+`DELETE /api/v1/conversations/{conversationId}` revokes every scoped egress token through the Hotcell provider, destroys the cell and its volume, and poisons the original `Idempotency-Key` (`410 conversation_destroyed` on reuse). It cancels any active turn first. If token revocation or destruction fails, the mapping is marked `cleanup_pending` and the request returns `503`; retrying `DELETE` resumes cleanup. `DELETE` is idempotent (`200` when already destroyed).
+
+All conversation routes require the creating credential: another credential scoped to the same workspace receives `404`.
 
 ### Events and reconnect
 

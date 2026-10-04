@@ -330,8 +330,9 @@ export function getOpenApiSpec(): string {
       },
       "/api/v1/conversations": {
         post: {
-          summary: "Create a persistent conversation in an isolated workspace worktree",
+          summary: "Create a persistent conversation in its own isolated Hotcell microVM",
           security: [{ asterBearer: [] }],
+          parameters: [{ name: "Idempotency-Key", in: "header", required: true, schema: { type: "string", minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" }, description: "Stable per-credential key; safe retries return the original conversation and never duplicate its cell." }],
           requestBody: {
             required: true,
             content: { "application/json": { schema: {
@@ -341,7 +342,7 @@ export function getOpenApiSpec(): string {
               additionalProperties: false,
             }, example: { workspaceId: "default", model: "moonshotai/kimi-k2.6" } } },
           },
-          responses: { "201": { description: "Created conversation with opaque ID" }, "400": { description: "Invalid workspace or model" } },
+          responses: { "201": { description: "Created conversation with opaque ID" }, "200": { description: "Idempotent replay of the original creation" }, "400": { description: "Invalid workspace, model, or missing Idempotency-Key" }, "409": { description: "Idempotency-Key reused with different parameters" }, "410": { description: "Key belongs to a destroyed conversation" }, "503": { description: "Hotcell runtime unavailable or provisioning failed" } },
         },
       },
       "/api/v1/conversations/{conversationId}": {
@@ -350,6 +351,28 @@ export function getOpenApiSpec(): string {
           security: [{ asterBearer: [] }],
           parameters: [{ name: "conversationId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
           responses: { "200": { description: "Conversation metadata and last event cursor" }, "404": { description: "Conversation not found or outside credential scope" } },
+        },
+        delete: {
+          summary: "Revoke the cell's egress tokens and destroy the conversation's Hotcell and volume (retryable)",
+          security: [{ asterBearer: [] }],
+          parameters: [{ name: "conversationId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Destroyed (idempotent)" }, "404": { description: "Conversation not found" }, "503": { description: "cleanup_pending; retry to finish revocation and teardown" } },
+        },
+      },
+      "/api/v1/conversations/{conversationId}/pause": {
+        post: {
+          summary: "Suspend the conversation's cell at a safe boundary (no active turn)",
+          security: [{ asterBearer: [] }],
+          parameters: [{ name: "conversationId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Paused (idempotent); session state persists in the cell" }, "409": { description: "turn_active or cell not ready" } },
+        },
+      },
+      "/api/v1/conversations/{conversationId}/resume": {
+        post: {
+          summary: "Resume a paused cell and restore the same Autopilot session",
+          security: [{ asterBearer: [] }],
+          parameters: [{ name: "conversationId", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
+          responses: { "200": { description: "Ready again (idempotent)" }, "409": { description: "Cell not ready" } },
         },
       },
       "/api/v1/conversations/{conversationId}/turns": {

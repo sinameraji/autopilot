@@ -3,6 +3,8 @@ export type { KimiFlareSession } from "./types.js";
 export * from "./types.js";
 export { createDefaultPermissionHandler } from "./permissions.js";
 export { startRpcServer } from "./rpc.js";
+export { startAsterCellBridge, executeAsterCellControl } from "./aster-cell.js";
+export type { AsterCellControlRequest } from "./aster-cell.js";
 export { RunStore } from "../runs/store.js";
 export { RunWakeScheduler } from "../runs/wake-scheduler.js";
 export type { RunWakeEvent, RunWakeSchedulerOptions } from "../runs/wake-scheduler.js";

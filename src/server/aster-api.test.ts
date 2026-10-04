@@ -25,7 +25,7 @@ afterEach(async () => {
 });
 
 describe("Aster control-plane API", () => {
-  it("runs persisted follow-up turns through the shared server runner with SSE replay", async () => {
+  it("runs follow-up turns through an injected cell runtime with SSE replay", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "autopilot-aster-live-route-")));
     tempDirs.push(root);
     const workspaceRoot = join(root, "repo");
@@ -54,20 +54,28 @@ describe("Aster control-plane API", () => {
     });
     credentialStore.close();
 
-    const realFetch = globalThis.fetch;
-    const modelMessages: Array<Array<{ role: string; content: unknown }>> = [];
-    let modelCalls = 0;
-    globalThis.fetch = async (input, init) => {
-      const url = String(input);
-      if (url.startsWith("http://127.0.0.1:")) return realFetch(input, init);
-      if (!url.includes("openrouter.ai")) return realFetch(input, init);
-      const requestBody = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ role: string; content: unknown }> };
-      modelMessages.push(requestBody.messages ?? []);
-      modelCalls++;
-      return openRouterResponse(modelCalls === 1 ? "FIRST_REPLIED" : "SECOND_REPLIED");
-    };
-
-    const server = await startServer({ port: 0, hostname: "127.0.0.1", config: { openrouterApiKey: "test-provider-key", model: "test/model" } as KimiConfig });
+    const turns: AsterTurnStart[] = [];
+    const server = await startServer({
+      port: 0,
+      hostname: "127.0.0.1",
+      config: { openrouterApiKey: "test-provider-key", model: "test/model" } as KimiConfig,
+      asterRuntime: {
+        provisionConversation: async (input) => {
+          input.onCellCreated(`cell-${input.conversationId}`);
+          return { cellId: `cell-${input.conversationId}` };
+        },
+        startTurn: (turn) => {
+          turns.push(turn);
+          const text = turns.length === 1 ? "FIRST_REPLIED" : "SECOND_REPLIED";
+          setTimeout(() => {
+            turn.publishEvent("assistant.delta", { text });
+            turn.onCellCursor?.(turn.cellEventCursor + 1);
+            turn.finish("completed");
+          }, 10);
+        },
+        cancelRun: () => {},
+      },
+    });
     try {
       const address = server.address();
       assert.ok(address && typeof address !== "string");
@@ -77,26 +85,43 @@ describe("Aster control-plane API", () => {
       const health = await fetch(`${base}/api/v1/health`, { headers: { Authorization: `Bearer ${credential.token}` } });
       assert.equal(health.status, 200);
       assert.equal(health.headers.get("access-control-allow-origin"), null);
-      const arbitraryWorkspace = await fetch(`${base}/api/v1/conversations`, {
+
+      const missingKey = await fetch(`${base}/api/v1/conversations`, {
         method: "POST",
         headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: "default", model: "test/model" }),
+      });
+      assert.equal(missingKey.status, 400);
+      assert.equal((await missingKey.json() as { error: { code: string } }).error.code, "idempotency_key_required");
+
+      const arbitraryWorkspace = await fetch(`${base}/api/v1/conversations`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json", "Idempotency-Key": "create-1" },
         body: JSON.stringify({ workspaceId: "/etc", model: "test/model" }),
       });
       assert.equal(arbitraryWorkspace.status, 403);
       const arbitraryModel = await fetch(`${base}/api/v1/conversations`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" },
+        headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json", "Idempotency-Key": "create-2" },
         body: JSON.stringify({ workspaceId: "default", model: "unconfigured/model" }),
       });
       assert.equal(arbitraryModel.status, 400);
 
-      const create = await fetch(`${base}/api/v1/conversations`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ workspaceId: "default", model: "test/model" }),
-      });
+      const createHeaders = { Authorization: `Bearer ${credential.token}`, "Content-Type": "application/json", "Idempotency-Key": "create-main" };
+      const createBody = JSON.stringify({ workspaceId: "default", model: "test/model" });
+      const create = await fetch(`${base}/api/v1/conversations`, { method: "POST", headers: createHeaders, body: createBody });
       assert.equal(create.status, 201);
       const conversation = await create.json() as { conversationId: string; lastEventId: number };
+      const createRetry = await fetch(`${base}/api/v1/conversations`, { method: "POST", headers: createHeaders, body: createBody });
+      assert.equal(createRetry.status, 200);
+      assert.equal((await createRetry.json() as { conversationId: string }).conversationId, conversation.conversationId);
+      const createConflict = await fetch(`${base}/api/v1/conversations`, {
+        method: "POST",
+        headers: createHeaders,
+        body: JSON.stringify({ workspaceId: "default", model: "test/model" }),
+      });
+      assert.equal(createConflict.status, 200);
+
       const firstEventsPromise = readUntil(await fetch(`${base}/api/v1/conversations/${conversation.conversationId}/events?after=${conversation.lastEventId}`, {
         headers: { Authorization: `Bearer ${credential.token}` },
       }), "event: completed");
@@ -127,11 +152,11 @@ describe("Aster control-plane API", () => {
       await waitForStatusAt(base, credential.token, conversation.conversationId, "completed");
       const secondEvents = await secondEventsPromise;
       assert.match(secondEvents, /SECOND_REPLIED/);
-      assert.ok(modelMessages[1]!.some((message) => message.role === "user" && message.content === "first turn"));
-      assert.ok(modelMessages[1]!.some((message) => message.role === "assistant" && message.content === "FIRST_REPLIED"));
-      assert.ok(modelMessages[1]!.some((message) => message.role === "user" && message.content === "second turn"));
+      assert.equal(turns.length, 2);
+      assert.equal(turns[1]!.userText, "second turn");
+      assert.equal(turns[1]!.cellId, turns[0]!.cellId);
+      assert.equal(turns[1]!.cellEventCursor, 1);
     } finally {
-      globalThis.fetch = realFetch;
       await closeServer(server);
     }
   });
@@ -228,8 +253,9 @@ describe("Aster control-plane API", () => {
       assert.notEqual(secondRun.runId, firstRun.runId);
       await waitForStatus(harness, conversation.conversationId, "completed");
       assert.equal(harness.turns.length, 2);
-      assert.ok(harness.turns[1]!.messages.some((message) => message.role === "user" && message.content === "first turn"));
-      assert.ok(harness.turns[1]!.messages.some((message) => message.role === "assistant" && message.content === "reply-1"));
+      assert.equal(harness.turns[1]!.userText, "second turn");
+      assert.equal(harness.turns[1]!.cellId, harness.turns[0]!.cellId);
+      assert.equal(harness.turns[1]!.conversation.sessionId, harness.turns[0]!.conversation.sessionId);
 
       const stream = await request(harness, "GET", `/api/v1/conversations/${conversation.conversationId}/events?after=${firstState.lastEventId}`);
       assert.equal(stream.status, 200);
@@ -239,6 +265,78 @@ describe("Aster control-plane API", () => {
       assert.match(eventText, /event: assistant\.delta/);
       assert.match(eventText, /reply-2/);
       assert.doesNotMatch(eventText, /arguments|content\\":\\"reply-2/);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("binds one cell per conversation, isolates credentials, and pauses/resumes/destroys idempotently", async () => {
+    const harness = await createHarness("complete");
+    try {
+      const firstCreate = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" }, "cell-key-a");
+      assert.equal(firstCreate.status, 201);
+      const first = await firstCreate.json() as { conversationId: string };
+      const secondCreate = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" }, "cell-key-b");
+      assert.equal(secondCreate.status, 201);
+      const second = await secondCreate.json() as { conversationId: string };
+
+      const store = new AsterStore();
+      try {
+        const firstMapping = store.getCellMapping(first.conversationId)!;
+        const secondMapping = store.getCellMapping(second.conversationId)!;
+        assert.equal(firstMapping.cellId, `cell-${first.conversationId}`);
+        assert.equal(secondMapping.cellId, `cell-${second.conversationId}`);
+        assert.notEqual(firstMapping.cellId, secondMapping.cellId);
+        assert.notEqual(firstMapping.sessionId, secondMapping.sessionId);
+      } finally {
+        store.close();
+      }
+
+      // Cross-credential access is invisible even within the same workspace scope.
+      const otherStore = new AsterStore();
+      let otherToken: string;
+      try {
+        otherToken = otherStore.createCredential({
+          name: "other-client",
+          workspaceIds: ["default"],
+          scopes: ["conversations:read", "conversations:write"],
+          expiresAt: Date.now() + 60_000,
+        }).token;
+      } finally {
+        otherStore.close();
+      }
+      const crossRead = await fetch(`${harness.baseUrl}/api/v1/conversations/${first.conversationId}`, { headers: { Authorization: `Bearer ${otherToken}` } });
+      assert.equal(crossRead.status, 404);
+      const crossDestroy = await fetch(`${harness.baseUrl}/api/v1/conversations/${first.conversationId}`, { method: "DELETE", headers: { Authorization: `Bearer ${otherToken}` } });
+      assert.equal(crossDestroy.status, 404);
+
+      // Pause is idempotent at a safe boundary and rejects new turns while paused.
+      const pause = await request(harness, "POST", `/api/v1/conversations/${first.conversationId}/pause`);
+      assert.equal(pause.status, 200);
+      const pauseAgain = await request(harness, "POST", `/api/v1/conversations/${first.conversationId}/pause`);
+      assert.equal(pauseAgain.status, 200);
+      assert.deepEqual(harness.pausedCells, [`cell-${first.conversationId}`]);
+      const pausedTurn = await request(harness, "POST", `/api/v1/conversations/${first.conversationId}/turns`, { clientTurnId: "while-paused", text: "should reject" });
+      assert.equal(pausedTurn.status, 409);
+      assert.equal(((await pausedTurn.json() as { error: { code: string } }).error).code, "conversation_paused");
+
+      const resume = await request(harness, "POST", `/api/v1/conversations/${first.conversationId}/resume`);
+      assert.equal(resume.status, 200);
+      assert.deepEqual(harness.resumedCells, [`cell-${first.conversationId}`]);
+      const turn = await request(harness, "POST", `/api/v1/conversations/${first.conversationId}/turns`, { clientTurnId: "after-resume", text: "continue" });
+      assert.equal(turn.status, 202);
+      await waitForStatus(harness, first.conversationId, "completed");
+      assert.equal(harness.turns[0]!.cellId, `cell-${first.conversationId}`);
+
+      // Destroy is retryable, revokes through the provider, and poisons the create key.
+      const destroy = await fetch(`${harness.baseUrl}/api/v1/conversations/${first.conversationId}`, { method: "DELETE", headers: { Authorization: `Bearer ${harness.token}` } });
+      assert.equal(destroy.status, 200);
+      assert.equal((await destroy.json() as { status: string }).status, "destroyed");
+      const destroyRetry = await fetch(`${harness.baseUrl}/api/v1/conversations/${first.conversationId}`, { method: "DELETE", headers: { Authorization: `Bearer ${harness.token}` } });
+      assert.equal(destroyRetry.status, 200);
+      assert.deepEqual(harness.destroyedCells, [`cell-${first.conversationId}`]);
+      const recreate = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" }, "cell-key-a");
+      assert.equal(recreate.status, 410);
     } finally {
       await harness.close();
     }
@@ -368,7 +466,7 @@ describe("Aster control-plane API", () => {
       assert.equal(conflict.status, 409);
       assert.equal(harness.permissionDecisions.at(-1), "allow");
       await waitForStatus(harness, conversation.conversationId, "completed");
-      assert.equal(await readFile(join(harness.worktreeRoot, conversation.conversationId, "created.txt"), "utf8"), "safe content");
+      assert.equal(harness.turns.at(-1)?.cellId, `cell-${conversation.conversationId}`);
     } finally {
       await harness.close();
     }
@@ -439,6 +537,9 @@ interface Harness {
   turns: AsterTurnStart[];
   cancelledRuns: string[];
   permissionDecisions: string[];
+  destroyedCells: string[];
+  pausedCells: string[];
+  resumedCells: string[];
   close(): Promise<void>;
 }
 
@@ -483,7 +584,17 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
   const turns: AsterTurnStart[] = [];
   const cancelledRuns: string[] = [];
   const permissionDecisions: string[] = [];
+  const destroyedCells: string[] = [];
+  const pausedCells: string[] = [];
+  const resumedCells: string[] = [];
   const api = new AsterApi({ openrouterApiKey: "test-key", model: "test/model" } as KimiConfig, {
+    provisionConversation: async (input) => {
+      input.onCellCreated(`cell-${input.conversationId}`);
+      return { cellId: `cell-${input.conversationId}` };
+    },
+    destroyCell: async (cellId) => { destroyedCells.push(cellId); },
+    pauseCell: async (cellId) => { pausedCells.push(cellId); },
+    resumeCell: async (cellId) => { resumedCells.push(cellId); },
     startTurn: (turn) => {
       turns.push(turn);
       if (mode === "complete") void completeTurn(turn, `reply-${turns.length}`);
@@ -506,6 +617,9 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
     turns,
     cancelledRuns,
     permissionDecisions,
+    destroyedCells,
+    pausedCells,
+    resumedCells,
     close,
   };
 }
@@ -554,20 +668,12 @@ async function completeTurn(turn: AsterTurnStart, text: string): Promise<void> {
 }
 
 async function approveWriteTurn(turn: AsterTurnStart, decisions: string[]): Promise<void> {
-  const tool = turn.executor.list().find((item) => item.name === "write");
-  assert.ok(tool);
-  const args = { path: "created.txt", content: "safe content" };
-  const result = await turn.executor.run(
-    { id: "tool-call-1", name: "write", arguments: JSON.stringify(args) },
-    async (request) => {
-      const decision = await turn.askPermission(request);
-      decisions.push(typeof decision === "string" ? decision : decision.decision);
-      return decision;
-    },
-    { cwd: turn.sessionFile.cwd, runId: turn.runId, sessionId: turn.sessionFile.id, runsDbPath: process.env.AUTOPILOT_RUNS_DB },
-  );
-  assert.equal(result.ok, decisions.at(-1) === "allow");
-  await completeTurn(turn, result.ok ? "The write was approved." : "The write was denied.");
+  const decision = await turn.askPermission({
+    tool: { name: "write" },
+    args: { path: "created.txt", content: "safe content" },
+  } as never);
+  decisions.push(typeof decision === "string" ? decision : decision.decision);
+  await completeTurn(turn, decisions.at(-1) === "allow" ? "The write was approved." : "The write was denied.");
 }
 
 async function waitForStatus(harness: Harness, conversationId: string, expected: string): Promise<void> {
@@ -596,12 +702,15 @@ async function waitForApproval(harness: Harness, conversationId: string): Promis
   assert.fail("approval was not created");
 }
 
-async function request(harness: Harness, method: string, path: string, body?: unknown): Promise<Response> {
+async function request(harness: Harness, method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<Response> {
   return fetch(`${harness.baseUrl}${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${harness.token}`,
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      ...(path === "/api/v1/conversations" && method === "POST"
+        ? { "Idempotency-Key": idempotencyKey ?? `test-create-${Math.random().toString(36).slice(2)}` }
+        : {}),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
