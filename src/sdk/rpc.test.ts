@@ -144,7 +144,7 @@ async function withRpcServer(
 }
 
 describe("SDK RPC", () => {
-  const ENV = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "XDG_CONFIG_HOME", "KIMIFLARE_BASE_URL"] as const;
+  const ENV = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "KIMIFLARE_BASE_URL"] as const;
   const saved: Record<string, string | undefined> = {};
   let configHome = "";
 
@@ -153,6 +153,8 @@ describe("SDK RPC", () => {
     delete process.env.KIMIFLARE_BASE_URL;
     configHome = await mkdtemp(join(tmpdir(), "kimiflare-rpc-"));
     process.env.XDG_CONFIG_HOME = configHome;
+    // Keep session files out of the developer's real data directory.
+    process.env.XDG_DATA_HOME = join(configHome, "data");
     // Unreachable → the catalog load fails fast and uses the seed list.
     process.env.OPENROUTER_BASE_URL = "http://127.0.0.1:9/api/v1";
     process.env.OPENROUTER_API_KEY = "sk-or-test-rpc";
@@ -361,6 +363,7 @@ describe("SDK RPC with a custom endpoint only (no OpenRouter key)", () => {
     "KIMIFLARE_BASE_URL",
     "KIMIFLARE_API_KEY",
     "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
   ] as const;
   const saved: Record<string, string | undefined> = {};
   let configHome: string;
@@ -372,6 +375,7 @@ describe("SDK RPC with a custom endpoint only (no OpenRouter key)", () => {
     }
     configHome = await mkdtemp(join(tmpdir(), "kimiflare-rpc-custom-endpoint-"));
     process.env.XDG_CONFIG_HOME = configHome;
+    process.env.XDG_DATA_HOME = join(configHome, "data");
     process.env.KIMIFLARE_BASE_URL = "https://aig.example.com/v1";
     process.env.KIMIFLARE_API_KEY = "broker-key";
   });

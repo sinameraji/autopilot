@@ -24,7 +24,7 @@ import type { CustomCommand } from "../commands/types.js";
 import type { SaveCustomCommandOptions } from "../commands/save.js";
 import type { LspServerConfig } from "../config.js";
 import type { HookConfig, HookEvent } from "../hooks/types.js";
-import type { ActiveWorker } from "../agent/supervisor.js";
+import type { RunningWorker } from "../tools/worker-registry.js";
 
 /** Which Ink dialog App currently wants open. */
 export type AppModal =
@@ -49,8 +49,8 @@ export type AppModal =
 export interface AppSnapshot {
   events: ChatEvent[];
   busy: boolean;
-  /** Multi-agent workers currently visible to the App. */
-  workers: ActiveWorker[];
+  /** Subagents currently running (see tools/worker-registry). */
+  workers: RunningWorker[];
   mode: Mode;
   /** Plan/edit/auto modes are on (off by default: every turn is auto). */
   modesEnabled: boolean;

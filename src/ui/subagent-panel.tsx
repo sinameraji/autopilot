@@ -11,6 +11,19 @@ export function isImmediateSubagentCommand(text: string): boolean {
   return /^\/subagents(?:\s+(?:list|ls|help|cancel|stop)\b.*|\s*)$/i.test(text.trim());
 }
 
+/** `/now`: promote the latest queued message (same as Ctrl+G, which the
+ *  Camouflage renderer cannot deliver as a key press). */
+export function isRunNowCommand(text: string): boolean {
+  return /^\/now\s*$/i.test(text.trim());
+}
+
+/** Running subagents, updated on start/stop/cancel (no timer). */
+export function useSubagentList(): RunningWorker[] {
+  const [workers, setWorkers] = useState<RunningWorker[]>(() => workerRegistry.list());
+  useEffect(() => workerRegistry.subscribe(setWorkers), []);
+  return workers;
+}
+
 /** Live list of running subagents, re-rendered each second for elapsed time. */
 export function useRunningSubagents(): { workers: RunningWorker[]; now: number } {
   const [workers, setWorkers] = useState<RunningWorker[]>(() => workerRegistry.list());

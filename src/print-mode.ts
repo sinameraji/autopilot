@@ -217,7 +217,7 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     customEndpoint: Boolean(opts.baseUrl),
   });
   const workerTools = baseWorkerTools.filter(
-    (tool) => tool.name !== "spawn_worker" || allowsSubagentDispatch(delegationGuidance.kind),
+    (tool) => tool.name !== "subagent" || allowsSubagentDispatch(delegationGuidance.kind),
   );
   const executor = new ToolExecutor(workerTools, { hooks });
 

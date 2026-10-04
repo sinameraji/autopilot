@@ -37,16 +37,16 @@ const MAX_JEV_PROMPT_CHARS = 1_200;
 
 function directiveFor(kind: SubagentGuidanceKind): string | undefined {
   if (kind === "explicit-sequential") {
-    return "The user explicitly asked not to delegate. Do not call spawn_worker; handle the task in the main session and respect any stated dependencies.";
+    return "The user explicitly asked not to delegate. Do not call the subagent tool; handle the task in this session and respect any stated dependencies.";
   }
   if (kind === "explicit-delegate") {
-    return "The user explicitly requested subagents. Before acting, split the request into bounded missions that can make progress independently; use spawn_worker in plan mode for useful parallel read-only research (emit all independent spawn_worker calls in the same response so they run concurrently), wait for the workers, and synthesize their findings before dependent implementation. Do not delegate tightly coupled or sequential steps. The tool's normal permission prompt and all configured safety limits still apply.";
+    return "The user explicitly asked for subagents. Split the request into specific, self-contained investigations that can proceed independently, launch them with the subagent tool in the same response so they run in parallel, then synthesize their findings before doing dependent work yourself. Subagents read and search but cannot edit. Do not delegate tightly coupled or sequential steps. The tool's permission prompt still applies.";
   }
   if (kind === "suggest") {
-    return "The harness sees a possible parallel-work opportunity, but the user did not request delegation. Use spawn_worker only if you can define bounded, independent missions that materially help. The tool's normal permission prompt is the required user confirmation; never assume approval. Keep dependent implementation in the coordinator.";
+    return "This task may have independent parts. If you can define two or more specific, self-contained investigations, consider the subagent tool (launch them in the same response so they run in parallel). The tool's permission prompt is the user's confirmation; never assume approval. Keep dependent work in this session.";
   }
   if (kind === "auto-delegate") {
-    return "Proactive subagent delegation is enabled for this substantial task. First assess its structure, dependencies, and coordination cost. If two or more bounded research tracks can make meaningful progress independently, delegate them with spawn_worker in plan mode by emitting all of those calls in the same response so they run concurrently, wait for their results, and synthesize the findings before doing dependent work in the coordinator. Keep trivial, tightly coupled, and sequential work local. Worker calls still require normal permission approval (one prompt covers a batch) and local Hotcell with OpenRouter, a clean pushed repository, spend cap, concurrency, timeout, and read-only restrictions; never bypass them. If a worker cannot run or fails, explain that plainly and continue locally without implying delegation succeeded.";
+    return "This is a substantial task. Before diving in, decide whether parts of the investigation are independent — for example separate subsystems, separate questions, or a broad search across the codebase. If so, launch one subagent per part with the subagent tool in the same response (they run in parallel and report cited findings), and keep working on dependent or editing work yourself once their results arrive. Skip delegation for small, tightly coupled, or step-by-step work. If a subagent cannot run, say so plainly and continue yourself.";
   }
   return undefined;
 }

@@ -92,19 +92,15 @@ Earlier kimiflare versions ran on Cloudflare Workers AI / AI Gateway. On the fir
 - Your settings (theme, MCP/LSP servers, hooks, memory, sessions, cost history) carry over.
 - Model ids are migrated (`@cf/moonshotai/kimi-k2.6` → `moonshotai/kimi-k2.6`, and so on), and the retired Cloudflare fields (OAuth login, gateway, Unified Billing, provider keys) are removed from `config.json`.
 - Memory keeps working unchanged: embeddings use the same `bge-base-en-v1.5` model, now via OpenRouter.
-- `/gateway`, `autopilot auth cloudflare`, `--cloud` and the Cloud-only commands are gone. `/multi-agent` (Commute) still deploys to your Cloudflare account and keeps using `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` for that.
+- `/gateway`, `autopilot auth cloudflare`, `--cloud` and the Cloud-only commands are gone. `/multi-agent` (Commute) is retired; subagents now run locally through Hotcell.
 
-### Local Hotcell research workers
+### Subagents
 
-`spawn_worker` can optionally run read-only research in a local [Hotcell](https://github.com/sinameraji/hotcell) sandbox instead of the remote Commute worker. Install and start Hotcell, add your OpenRouter key to the Hotcell host key store (`hotcell keys add openrouter`), then opt in with either:
+For substantial tasks, the agent can hand independent investigations to **subagents**: separate Autopilot instances that each explore the repository in their own local [Hotcell](https://github.com/sinameraji/hotcell) sandbox and report back cited findings. Several subagents run in parallel behind a single approval while the main agent keeps the conversation and does the edits. You don't need to ask for them; say "don't use subagents" to opt out, or "use subagents" to insist.
 
-```sh
-KIMIFLARE_WORKER_BACKEND=hotcell autopilot
-```
+Setup: install and start Hotcell, then add your OpenRouter key to its host key store (`hotcell keys add openrouter`). The real key never enters a sandbox. Subagents are read-only (no edits, shell, PRs, or MCP) and see the committed, pushed state of your branch. See [docs/subagents.md](docs/subagents.md) for limits and troubleshooting.
 
-or add `"workerBackend": "hotcell"` to `~/.config/kimiflare/config.json`. Remote workers remain the default. Each local worker uses an isolated cell with a pinned clean Git revision and a Hotcell-enforced spend ceiling; the exact active session model is passed through. The real provider key stays in Hotcell's host key store.
-
-The current local backend is **research-only**: workers cannot write files, run shell commands, create PRs, or use MCP tools. They can inspect repository files only inside the cloned workspace; environment files, VCS metadata, and credential paths are blocked. The parent workspace must be clean and have a credential-free HTTPS or SSH `origin` that the Hotcell daemon can clone. Local uncommitted changes are never copied. Results are returned for coordinator review and are not applied automatically. Hotcell CLI/daemon setup and gateway availability are required.
+While subagents run they are listed above the prompt (Ink) or in the activity panel (`/agents`, Camouflage). `/subagents cancel <n>` stops one without interrupting the turn.
 
 ### Model
 
@@ -312,7 +308,8 @@ autopilot
 | `/reasoning` | Toggle chain-of-thought display |
 | `/model` | Pick a model from OpenRouter's catalog (or `/model <id>`, `/model list [filter]`) |
 | `/jev` | Ask Jev for a typed, scoped one-shot decision |
-| `/subagents off\|suggest\|auto` | Set the harness's subagent routing policy (default: `suggest`) |
+| `/subagents` | List running subagents; `/subagents cancel <n>\|all` stops them; `/subagents off\|suggest\|auto` sets the delegation policy (default: `auto`) |
+| `/now` | Run your latest queued message now instead of after the current turn (also `Ctrl+G` in Ink) |
 | `/key` | Show your OpenRouter key's spend and credit (`/key set <key>`, `/key clear`) |
 | `/cost` | Show OpenRouter-confirmed cost by session, day, month and all time |
 | `/update` | Check for updates |
@@ -320,9 +317,9 @@ autopilot
 
 ### Subagent routing
 
-`/subagents suggest` is the default. `off` disables harness-initiated suggestions; `suggest` recommends a worker for likely parallel work but tells the coordinator to ask before dispatch; `auto` lets the coordinator call `spawn_worker` when confidence is high. Explicit requests to use agents or work without them take precedence over this automatic policy. `/subagents auto` is also available through `KIMIFLARE_SUBAGENT_POLICY=auto` or `subagentPolicy: "auto"` in config.
+`/subagents auto` is the default: on substantial tasks the agent is asked to look for independent parts and delegate them, and it decides whether delegation is worth it. `suggest` only hints at delegation for likely parallel work, and `off` disables harness guidance (you can still ask for subagents explicitly). Explicit requests to use subagents or to work without them always win. Set the policy with `/subagents`, `KIMIFLARE_SUBAGENT_POLICY`, or `subagentPolicy` in config.
 
-The harness never starts a worker directly. The coordinator remains responsible for defining independent missions and synthesizing results. Jev is consulted only for substantial but ambiguous candidates, receives at most 1,200 characters of redacted task text (no chat history, project files, system prompt, or tool output), and has a 4-second timeout; any failure falls back to local sequential work. Clear routine or sequential tasks do not call Jev. Every `spawn_worker` call still requires its normal tool permission and obeys provider, read-only, spend, concurrency, and timeout limits—even in `auto` mode.
+The harness never starts a subagent by itself: the agent calls the `subagent` tool, which always needs normal tool permission (one prompt covers a parallel batch) and obeys provider, read-only, spend, concurrency, and timeout limits. In Code Mode the `subagent` tool stays a direct tool next to `execute_code`. Jev is consulted only in `suggest` mode for substantial but ambiguous requests, receives at most 1,200 characters of redacted task text, and has a 4-second timeout.
 
 ## Running shell commands yourself
 
