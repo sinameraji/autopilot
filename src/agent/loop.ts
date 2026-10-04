@@ -120,6 +120,12 @@ export interface AgentTurnOpts extends LlmAuth {
   /** Called after each tool-iteration cycle to allow external compaction or state management.
    *  Return the (possibly mutated) messages array. */
   onIterationEnd?: (messages: ChatMessage[], signal: AbortSignal) => Promise<ChatMessage[]>;
+  /** Pull user input that arrived mid-turn (e.g. steering). Called at every
+   *  tool boundary and again when the model answers without tool calls;
+   *  returned messages are appended to history. If any arrive at that final
+   *  point the turn continues, so the model responds to them before the turn
+   *  ends instead of the input leaking into the next turn. */
+  drainPendingInput?: () => ChatMessage[];
   /** Shell override for the bash tool. If omitted, the tool auto-detects based on platform. */
   shell?: string;
   /** When false (default), the bash tool blocks `git push` to the default branch. */
@@ -538,6 +544,12 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     originalOnTasks?.(tasks);
   };
 
+  const appendPendingInput = (): number => {
+    const pending = opts.drainPendingInput?.() ?? [];
+    for (const msg of pending) opts.messages.push(msg);
+    return pending.length;
+  };
+
   while (true) {
     // Budget enforcement: before starting a new turn, if we've already hit the
     // limit, run one final synthesis turn and then signal budget exhaustion.
@@ -805,6 +817,9 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       if (budgetExhausted) {
         throw new BudgetExhaustedError();
       }
+      // Input that arrived while the model was writing its answer must be
+      // answered in this turn, not silently carried into the next one.
+      if (appendPendingInput() > 0) continue;
       logger.info("turn:complete", { sessionId: opts.sessionId, durationMs: Math.round(performance.now() - turnStart) });
       await fireStopHook();
       return;
@@ -1536,6 +1551,9 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
 
     // (Drift accumulator decay was removed in OP-8 — drift detection is
     // now a sliding window over recent turns, not a decaying counter.)
+
+    // Mid-turn user input (steering) lands at the tool boundary.
+    appendPendingInput();
 
     // Allow external compaction / state management between iterations
     if (opts.onIterationEnd) {

@@ -104,8 +104,14 @@ export interface KimiFlareSession {
   readonly messages: ChatMessage[];
 
   // Prompting
+  /** Run a turn. Called while a turn is streaming, the text is treated as a steer. */
   prompt(text: string, options?: PromptOptions): Promise<void>;
+  /** Inject guidance into the running turn: delivered at the next tool
+   *  boundary, or before the final answer (the turn continues to address it).
+   *  Ignored when no turn is running. */
   steer(text: string): Promise<void>;
+  /** Queue a message to run as its own turn after the current (or next)
+   *  prompt's turn completes successfully. */
   followUp(text: string): Promise<void>;
 
   // Control
