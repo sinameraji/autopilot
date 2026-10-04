@@ -122,6 +122,7 @@ export async function createAgentSession(
     ...sessionFile.messages.filter((m) => m.role !== "system"),
   ];
 
+  const isNewSession = sessionFile.messages.length === 0;
   const session = new InternalSession({
     sessionFile,
     cwd,
@@ -137,6 +138,14 @@ export async function createAgentSession(
     hooks,
     provider: opts.provider,
   });
+
+  // Persist new sessions immediately so hosts can rely on the file existing
+  // (e.g. to resume by id after a process restart) before the first turn ends.
+  if (isNewSession) {
+    await session.save().catch((err: unknown) => {
+      logger.warn("sdk:initial_save_failed", { sessionId: session.sessionId, error: (err as Error).message });
+    });
+  }
 
   return { session };
 }
@@ -194,9 +203,11 @@ class InternalSession implements KimiFlareSession {
     turnCount: 0,
   };
   private disposed = false;
+  private readonly createdAt: string;
 
   constructor(opts: InternalSessionOpts) {
     this.sessionId = opts.sessionFile.id;
+    this.createdAt = opts.sessionFile.createdAt;
     this.cwd = opts.cwd;
     this.messages = opts.messages;
     this.config = opts.config;
@@ -286,18 +297,12 @@ class InternalSession implements KimiFlareSession {
 
     this.abortController = new AbortController();
 
+    let succeeded = false;
     try {
       await this.runTurn(mode, options?.maxToolIterations);
-
-      // Append follow-ups
-      for (const followUp of this.followUpQueue) {
-        this.messages.push({ role: "user", content: followUp });
-      }
-      this.followUpQueue = [];
-
+      succeeded = true;
       this.isStreaming = false;
       this.emit({ type: "status", status: "idle" });
-      await this.save();
     } catch (err) {
       this.isStreaming = false;
       if ((err as Error).name === "AbortError") {
@@ -312,6 +317,27 @@ class InternalSession implements KimiFlareSession {
         this.emit({ type: "status", status: "error" });
         throw err;
       }
+    } finally {
+      // Persist on every outcome: an errored or aborted turn still holds the
+      // user's message and any completed tool work (#637). A failed save is
+      // logged, never allowed to mask the turn's own result.
+      await this.save().catch((saveErr: unknown) => {
+        logger.warn("sdk:save_failed", { sessionId: this.sessionId, error: (saveErr as Error).message });
+      });
+    }
+
+    if (succeeded) await this.runFollowUps(mode);
+  }
+
+  /** Run queued follow-ups as their own turns, in order. Steers that arrived
+   *  after the turn's last chance to see them become follow-ups too. */
+  private async runFollowUps(mode: Mode): Promise<void> {
+    if (this.steerQueue.length > 0) {
+      this.followUpQueue.unshift(...this.steerQueue.splice(0));
+    }
+    while (this.followUpQueue.length > 0 && !this.disposed) {
+      const next = this.followUpQueue.shift()!;
+      await this.prompt(next, { mode });
     }
   }
 
@@ -382,7 +408,7 @@ class InternalSession implements KimiFlareSession {
       id: this.sessionId,
       cwd: this.cwd,
       model: this.model,
-      createdAt: new Date().toISOString(),
+      createdAt: this.createdAt,
       updatedAt: new Date().toISOString(),
       messages: this.messages,
     });
@@ -551,13 +577,16 @@ class InternalSession implements KimiFlareSession {
       memoryManager: this.memoryManager,
       allowDirectPush: this.config.allowDirectPush,
       preferPullRequests: this.config.preferPullRequests,
-      onIterationEnd: async (messages, _signal) => {
-        // Inject steer queue messages
-        for (const steerText of this.steerQueue) {
-          messages.push({ role: "user", content: steerText });
-        }
-        this.steerQueue = [];
-        return messages;
+      // Steering lands at the next tool boundary, or before the final answer
+      // ends the turn (the loop continues so the model can respond to it).
+      drainPendingInput: () => {
+        const steers = this.steerQueue.splice(0);
+        return steers.map((text) => {
+          const messageId = `msg_${this.nextMessageId++}`;
+          this.emit({ type: "message.start", messageId, role: "user" });
+          this.emit({ type: "message.end", messageId });
+          return { role: "user" as const, content: text };
+        });
       },
       onFileChange: (path, content) => {
         if (content) {

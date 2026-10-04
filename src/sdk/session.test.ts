@@ -12,7 +12,7 @@ import type { KimiFlareSession, SessionEvent } from "./types.js";
 // fast and falls back to the seed list instead of hitting the network).
 const TEST_KEY = "sk-or-test-session";
 const TEST_MODEL = "moonshotai/kimi-k2.6";
-const ENV_KEYS = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "KIMI_MODEL", "XDG_CONFIG_HOME", "KIMIFLARE_BASE_URL"] as const;
+const ENV_KEYS = ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "KIMI_MODEL", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "KIMIFLARE_BASE_URL"] as const;
 
 describe("SDK Session", () => {
   const saved: Record<string, string | undefined> = {};
@@ -25,6 +25,8 @@ describe("SDK Session", () => {
     delete process.env.KIMIFLARE_BASE_URL;
     configHome = await mkdtemp(join(tmpdir(), "kimiflare-sdk-session-"));
     process.env.XDG_CONFIG_HOME = configHome;
+    // Keep session files out of the developer's real data directory.
+    process.env.XDG_DATA_HOME = join(configHome, "data");
     process.env.OPENROUTER_BASE_URL = "http://127.0.0.1:9/api/v1";
     process.env.OPENROUTER_API_KEY = TEST_KEY;
     process.env.KIMI_MODEL = TEST_MODEL;
