@@ -72,6 +72,12 @@ export interface ToolSpec<Args = any> {
   /** When true, the tool only reads state and never mutates the workspace.
    *  Read-only tools within a single turn may be executed in parallel. */
   isReadOnly?: boolean;
+  /** When true, calls may run concurrently with each other and with
+   *  read-only calls even though the tool is not read-only — for work
+   *  that is isolated from the workspace (e.g. sandboxed subagents).
+   *  Permission prompts for a concurrent batch are serialized and
+   *  same-tool calls are approved together (see agent/permission-gate.ts). */
+  concurrent?: boolean;
   render?: (args: Args) => ToolRender;
   run: (args: Args, ctx: ToolContext) => Promise<string | ToolOutput>;
 }

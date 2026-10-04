@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
 import { runAgentTurn } from "./loop.js";
-import type { ToolExecutor } from "../tools/executor.js";
+import { ToolExecutor as RealToolExecutor, type ToolExecutor, type PermissionRequest } from "../tools/executor.js";
 import type { ChatMessage } from "./messages.js";
 import type { RunWaitRequest, ToolSpec } from "../tools/registry.js";
 
@@ -372,5 +372,136 @@ describe("runAgentTurn", () => {
 
     assert.equal(fetchCalls, 2);
     assert.ok(messages.some((message) => message.role === "tool" && !/not available under this turn's policy/.test(String(message.content))));
+  });
+
+  it("runs concurrent worker calls in parallel behind one batched permission prompt", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "research three things" },
+    ];
+    let active = 0;
+    let maxActive = 0;
+    const worker: ToolSpec<{ task: string }> = {
+      name: "spawn_worker",
+      description: "fake isolated worker",
+      parameters: { type: "object", properties: { task: { type: "string" } } },
+      needsPermission: true,
+      concurrent: true,
+      run: async (args) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        active--;
+        return `done: ${args.task}`;
+      },
+    };
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [
+            { choices: [{ delta: { tool_calls: ["a", "b", "c"].map((task, index) => ({ index, id: `call-${task}`, type: "function", function: { name: "spawn_worker", arguments: JSON.stringify({ task }) } })) } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [
+            { choices: [{ delta: { content: "synthesized" } }] },
+            { choices: [{ finish_reason: "stop" }] },
+          ];
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+
+    const asks: PermissionRequest[] = [];
+    let outstanding = 0;
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [worker],
+      executor: new RealToolExecutor([worker]),
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callbacks: {
+        askPermission: async (req) => {
+          outstanding++;
+          assert.equal(outstanding, 1, "permission prompts must never overlap");
+          asks.push(req);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          outstanding--;
+          return "allow";
+        },
+      },
+    });
+
+    assert.equal(maxActive, 3, "all three workers ran at the same time");
+    assert.equal(asks.length, 1, "one prompt approves the whole batch");
+    assert.equal((asks[0]!.args.batch as unknown[]).length, 3);
+    const toolMessages = messages.filter((m) => m.role === "tool");
+    assert.deepEqual(toolMessages.map((m) => m.tool_call_id), ["call-a", "call-b", "call-c"], "results keep call order");
+    assert.deepEqual(toolMessages.map((m) => m.content), ["done: a", "done: b", "done: c"]);
+  });
+
+  it("keeps mutating batches sequential even when they include a concurrent tool", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "test" },
+      { role: "user", content: "go" },
+    ];
+    let active = 0;
+    let maxActive = 0;
+    const slow = (name: string, extra: Partial<ToolSpec>): ToolSpec => ({
+      name,
+      description: name,
+      parameters: { type: "object", properties: {} },
+      needsPermission: false,
+      ...extra,
+      run: async () => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active--;
+        return "ok";
+      },
+    });
+    const tools = [slow("spawn_worker", { concurrent: true }), slow("write", {})];
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [
+            { choices: [{ delta: { tool_calls: [
+              { index: 0, id: "w", type: "function", function: { name: "spawn_worker", arguments: "{}" } },
+              { index: 1, id: "m", type: "function", function: { name: "write", arguments: "{}" } },
+            ] } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [{ choices: [{ delta: { content: "done" } }] }, { choices: [{ finish_reason: "stop" }] }];
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools,
+      executor: new RealToolExecutor(tools),
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callbacks: { askPermission: async () => "allow" },
+    });
+    assert.equal(maxActive, 1);
   });
 });

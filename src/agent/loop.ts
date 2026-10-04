@@ -20,6 +20,7 @@ import type { SemanticSkillRoutingResult } from "../skills/types.js";
 import type Database from "better-sqlite3";
 import { buildSystemPrompt, buildSessionPrefix } from "./system-prompt.js";
 import { getModelOrInfer } from "../models/registry.js";
+import { createPermissionGate } from "./permission-gate.js";
 import type { Mode } from "../mode.js";
 
 export interface AgentCallbacks {
@@ -814,14 +815,16 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     const availableToolNames = new Set(opts.tools.map((tool) => tool.name));
     if (codeMode) availableToolNames.add("execute_code");
 
-    // Determine if every tool in this batch is read-only.  When they are,
-    // we can execute them in parallel because there are no write-order
+    // Determine if every tool in this batch can run concurrently: read-only
+    // tools, plus tools that are isolated from the workspace (`concurrent`,
+    // e.g. sandboxed subagents). Such batches have no write-order
     // dependencies or mutation side-effects to sequence.
-    const allReadOnly =
+    const executorTools = opts.executor.list();
+    const allConcurrent =
       toolCalls.length > 1 &&
       toolCalls.every((tc) => {
-        const tool = opts.executor.list().find((t) => t.name === tc.function.name);
-        return availableToolNames.has(tc.function.name) && tool?.isReadOnly === true;
+        const tool = executorTools.find((t) => t.name === tc.function.name);
+        return availableToolNames.has(tc.function.name) && (tool?.isReadOnly === true || tool?.concurrent === true);
       });
 
     // NOTE: Extending parallel execution to *mutable* tool calls is
@@ -832,8 +835,19 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     // in the future, build a DAG of tool dependencies first, then execute
     // each topological layer in parallel while respecting the sequential
     // order within a layer.
-    if (allReadOnly) {
-      opts.callbacks.onInfo?.(`${toolCalls.length} read-only tools running in parallel`);
+    if (allConcurrent) {
+      const workerCount = toolCalls.filter((tc) => executorTools.find((t) => t.name === tc.function.name)?.concurrent === true).length;
+      opts.callbacks.onInfo?.(
+        workerCount > 0
+          ? `${toolCalls.length} tool calls running in parallel (${workerCount} isolated worker${workerCount === 1 ? "" : "s"})`
+          : `${toolCalls.length} read-only tools running in parallel`,
+      );
+      // Concurrent calls must not raise overlapping permission prompts: the
+      // gate serializes them and approves same-tool calls as one batch.
+      const batchAskPermission = createPermissionGate(
+        opts.callbacks.askPermission,
+        toolCalls.map((tc) => ({ name: tc.function.name, args: parseArgsObject(tc.function.arguments) })),
+      );
       type ParallelItem =
         | { kind: "blocked"; tc: ToolCall; loopSignature: string; result: ToolResult }
         | { kind: "run"; tc: ToolCall; loopSignature: string };
@@ -911,7 +925,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           logger.debug("turn:tool_start", { sessionId: opts.sessionId, tool: it.tc.function.name, toolCallId: it.tc.id });
           const result = await opts.executor.run(
             { id: it.tc.id, name: it.tc.function.name, arguments: it.tc.function.arguments },
-            opts.callbacks.askPermission,
+            batchAskPermission,
             {
               cwd: opts.cwd,
               signal: opts.signal,
@@ -927,6 +941,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               model: opts.model,
               allowDirectPush: opts.allowDirectPush,
               runId: opts.runId,
+              onRunBudgetExceeded: opts.callbacks.onRunBudgetExceeded,
               runsDbPath: opts.runsDbPath,
             },
             opts.onFileChange,
@@ -1600,6 +1615,15 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       });
       continue;
     }
+  }
+}
+
+function parseArgsObject(raw: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
   }
 }
 
