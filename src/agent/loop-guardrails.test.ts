@@ -1,7 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert";
-import { runAgentTurn, AgentLoopError, type AgentTurnOpts, type GuardrailEvent } from "./loop.js";
-import type { ToolExecutor } from "../tools/executor.js";
+import { runAgentTurn, AgentLoopError, _resetSessionWebFetchHistoryForTests, type AgentTurnOpts, type GuardrailEvent } from "./loop.js";
+import type { ToolExecutor, ToolResult } from "../tools/executor.js";
 import type { ChatMessage } from "./messages.js";
 import type { HooksManager } from "../hooks/manager.js";
 import type { ToolSpec } from "../tools/registry.js";
@@ -122,13 +122,47 @@ const PROBE_TOOL: ToolSpec = {
   run: async () => "ok",
 };
 
+const WEB_FETCH_TOOL: ToolSpec = {
+  name: "web_fetch",
+  description: "Fetch a web page.",
+  parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+  needsPermission: false,
+  run: async () => "ok",
+};
+
 describe("runAgentTurn guardrails (unattended)", () => {
   let originalFetch: typeof globalThis.fetch;
   before(() => {
     originalFetch = globalThis.fetch;
+    _resetSessionWebFetchHistoryForTests();
   });
   after(() => {
     globalThis.fetch = originalFetch;
+    _resetSessionWebFetchHistoryForTests();
+  });
+
+  it("allows several distinct pages from the same hostname", async () => {
+    const urls = [
+      "https://huggingface.co/spaces/example/model-a",
+      "https://huggingface.co/spaces/example/model-b",
+      "https://huggingface.co/datasets/example/data",
+    ];
+    const model = scriptModel([
+      ...urls.map((url) => ({ tool: "web_fetch", args: { url } })),
+      { text: "Finished researching." },
+    ]);
+    const { executor, runs } = fakeExecutor();
+    const events: GuardrailEvent[] = [];
+    const opts = baseOpts(executor, events, {
+      sessionId: "same-host-web-fetch-regression",
+      tools: [WEB_FETCH_TOOL],
+    });
+
+    await runAgentTurn(opts);
+
+    assert.deepStrictEqual(runs.map((args) => (JSON.parse(args) as { url: string }).url), urls);
+    assert.strictEqual(model.requests, urls.length + 1);
+    assert.deepStrictEqual(events, []);
   });
 
   it("recovers from a loop automatically without waiting for input", async () => {
@@ -136,11 +170,14 @@ describe("runAgentTurn guardrails (unattended)", () => {
     const model = scriptModel([SAME, SAME, SAME, { text: "done, different approach" }]);
     const { executor, runs } = fakeExecutor();
     const events: GuardrailEvent[] = [];
+    const toolResults: ToolResult[] = [];
     const opts = baseOpts(executor, events);
+    opts.callbacks.onToolResult = (result) => toolResults.push(result);
 
     await runAgentTurn(opts);
 
     assert.deepStrictEqual(events.map((e) => e.kind), ["loop_recovery"]);
+    assert.ok(toolResults.some((result) => result.guardrail), "blocked loop feedback should be marked internal");
     assert.strictEqual(runs.length, 2);
     assert.strictEqual(model.requests, 4);
     assert.ok(

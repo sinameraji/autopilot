@@ -208,11 +208,11 @@ export function _resetMemoryExtractionErrorCountsForTests(): void {
 
 /** Per-session web-fetch history. Lifted from per-turn so a research spiral
  *  split across multiple turns still trips the guardrail. */
-const sessionWebFetchHistory = new Map<string, { url: string; domain: string }[]>();
+const sessionWebFetchHistory = new Map<string, string[]>();
 /** Hard soft-cap of total web fetches per session before we nudge for synthesis. */
 const SESSION_WEB_FETCH_CAP = 25;
 
-function getSessionWebFetchHistory(sessionId: string | undefined): { url: string; domain: string }[] {
+function getSessionWebFetchHistory(sessionId: string | undefined): string[] {
   const key = sessionId ?? "default";
   let arr = sessionWebFetchHistory.get(key);
   if (!arr) {
@@ -506,15 +506,13 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
   const LOOP_WINDOW = 8;
   const LOOP_THRESHOLD = 2; // 3rd identical call triggers the guardrail
 
-  // Web-fetch anti-loop: domain counts and the total now span the session,
-  // so a research spiral split across turns still trips the guardrail.
-  // (RF-3 / OP-6.) The per-turn ceiling stays in place for hot-path bursts.
+  // Web-fetch volume limits span the session; individual hosts are not treated
+  // as loops because research often needs several pages from the same site.
   const webFetchHistory = getSessionWebFetchHistory(opts.sessionId);
   let webFetchesThisTurn = 0;
   // Per-turn counter of Code Mode redirect nudges (capped by MAX_CODE_MODE_REDIRECTS).
   let codeModeRedirects = 0;
   const MAX_WEB_FETCH_PER_TURN = 5;
-  const WEB_FETCH_DOMAIN_THRESHOLD = 2; // 3rd fetch to same domain triggers warning
 
   let cumulativePromptTokens = 0;
   let iter = 0;
@@ -867,6 +865,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               name: tc.function.name,
               content: `Loop detected: you have called ${tc.function.name} with the same arguments multiple times in a row. Consider a different approach.`,
               ok: false,
+              guardrail: true,
             },
           });
           continue;
@@ -885,31 +884,21 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           const args = JSON.parse(tc.function.arguments || "{}") as { url?: string };
           const url = args.url || "";
           try {
-            const domain = new URL(url).hostname;
-            const domainCount = webFetchHistory.filter((h) => h.domain === domain).length;
+            new URL(url);
             const totalSessionFetches = webFetchHistory.length;
-            if (
-              webFetchesThisTurn >= MAX_WEB_FETCH_PER_TURN ||
-              totalSessionFetches >= SESSION_WEB_FETCH_CAP ||
-              domainCount >= WEB_FETCH_DOMAIN_THRESHOLD
-            ) {
-              let warning: string;
-              if (webFetchesThisTurn >= MAX_WEB_FETCH_PER_TURN) {
-                warning = `Research budget exceeded: you have already made ${MAX_WEB_FETCH_PER_TURN} web requests this turn. Synthesize what you have learned instead of fetching more pages.`;
-              } else if (totalSessionFetches >= SESSION_WEB_FETCH_CAP) {
-                warning = `Session research budget exceeded: ${totalSessionFetches} web fetches across this session. Synthesize what you have learned from prior fetches instead of starting another page.`;
-              } else {
-                warning = `Loop detected: you have fetched from ${domain} multiple times. Consider a different approach or synthesize existing findings.`;
-              }
+            if (webFetchesThisTurn >= MAX_WEB_FETCH_PER_TURN || totalSessionFetches >= SESSION_WEB_FETCH_CAP) {
+              const warning = webFetchesThisTurn >= MAX_WEB_FETCH_PER_TURN
+                ? `Research budget exceeded: you have already made ${MAX_WEB_FETCH_PER_TURN} web requests this turn. Synthesize what you have learned instead of fetching more pages.`
+                : `Session research budget exceeded: ${totalSessionFetches} web fetches across this session. Synthesize what you have learned from prior fetches instead of starting another page.`;
               items.push({
                 kind: "blocked",
                 tc,
                 loopSignature,
-                result: { tool_call_id: tc.id, name: "web_fetch", content: warning, ok: false },
+                result: { tool_call_id: tc.id, name: "web_fetch", content: warning, ok: false, guardrail: true },
               });
               continue;
             }
-            webFetchHistory.push({ url, domain });
+            webFetchHistory.push(url);
             webFetchesThisTurn++;
           } catch {
             // Invalid URL, let it fail normally
@@ -1132,6 +1121,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           name: tc.function.name,
           content: warning,
           ok: false,
+          guardrail: true,
         };
         toolResults.push(loopResult);
         opts.messages.push({
@@ -1152,8 +1142,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
         const args = JSON.parse(tc.function.arguments || "{}") as { url?: string };
         const url = args.url || "";
         try {
-          const domain = new URL(url).hostname;
-          const domainCount = webFetchHistory.filter((h) => h.domain === domain).length;
+          new URL(url);
           const totalSessionFetches = webFetchHistory.length;
 
           if (webFetchesThisTurn >= MAX_WEB_FETCH_PER_TURN) {
@@ -1163,6 +1152,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               name: "web_fetch",
               content: warning,
               ok: false,
+              guardrail: true,
             };
             toolResults.push(budgetResult);
             opts.messages.push({
@@ -1185,6 +1175,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
               name: "web_fetch",
               content: warning,
               ok: false,
+              guardrail: true,
             };
             toolResults.push(sessionCapResult);
             opts.messages.push({
@@ -1200,29 +1191,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             continue;
           }
 
-          if (domainCount >= WEB_FETCH_DOMAIN_THRESHOLD) {
-            const warning = `Loop detected: you have fetched from ${domain} multiple times. Consider a different approach or synthesize existing findings.`;
-            const loopResult: ToolResult = {
-              tool_call_id: tc.id,
-              name: "web_fetch",
-              content: warning,
-              ok: false,
-            };
-            toolResults.push(loopResult);
-            opts.messages.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              content: sanitizeString(warning),
-              name: "web_fetch",
-            });
-            opts.callbacks.onToolResult?.(loopResult);
-            recentToolCalls.push(loopSignature);
-            if (recentToolCalls.length > LOOP_WINDOW) recentToolCalls.shift();
-            blockedCount++;
-            continue;
-          }
 
-          webFetchHistory.push({ url, domain });
+          webFetchHistory.push(url);
           webFetchesThisTurn++;
         } catch {
           // Invalid URL, let it fail normally
