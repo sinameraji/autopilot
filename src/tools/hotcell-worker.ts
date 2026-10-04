@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import type { WorkerFinding, WorkerResultMessage } from "../agent/messages.js";
 import { validateModelId } from "../agent/client.js";
 import { getAppVersion, PACKAGE_NAME, CLI_NAME } from "../util/version.js";
+import { getModelOrInfer } from "../models/registry.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = 1_000_000;
@@ -26,6 +27,19 @@ const FIND_REPO_ROOT = [
   'REPO_ROOT="${GIT_DIR%/.git}"',
 ];
 const MAX_PARALLEL_WORKERS = 3;
+/** Cumulative input-token budget bounds for a research worker. The Hotcell
+ *  egress spend cap is the hard money stop; this keeps the worker's own
+ *  synthesis-on-exhaustion behavior roughly aligned with it. */
+const MIN_WORKER_INPUT_TOKENS = 60_000;
+const MAX_WORKER_INPUT_TOKENS = 3_000_000;
+/** Used when the model's price is unknown (custom or uncatalogued models). */
+const DEFAULT_WORKER_INPUT_TOKENS = 400_000;
+/** Share of the spend cap assumed available for input tokens; the rest covers output. */
+const INPUT_SHARE_OF_BUDGET = 0.8;
+/** Bounds on the structured report accepted from a worker. */
+const MAX_REPORT_FINDINGS = 12;
+const MAX_REPORT_SUMMARY_CHARS = 2_000;
+const MAX_REPORT_LIST_ITEMS = 25;
 let runningWorkers = 0;
 const workerQueue: Array<() => void> = [];
 
@@ -39,6 +53,8 @@ export interface HotcellWorkerOptions {
   setupTimeoutMs?: number;
   /** npm spec for the worker CLI. Defaults to KIMIFLARE_WORKER_PACKAGE or the coordinator's own version. */
   workerPackage?: string;
+  /** Cumulative input-token budget for the worker. Defaults to resolveWorkerInputBudget(). */
+  maxInputTokens?: number;
   maxParallel?: number;
   cwd?: string;
   hotcellCommand?: string;
@@ -76,6 +92,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   }
   if (options.signal?.aborted) return terminalResult(workerId, options.task, "cancelled", "Cancelled before worker setup.");
   const workerPackage = resolveWorkerPackage(options.workerPackage);
+  const maxInputTokens = resolveWorkerInputBudget(model, options.budgetUsd, options.maxInputTokens);
 
   await acquireSlot(options.maxParallel ?? MAX_PARALLEL_WORKERS, options.signal);
   let cellId: string | undefined;
@@ -156,6 +173,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     const prompt = [
       "You are an isolated, read-only research worker. You cannot edit files, run shell commands, push, publish, or call write-capable integrations.",
       "Use the exact requested model and return concise findings, recommendations, and relevant file paths. Do not claim to have changed files.",
+      WORKER_REPORT_INSTRUCTIONS,
       `Mission:\n${options.task}`,
       options.context ? `Coordinator context:\n${options.context}` : "",
     ].filter(Boolean).join("\n\n");
@@ -167,7 +185,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       'cd "$REPO_ROOT"',
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `${WORKER_BIN} --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+      `${WORKER_BIN} --format json --max-input-tokens ${maxInputTokens} --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
     ].join(" && ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,
@@ -188,16 +206,20 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
         : spendExhausted ? "spend_exhausted"
         : budgetExhausted ? "budget_exhausted"
         : execution.code === 0 ? "completed" : "failed";
-    const findings: WorkerFinding[] = summary
-      ? [{ topic: "Research findings", summary: summary.slice(0, 40_000), confidence: "medium", sources: [], relevance: "high" }]
-      : [];
+    const report = parseWorkerReport(summary);
+    const findings: WorkerFinding[] = report
+      ? report.findings
+      : summary
+        ? [{ topic: "Research findings", summary: summary.slice(0, 40_000), confidence: "medium", sources: [], relevance: "high" }]
+        : [];
     result = {
       workerId,
       status,
       task: options.task,
       findings,
       recommendations: [],
-      filesRead: [],
+      filesRead: report?.filesRead ?? [],
+      ...(report ? { structured: true, openQuestions: report.openQuestions } : {}),
       webSources: [],
       costUsd: metrics.costUsd ?? 0,
       tokensUsed: metrics.tokensUsed ?? tokensUsed,
@@ -269,6 +291,67 @@ export async function getCleanRepository(cwd: string): Promise<{ url: string; co
     );
   }
   return { url, commit, ref };
+}
+
+const WORKER_REPORT_INSTRUCTIONS = [
+  "Finish your answer with one fenced ```json block, and nothing after it, of exactly this shape:",
+  '{"findings":[{"topic":"short title","summary":"what you found and why it matters","files":["path/to/file.ts:123"],"confidence":"high|medium|low"}],"openQuestions":["what you could not determine"],"filesRead":["path/to/file.ts"]}',
+  "Cite repository-relative file paths (with line numbers where useful) for every finding. Use low confidence for anything you did not verify in the code.",
+].join("\n");
+
+/** Cumulative input-token budget for a research worker: what the per-cell
+ *  spend cap buys at the model's input price, bounded, or an explicit
+ *  override (option or KIMIFLARE_WORKER_MAX_INPUT_TOKENS). */
+export function resolveWorkerInputBudget(model: string, budgetUsd: number, override?: number): number {
+  const clamp = (n: number) => Math.min(MAX_WORKER_INPUT_TOKENS, Math.max(MIN_WORKER_INPUT_TOKENS, Math.floor(n)));
+  const envOverride = Number(process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS);
+  const explicit = override ?? (Number.isFinite(envOverride) && envOverride > 0 ? envOverride : undefined);
+  if (explicit !== undefined && Number.isFinite(explicit) && explicit > 0) return clamp(explicit);
+  const perMillion = getModelOrInfer(model).pricing.inputPerMtok;
+  if (!(perMillion > 0) || !(budgetUsd > 0)) return DEFAULT_WORKER_INPUT_TOKENS;
+  return clamp((budgetUsd * INPUT_SHARE_OF_BUDGET * 1_000_000) / perMillion);
+}
+
+export interface WorkerReport {
+  findings: WorkerFinding[];
+  openQuestions: string[];
+  filesRead: string[];
+}
+
+/** Parse the worker's trailing ```json report. Returns null when it is
+ *  missing or invalid, so callers fall back to the raw text. Sizes are bounded. */
+export function parseWorkerReport(text: string): WorkerReport | null {
+  const blocks = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+  const raw = blocks.at(-1)?.[1];
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { findings?: unknown }).findings)) return null;
+  const obj = parsed as { findings: unknown[]; openQuestions?: unknown; filesRead?: unknown };
+  const strings = (value: unknown, maxChars = 300): string[] =>
+    Array.isArray(value)
+      ? value.filter((v): v is string => typeof v === "string" && v.trim().length > 0).slice(0, MAX_REPORT_LIST_ITEMS).map((v) => v.trim().slice(0, maxChars))
+      : [];
+  const findings: WorkerFinding[] = [];
+  for (const item of obj.findings.slice(0, MAX_REPORT_FINDINGS)) {
+    if (!item || typeof item !== "object") continue;
+    const f = item as { topic?: unknown; summary?: unknown; files?: unknown; confidence?: unknown };
+    if (typeof f.summary !== "string" || !f.summary.trim()) continue;
+    const confidence = f.confidence === "high" || f.confidence === "low" ? f.confidence : "medium";
+    findings.push({
+      topic: typeof f.topic === "string" && f.topic.trim() ? f.topic.trim().slice(0, 120) : "Finding",
+      summary: f.summary.trim().slice(0, MAX_REPORT_SUMMARY_CHARS),
+      confidence,
+      sources: strings(f.files),
+      relevance: "high",
+    });
+  }
+  if (findings.length === 0) return null;
+  return { findings, openQuestions: strings(obj.openQuestions, 500), filesRead: strings(obj.filesRead) };
 }
 
 /** npm spec for the worker CLI: explicit option, KIMIFLARE_WORKER_PACKAGE, or

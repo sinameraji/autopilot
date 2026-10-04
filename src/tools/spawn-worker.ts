@@ -1,6 +1,7 @@
 import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
 import { loadConfig, resolveWorkerBudgetUsd } from "../config.js";
 import { runHotcellWorker } from "./hotcell-worker.js";
+import type { WorkerResultMessage } from "../agent/messages.js";
 
 interface SpawnWorkerArgs {
   mode: "plan";
@@ -111,17 +112,34 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
       throw new Error("Local Hotcell worker " + result.status + ": " + (result.error ?? "unknown error"));
     }
 
-    const lines = [
-      "Local Hotcell worker " + result.status + (result.status === "budget_exhausted" ? " (partial result)" : "") + ".",
-      "Model: " + (result.model ?? model) + " · Tokens: " + result.tokensUsed.toLocaleString() + " · Cost: " + (result.costUsd > 0 ? result.costUsd.toFixed(4) + " total Hotcell cost" : "unavailable from Hotcell stats") + ".",
-      ...result.findings.map((finding) => "\n## " + finding.topic + "\n" + finding.summary),
-    ];
-    if (result.status === "budget_exhausted") {
-      lines.push("\nWorker input-token budget was exhausted; review partial findings before relying on them.");
-    }
-    return textOutput(lines.join("\n"));
+    return textOutput(formatWorkerResult(result, model));
   },
 };
+
+/** Render a worker result for the coordinator: status, cost, cited findings,
+ *  open questions, and a clear marker when the report was unstructured. */
+export function formatWorkerResult(result: WorkerResultMessage, model: string): string {
+  const lines = [
+    "Local Hotcell worker " + result.status + (result.status === "budget_exhausted" ? " (partial result)" : "") + ".",
+    "Model: " + (result.model ?? model) + " · Tokens: " + result.tokensUsed.toLocaleString() + " · Cost: " + (result.costUsd > 0 ? result.costUsd.toFixed(4) + " total Hotcell cost" : "unavailable from Hotcell stats") + ".",
+    ...result.findings.map((finding) =>
+      "\n## " + finding.topic + (result.structured ? " (" + finding.confidence + " confidence)" : "") + "\n" + finding.summary +
+      (finding.sources.length ? "\nFiles: " + finding.sources.join(", ") : "")),
+  ];
+  if (result.openQuestions?.length) {
+    lines.push("\n## Open questions\n" + result.openQuestions.map((q) => "- " + q).join("\n"));
+  }
+  if (result.filesRead.length) {
+    lines.push("\nFiles read: " + result.filesRead.join(", "));
+  }
+  if (!result.structured && result.findings.length) {
+    lines.push("\n(Worker did not return a structured report; findings above are its raw answer and are unverified.)");
+  }
+  if (result.status === "budget_exhausted") {
+    lines.push("\nWorker input-token budget was exhausted; review partial findings before relying on them.");
+  }
+  return lines.join("\n");
+}
 
 function textOutput(content: string): ToolOutput {
   const bytes = Buffer.byteLength(content, "utf8");
