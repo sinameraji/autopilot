@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.15.0](https://github.com/sinameraji/autopilot/compare/v1.14.0...v1.15.0) (2026-10-04)
+
+
+### Features
+
+* **subagents:** list and cancel individual running subagents ([e8683ae](https://github.com/sinameraji/autopilot/commit/e8683aed2f5c91ba453af6fec459cc55d58c682a))
+* **subagents:** list and cancel individual running subagents ([a7cc80c](https://github.com/sinameraji/autopilot/commit/a7cc80c66d89d63d83e7711fe022386957d0129a))
+* **tui:** triage messages sent while the agent is working ([ba79e4c](https://github.com/sinameraji/autopilot/commit/ba79e4c55e2bddf5125e78b212281ed7bf773d8a))
+* **tui:** triage messages sent while the agent is working ([b2ba597](https://github.com/sinameraji/autopilot/commit/b2ba597820352e2d455b555f1c521bf2882dc496)), closes [#725](https://github.com/sinameraji/autopilot/issues/725)
+
 ## [1.14.0](https://github.com/sinameraji/autopilot/compare/v1.13.0...v1.14.0) (2026-10-04)
 
 
