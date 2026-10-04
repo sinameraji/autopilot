@@ -1,10 +1,10 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert";
 import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getShellCommand, guardGitPush, parsePushTarget } from "./bash.js";
+import { bashTool, buildCoauthorTrailer, getShellCommand, guardGitPush, injectCoauthor, parsePushTarget } from "./bash.js";
 import type { ToolContext } from "./registry.js";
 
 describe("getShellCommand", () => {
@@ -156,5 +156,87 @@ describe("guardGitPush", () => {
     const result = await guardGitPush("git push --all origin", ctx);
     assert.ok(result);
     assert.ok(result!.content.includes("Blocked"));
+  });
+});
+
+describe("co-author trailer injection", { skip: process.platform === "win32" }, () => {
+  let repo: string;
+  let marker: string;
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), "bash-coauthor-"));
+    marker = join(repo, "PWNED");
+    execSync("git init -q -b main", { cwd: repo });
+    execSync("git config user.email test@example.com", { cwd: repo });
+    execSync("git config user.name Test", { cwd: repo });
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  async function commitWith(coauthor: { name: string; email: string }, command = "git commit -q -m 'add file'"): Promise<string> {
+    writeFileSync(join(repo, `f-${Math.random().toString(36).slice(2)}.txt`), "x");
+    execSync("git add -A", { cwd: repo });
+    const ctx = { cwd: repo, coauthor, signal: new AbortController().signal } as unknown as ToolContext;
+    const out = await bashTool.run({ command }, ctx);
+    const content = typeof out === "string" ? out : out.content;
+    assert.match(content, /^exit=0/, content);
+    return execSync("git log -1 --pretty=%B", { cwd: repo, encoding: "utf8" });
+  }
+
+  it("keeps shell metacharacters in configured values inert", async () => {
+    const payloads = [
+      { name: `Eve"; touch ${marker}; echo "`, email: "eve@example.com" },
+      { name: "Eve $(touch " + marker + ")", email: "eve@example.com" },
+      { name: "Eve `touch " + marker + "`", email: "eve@example.com" },
+      { name: "Eve'; touch " + marker + "; '", email: "e;touch " + marker + "@example.com" },
+      { name: "Ève Ünïcode 測試", email: "eve+tag@example.com" },
+    ];
+    for (const coauthor of payloads) {
+      const message = await commitWith(coauthor);
+      assert.equal(existsSync(marker), false, `payload executed: ${coauthor.name}`);
+      const trailer = buildCoauthorTrailer(coauthor)!;
+      assert.equal(message.split(trailer).length - 1, 1, `trailer written exactly once for ${coauthor.name}`);
+    }
+  });
+
+  it("never splices configured values into the generated script", () => {
+    const coauthor = { name: "Eve $(id)", email: "eve@example.com" };
+    for (const command of ["git commit -m x", "make release && git log -1"]) {
+      const { command: script, env } = injectCoauthor(command, coauthor);
+      assert.ok(!script.includes("Eve"), "name absent from shell source");
+      assert.ok(!script.includes("eve@example.com"), "email absent from shell source");
+      assert.equal(env.KF_COAUTHOR_TRAILER, "Co-authored-by: Eve $(id) <eve@example.com>");
+    }
+  });
+
+  it("rejects line breaks and control characters instead of adding extra trailers", async () => {
+    assert.equal(buildCoauthorTrailer({ name: "Eve\nSigned-off-by: Mallory", email: "e@example.com" }), null);
+    assert.equal(buildCoauthorTrailer({ name: "Eve", email: "e@example.com\r" }), null);
+    assert.equal(buildCoauthorTrailer({ name: "Eve\u0007", email: "e@example.com" }), null);
+    assert.equal(buildCoauthorTrailer({ name: "Eve", email: "e@example.com> x <" }), null);
+    const message = await commitWith({ name: "Eve\nSigned-off-by: Mallory", email: "e@example.com" });
+    assert.doesNotMatch(message, /Co-authored-by|Mallory/);
+  });
+
+  it("does not duplicate an existing trailer and leaves non-git commands alone", async () => {
+    const coauthor = { name: "Pair", email: "pair@example.com" };
+    const first = await commitWith(coauthor);
+    assert.equal(first.split("Co-authored-by: Pair").length - 1, 1);
+    const amended = await commitWith(coauthor, "git commit -q --amend --no-edit");
+    assert.equal(amended.split("Co-authored-by: Pair").length - 1, 1);
+    assert.deepEqual(injectCoauthor("ls -la", coauthor), { command: "ls -la", env: {} });
+    assert.deepEqual(injectCoauthor("git commit -m x", undefined), { command: "git commit -m x", env: {} });
+  });
+
+  it("covers commits made indirectly and cleans up its temp file", async () => {
+    await commitWith({ name: "Pair", email: "pair@example.com" }); // initial commit: the safety net needs a prior HEAD
+    const before = readdirSync(tmpdir()).filter((f) => f.startsWith("kf-coauthor-")).length;
+    writeFileSync(join(repo, "script.sh"), "git commit -q -m scripted\n");
+    const message = await commitWith({ name: "Pair", email: "pair@example.com" }, "sh script.sh && echo git done");
+    assert.match(message, /Co-authored-by: Pair <pair@example.com>/);
+    const after = readdirSync(tmpdir()).filter((f) => f.startsWith("kf-coauthor-")).length;
+    assert.ok(after <= before, "temp message file removed");
   });
 });

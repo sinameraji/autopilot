@@ -310,12 +310,49 @@ export function parsePushTarget(command: string): PushTarget | undefined {
   return { kind: "ref", ref: last.replace(/^refs\/heads\//, "") };
 }
 
-function injectCoauthor(command: string, coauthor?: { name: string; email: string }): string {
-  if (!coauthor) return command;
-  const trailer = `Co-authored-by: ${coauthor.name} <${coauthor.email}>`;
+/** Env vars that carry co-author data into the generated shell. The script
+ *  text never contains configured values: config/env data must never become
+ *  shell program text (#716). */
+const COAUTHOR_TRAILER_ENV = "KF_COAUTHOR_TRAILER";
+const COAUTHOR_MSG_ENV = "KF_COAUTHOR_MSG";
+
+/** Static: references the trailer and temp file only via quoted expansions,
+ *  and removes the temp file whether or not the amend succeeds. */
+const AMEND_BLOCK = [
+  `if ! git log -1 --pretty=%B 2>/dev/null | grep -qF -- "$${COAUTHOR_TRAILER_ENV}"; then`,
+  `  git log -1 --pretty=%B | git interpret-trailers --trailer "$${COAUTHOR_TRAILER_ENV}" > "$${COAUTHOR_MSG_ENV}" && git commit --amend -F "$${COAUTHOR_MSG_ENV}" --no-edit; _KF_RC=$?;`,
+  `  rm -f "$${COAUTHOR_MSG_ENV}"; [ $_KF_RC -eq 0 ];`,
+  `fi`,
+].join("\n");
+
+/** Build the trailer, or null when a value could corrupt the commit message
+ *  (line breaks add extra trailers) or contains other control characters. */
+export function buildCoauthorTrailer(coauthor: { name: string; email: string }): string | null {
+  // eslint-disable-next-line no-control-regex
+  const unsafe = /[\u0000-\u001f\u007f\u2028\u2029]/;
+  if (unsafe.test(coauthor.name) || unsafe.test(coauthor.email)) return null;
+  const name = coauthor.name.trim();
+  const email = coauthor.email.trim();
+  if (!name || !email || /[<>]/.test(email)) return null;
+  return `Co-authored-by: ${name} <${email}>`;
+}
+
+/** Wrap a command so commits it creates carry the co-author trailer. Returns
+ *  the command plus env vars the caller must pass to the shell. */
+export function injectCoauthor(
+  command: string,
+  coauthor?: { name: string; email: string },
+): { command: string; env: Record<string, string> } {
+  const unchanged = { command, env: {} };
+  if (!coauthor) return unchanged;
+  const trailer = buildCoauthorTrailer(coauthor);
+  if (!trailer) {
+    logger.warn("bash:coauthor_rejected", { reason: "empty value, control character, or line break in co-author name/email" });
+    return unchanged;
+  }
 
   const trimmed = command.trim();
-  if (command.includes(trailer)) return command;
+  if (command.includes(trailer)) return unchanged;
 
   // Detect git commands that create commits
   const createsCommit = /\bgit\s+(commit|merge|revert|cherry-pick)\b/.test(trimmed);
@@ -323,32 +360,33 @@ function injectCoauthor(command: string, coauthor?: { name: string; email: strin
   const movesHeadOnly = /\bgit\s+(reset|checkout|switch)\b/.test(trimmed);
   const mentionsGit = /\bgit\b/.test(trimmed);
 
-  if (!createsCommit && !isRebaseContinue && !mentionsGit) return command;
-  if (movesHeadOnly) return command;
+  if (!createsCommit && !isRebaseContinue && !mentionsGit) return unchanged;
+  if (movesHeadOnly) return unchanged;
 
-  const tmpFile = join(tmpdir(), `kf-coauthor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-  const amendBlock = `
-    if ! git log -1 --pretty=%B 2>/dev/null | grep -qF "${trailer}"; then
-      git log -1 --pretty=%B | git interpret-trailers --trailer "${trailer}" > "${tmpFile}" && git commit --amend -F "${tmpFile}" --no-edit && rm -f "${tmpFile}"
-    fi
-  `.trim();
+  const env = {
+    [COAUTHOR_TRAILER_ENV]: trailer,
+    [COAUTHOR_MSG_ENV]: join(tmpdir(), `kf-coauthor-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+  };
 
   if (createsCommit || isRebaseContinue) {
     // Primary path: known commit-creating command — amend immediately after success
-    return `(${command}) && { ${amendBlock}; }`;
+    return { command: `(${command}) && { ${AMEND_BLOCK}\n}`, env };
   }
 
   // Safety net: command mentions git but isn't obviously commit-creating
   // (e.g., a script or Makefile that calls git internally).
   // Record HEAD before and after; amend if a new commit lacks the trailer.
   const beforeHead = `git rev-parse HEAD 2>/dev/null || echo "NO_HEAD"`;
-  const afterCheck = `
-    _KF_AFTER_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "NO_HEAD")
-    if [ "$_KF_BEFORE_HEAD" != "$_KF_AFTER_HEAD" ] && [ "$_KF_AFTER_HEAD" != "NO_HEAD" ] && git merge-base --is-ancestor "$_KF_BEFORE_HEAD" "$_KF_AFTER_HEAD" 2>/dev/null; then
-      ${amendBlock}
-    fi
-  `.trim();
-  return `_KF_BEFORE_HEAD=$(${beforeHead}); (${command}); _KF_EXIT=$?; [ $_KF_EXIT -eq 0 ] && { ${afterCheck}; }; exit $_KF_EXIT`;
+  const afterCheck = [
+    `_KF_AFTER_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "NO_HEAD")`,
+    `if [ "$_KF_BEFORE_HEAD" != "$_KF_AFTER_HEAD" ] && [ "$_KF_AFTER_HEAD" != "NO_HEAD" ] && git merge-base --is-ancestor "$_KF_BEFORE_HEAD" "$_KF_AFTER_HEAD" 2>/dev/null; then`,
+    AMEND_BLOCK,
+    `fi`,
+  ].join("\n");
+  return {
+    command: `_KF_BEFORE_HEAD=$(${beforeHead}); (${command}); _KF_EXIT=$?; [ $_KF_EXIT -eq 0 ] && { ${afterCheck}\n}; exit $_KF_EXIT`,
+    env,
+  };
 }
 
 async function runBash(args: Args, ctx: ToolContext): Promise<ToolOutput> {
@@ -358,7 +396,9 @@ async function runBash(args: Args, ctx: ToolContext): Promise<ToolOutput> {
   if (pushGuard) return pushGuard;
 
   const { shell, args: shellArgs, isPosix } = getShellCommand(ctx.shell);
-  const command = isPosix ? injectCoauthor(args.command, ctx.coauthor) : args.command;
+  const { command, env: coauthorEnv } = isPosix
+    ? injectCoauthor(args.command, ctx.coauthor)
+    : { command: args.command, env: {} };
 
   return new Promise<ToolOutput>((resolve, reject) => {
     logger.debug("bash:spawn", { command: args.command.slice(0, 200), cwd: ctx.cwd, shell });
@@ -366,6 +406,7 @@ async function runBash(args: Args, ctx: ToolContext): Promise<ToolOutput> {
       cwd: ctx.cwd,
       env: {
         ...process.env,
+        ...coauthorEnv,
         GIT_EDITOR: "true",
       },
     });
