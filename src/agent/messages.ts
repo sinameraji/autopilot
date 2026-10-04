@@ -133,6 +133,10 @@ export interface WorkerResultMessage {
   exitCode?: number;
   /** Bounded local artifacts (paths/content) awaiting coordinator review. */
   artifacts?: Array<{ path: string; content: string }>;
+  /** Questions the worker could not resolve, for the coordinator to follow up. */
+  openQuestions?: string[];
+  /** True when findings came from the worker's validated JSON report rather than raw text. */
+  structured?: boolean;
 }
 
 /** Replace lone UTF-16 surrogates with the replacement character (U+FFFD).

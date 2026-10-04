@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import {
   getCleanRepository,
+  parseWorkerReport,
+  resolveWorkerInputBudget,
   resolveWorkerPackage,
   parseCellId,
   parseNamedCellId,
@@ -428,5 +430,80 @@ describe("Hotcell worker helpers", () => {
     });
     assert.equal(result.status, "failed");
     assert.match(result.error ?? "", /cleanup failed/);
+  });
+
+  it("derives the worker input budget from the spend cap and model price", () => {
+    const previous = process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS;
+    delete process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS;
+    try {
+      // $1 × 80% at $0.8845 / Mtok ≈ 904k tokens.
+      assert.equal(resolveWorkerInputBudget("moonshotai/kimi-k3", 1), Math.floor(0.8e6 / 0.8845));
+      assert.equal(resolveWorkerInputBudget("moonshotai/kimi-k3", 0.0001), 60_000, "clamped to the floor");
+      assert.equal(resolveWorkerInputBudget("moonshotai/kimi-k3", 100), 3_000_000, "clamped to the ceiling");
+      assert.equal(resolveWorkerInputBudget("unknown/uncatalogued-model", 1), 400_000, "unknown price uses the default");
+      assert.equal(resolveWorkerInputBudget("moonshotai/kimi-k3", 1, 250_000), 250_000);
+      process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS = "123456";
+      assert.equal(resolveWorkerInputBudget("moonshotai/kimi-k3", 1), 123_456);
+    } finally {
+      if (previous === undefined) delete process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS;
+      else process.env.KIMIFLARE_WORKER_MAX_INPUT_TOKENS = previous;
+    }
+  });
+
+  it("parses the worker's trailing JSON report with bounds", () => {
+    const text = [
+      "Here is an early example:",
+      "```json",
+      '{"findings":[{"topic":"ignored","summary":"earlier block"}]}',
+      "```",
+      "Final report:",
+      "```json",
+      JSON.stringify({
+        findings: [
+          { topic: "Auth flow", summary: "Tokens refresh in src/auth.ts.", files: ["src/auth.ts:42", 7], confidence: "high" },
+          { topic: "No summary" },
+          { summary: "x".repeat(5_000), confidence: "certain" },
+        ],
+        openQuestions: ["Is the cache shared?"],
+        filesRead: ["src/auth.ts"],
+      }),
+      "```",
+    ].join("\n");
+    const report = parseWorkerReport(text)!;
+    assert.equal(report.findings.length, 2, "last block wins; entries without a summary are dropped");
+    assert.deepEqual(report.findings[0], { topic: "Auth flow", summary: "Tokens refresh in src/auth.ts.", confidence: "high", sources: ["src/auth.ts:42"], relevance: "high" });
+    assert.equal(report.findings[1]!.topic, "Finding");
+    assert.equal(report.findings[1]!.confidence, "medium", "unknown confidence normalized");
+    assert.equal(report.findings[1]!.summary.length, 2_000);
+    assert.deepEqual(report.openQuestions, ["Is the cache shared?"]);
+    assert.deepEqual(report.filesRead, ["src/auth.ts"]);
+    assert.equal(parseWorkerReport("no report"), null);
+    assert.equal(parseWorkerReport("```json\n{not json}\n```"), null);
+    assert.equal(parseWorkerReport('```json\n{"findings":[]}\n```'), null);
+  });
+
+  it("asks for a structured report, sizes the budget, and returns structured findings", async () => {
+    const cwd = await makeRepo();
+    const calls: string[][] = [];
+    const report = { findings: [{ topic: "Entry point", summary: "CLI routes in src/index.tsx.", files: ["src/index.tsx:10"], confidence: "high" }], openQuestions: ["Q?"], filesRead: ["src/index.tsx"] };
+    const runner: HotcellProcessRunner = async (_executable, args) => {
+      calls.push(args);
+      if (args[0] === "create") return { code: 0, stdout: cellId, stderr: "", aborted: false };
+      if (args[0] === "exec" && args[2]?.includes("npm install --prefix")) return { code: 0, stdout: "", stderr: "", aborted: false };
+      if (args[0] === "exec") return { code: 0, stdout: JSON.stringify({ text: "Summary.\n```json\n" + JSON.stringify(report) + "\n```" }), stderr: "", aborted: false };
+      if (args[0] === "stats") return { code: 0, stdout: "Cost: 0.01", stderr: "", aborted: false };
+      return { code: 0, stdout: "", stderr: "", aborted: false };
+    };
+    const result = await runHotcellWorker({ task: "Map the CLI", model: "openai/gpt-6-luna", budgetUsd: 0.5, maxInputTokens: 200_000, cwd, processRunner: runner });
+    assert.equal(result.status, "completed");
+    assert.equal(result.structured, true);
+    assert.deepEqual(result.findings[0]!.sources, ["src/index.tsx:10"]);
+    assert.deepEqual(result.openQuestions, ["Q?"]);
+    assert.deepEqual(result.filesRead, ["src/index.tsx"]);
+    const research = calls.filter((args) => args[0] === "exec")[1]![2]!;
+    assert.match(research, /--max-input-tokens 200000 /);
+    assert.doesNotMatch(research, /--max-input-tokens 14000\b/);
+    const prompt = Buffer.from(/printf '%s' '([A-Za-z0-9+/=]+)'/.exec(research)![1]!, "base64").toString("utf8");
+    assert.match(prompt, /fenced ```json block/);
   });
 });

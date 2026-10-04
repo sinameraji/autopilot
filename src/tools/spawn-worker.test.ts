@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnWorkerTool } from "./spawn-worker.js";
+import { formatWorkerResult, spawnWorkerTool } from "./spawn-worker.js";
 
 const realFetch = globalThis.fetch;
 const ENV_KEYS = [
@@ -78,5 +78,35 @@ describe("spawnWorkerTool local Hotcell routing", () => {
       () => spawnWorkerTool.run({ mode: "plan", task: "research" }, { cwd: process.cwd(), model: "openai/gpt-4o-mini" }),
       /Local Hotcell workers do not support custom model endpoints/,
     );
+  });
+});
+
+describe("formatWorkerResult", () => {
+  const base = {
+    workerId: "w1", status: "completed" as const, task: "t", recommendations: [], webSources: [],
+    costUsd: 0.0123, tokensUsed: 4567, reasoning: "", model: "openai/gpt-6-luna",
+  };
+
+  it("renders cited, structured findings and open questions", () => {
+    const text = formatWorkerResult({
+      ...base,
+      structured: true,
+      findings: [{ topic: "Auth", summary: "Refresh in auth.ts", confidence: "high", sources: ["src/auth.ts:42"], relevance: "high" }],
+      openQuestions: ["Is the cache shared?"],
+      filesRead: ["src/auth.ts"],
+    }, "openai/gpt-6-luna");
+    assert.match(text, /## Auth \(high confidence\)\nRefresh in auth.ts\nFiles: src\/auth.ts:42/);
+    assert.match(text, /## Open questions\n- Is the cache shared\?/);
+    assert.match(text, /Files read: src\/auth.ts/);
+    assert.doesNotMatch(text, /unverified/);
+  });
+
+  it("flags unstructured raw answers", () => {
+    const text = formatWorkerResult({
+      ...base,
+      findings: [{ topic: "Research findings", summary: "raw", confidence: "medium", sources: [], relevance: "high" }],
+      filesRead: [],
+    }, "openai/gpt-6-luna");
+    assert.match(text, /did not return a structured report/);
   });
 });
