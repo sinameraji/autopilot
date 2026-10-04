@@ -225,7 +225,7 @@ export function HelpMenu({ customCommands, costAttributionEnabled, onDone, onCom
         </Box>
         <Box marginTop={1}>
           <Text color={theme.info.color} dimColor={false}>
-            keys: ctrl-c interrupt/exit · ctrl-r toggle reasoning · ctrl-o verbose · shift+tab cycle mode · ↑/↓ history
+            keys: ctrl-c interrupt/exit · ctrl-r toggle reasoning · ctrl-o verbose · ctrl-g run queued message now · shift+tab cycle mode · ↑/↓ history
           </Text>
         </Box>
       </Box>
