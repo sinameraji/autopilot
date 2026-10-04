@@ -21,6 +21,7 @@ const ENV_KEYS = [
   "KIMIFLARE_WORKER_API_KEY",
   "KIMI_MODEL",
   "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
   "HOTCELL_BIN",
 ] as const;
 const saved: Record<string, string | undefined> = {};
@@ -34,6 +35,7 @@ before(async () => {
 beforeEach(async () => {
   for (const key of ENV_KEYS) delete process.env[key];
   process.env.XDG_CONFIG_HOME = configHome;
+  process.env.XDG_DATA_HOME = join(configHome, "data");
   await rm(join(configHome, "kimiflare"), { recursive: true, force: true });
 });
 

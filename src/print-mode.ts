@@ -17,6 +17,7 @@ import type { ChatMessage, ContentPart } from "./agent/messages.js";
 import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "./sessions.js";
 import { sessionFileCompactionTarget } from "./agent/context-budget.js";
+import { recordSubagentEvent } from "./tools/subagent-stats.js";
 import { encodeImageFile, isImagePath } from "./util/image.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { glob } from "./util/glob.js";
@@ -220,6 +221,16 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     (tool) => tool.name !== "subagent" || allowsSubagentDispatch(delegationGuidance.kind),
   );
   const executor = new ToolExecutor(workerTools, { hooks });
+  // The research worker profile never delegates; only coordinator runs count.
+  if (opts.workerProfile !== "research") {
+    void recordSubagentEvent({
+      kind: "turn",
+      ts: Date.now(),
+      sessionId: sessionFile.id,
+      offered: workerTools.some((tool) => tool.name === "subagent"),
+      guidance: delegationGuidance.kind,
+    });
+  }
 
   // Build messages
   const messages: ChatMessage[] = [];

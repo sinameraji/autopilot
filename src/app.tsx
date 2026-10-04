@@ -45,6 +45,7 @@ import { isImmediateSubagentCommand, isRunNowCommand, SubagentPanel, useSubagent
 import { planTriageAction, steerMessage, triageIncoming, type TriageResult } from "./agent/inbox-triage.js";
 import { answerAside } from "./agent/aside.js";
 import { workerRegistry } from "./tools/worker-registry.js";
+import { recordSubagentEvent } from "./tools/subagent-stats.js";
 import { TaskList } from "./ui/task-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
@@ -1941,6 +1942,13 @@ function App({
       const turnTools = [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current].filter(
         (tool) => tool.name !== "subagent" || allowsSubagentDispatch(delegationGuidance.kind),
       );
+      void recordSubagentEvent({
+        kind: "turn",
+        ts: Date.now(),
+        sessionId: ensureSessionId(),
+        offered: turnTools.some((tool) => tool.name === "subagent"),
+        guidance: delegationGuidance.kind,
+      });
 
       supervisorRef.current.startTurn(
         {
