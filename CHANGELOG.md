@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.16.0](https://github.com/sinameraji/autopilot/compare/v1.15.0...v1.16.0) (2026-10-04)
+
+
+### Features
+
+* **server:** bind each Aster conversation to its own Hotcell microVM ([276a77d](https://github.com/sinameraji/autopilot/commit/276a77d7f5718688c13a9ab4160fb287d3123783))
+* **server:** bind each Aster conversation to its own Hotcell microVM ([e5bc8b7](https://github.com/sinameraji/autopilot/commit/e5bc8b76597d7f16d301e4501fb7ad6b0a022d69))
+* **subagents:** make subagents reachable and visible ([a681518](https://github.com/sinameraji/autopilot/commit/a68151858bd91b95eb1164ddc169b2e82e3812da))
+* **subagents:** make subagents reachable and visible ([ceedc8d](https://github.com/sinameraji/autopilot/commit/ceedc8da803fac205524bd9c0773a0a2911a0b2b))
+
+
+### Bug Fixes
+
+* **subagents:** install the full worker CLI and lazy-load resvg ([0d86532](https://github.com/sinameraji/autopilot/commit/0d865321e9fbd806236d31989e43b5688af2ea93))
+
 ## [1.15.0](https://github.com/sinameraji/autopilot/compare/v1.14.0...v1.15.0) (2026-10-04)
 
 
