@@ -137,6 +137,8 @@ export interface WorkerResultMessage {
   openQuestions?: string[];
   /** True when findings came from the worker's validated JSON report rather than raw text. */
   structured?: boolean;
+  /** What code the subagent saw (local changes included, or why not). */
+  snapshotNote?: string;
 }
 
 /** Replace lone UTF-16 surrogates with the replacement character (U+FFFD).

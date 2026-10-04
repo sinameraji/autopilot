@@ -519,7 +519,7 @@ const handleSubagents: Handler = (ctx, rest, arg) => {
     setEvents((events) => [...events, {
       kind: "info",
       key: mkKey(),
-      text: `${formatRunningSubagents()}\n\nsubagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto · /subagents list · /subagents cancel <n>|all\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean, pushed Git checkout; workers are read-only.`,
+      text: `${formatRunningSubagents()}\n\nsubagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto · /subagents list · /subagents cancel <n>|all\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Subagents run in local Hotcell sandboxes: install and start Hotcell and run "hotcell keys add openrouter". They see your current working tree (including uncommitted changes) and are read-only.`,
     }]);
     return true;
   }
