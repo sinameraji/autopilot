@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chmod, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
-import { formatWorkerResult, spawnWorkerTool } from "./spawn-worker.js";
+import { formatWorkerResult, fromLegacySpawnWorkerArgs, subagentTool } from "./subagent.js";
 import { workerRegistry } from "./worker-registry.js";
 import type { ToolContext } from "./registry.js";
 
@@ -46,14 +46,23 @@ after(async () => {
   await rm(configHome, { recursive: true, force: true });
 });
 
-describe("spawnWorkerTool local Hotcell routing", () => {
-  it("exposes only read-only plan workers and no remote execution controls", () => {
-    const parameters = spawnWorkerTool.parameters as {
-      properties: Record<string, { enum?: string[] }>;
-    };
-    assert.deepEqual(parameters.properties.mode?.enum, ["plan"]);
-    assert.ok(!("branchName" in parameters.properties));
-    assert.ok(!("tools" in parameters.properties));
+describe("subagent tool", () => {
+  it("is a direct, concurrent, mission-based tool with no remote or write controls", () => {
+    const parameters = subagentTool.parameters as { properties: Record<string, unknown>; required: string[] };
+    assert.equal(subagentTool.name, "subagent");
+    assert.deepEqual(parameters.required, ["mission"]);
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ["context", "maxCostUsd", "mission"]);
+    assert.equal(subagentTool.concurrent, true);
+    assert.equal(subagentTool.codeModeDirect, true);
+    assert.match(subagentTool.description, /IN THE SAME RESPONSE/);
+    assert.match(subagentTool.description, /cannot edit files/);
+  });
+
+  it("accepts arguments recorded under the old spawn_worker name", () => {
+    assert.deepEqual(
+      fromLegacySpawnWorkerArgs({ mode: "plan", task: "map auth", context: "ctx", budget: { maxCostUsd: 0.5 } }),
+      { mission: "map auth", context: "ctx", maxCostUsd: 0.5 },
+    );
   });
 
   it("ignores legacy remote endpoint settings and reports a provider error", async () => {
@@ -67,8 +76,8 @@ describe("spawnWorkerTool local Hotcell routing", () => {
     }) as typeof fetch;
 
     await assert.rejects(
-      () => spawnWorkerTool.run({ mode: "plan", task: "research" }, { cwd: process.cwd(), model: "openai/gpt-4o-mini" }),
-      /Local Hotcell workers require an OpenRouter-backed session/,
+      () => subagentTool.run({ mission: "research" }, { cwd: process.cwd(), model: "openai/gpt-4o-mini" }),
+      /Subagents need an OpenRouter-backed session/,
     );
     assert.equal(fetchCalls, 0);
   });
@@ -80,8 +89,8 @@ describe("spawnWorkerTool local Hotcell routing", () => {
     process.env.KIMIFLARE_WORKER_ENDPOINT = "https://remote-worker.invalid";
 
     await assert.rejects(
-      () => spawnWorkerTool.run({ mode: "plan", task: "research" }, { cwd: process.cwd(), model: "openai/gpt-4o-mini" }),
-      /Local Hotcell workers do not support custom model endpoints/,
+      () => subagentTool.run({ mission: "research" }, { cwd: process.cwd(), model: "openai/gpt-4o-mini" }),
+      /Subagents do not support custom model endpoints/,
     );
   });
 });
@@ -151,7 +160,7 @@ describe("cancelling a running subagent", () => {
   it("returns a plain cancellation result for the coordinator, and the turn is untouched", { skip: process.platform === "win32" }, async () => {
     const { ctx } = await setup();
     const turn = new AbortController();
-    const running = spawnWorkerTool.run({ mode: "plan", task: "map the auth flow" }, ctx(turn.signal));
+    const running = subagentTool.run({ mission: "map the auth flow" }, ctx(turn.signal));
     await waitForWorker();
     const [worker] = workerRegistry.list();
     assert.ok(worker, "worker is registered while running");
@@ -167,7 +176,7 @@ describe("cancelling a running subagent", () => {
   it("still reports a turn abort as a failure, not a user decision", { skip: process.platform === "win32" }, async () => {
     const { ctx } = await setup();
     const turn = new AbortController();
-    const running = spawnWorkerTool.run({ mode: "plan", task: "map the auth flow" }, ctx(turn.signal));
+    const running = subagentTool.run({ mission: "map the auth flow" }, ctx(turn.signal));
     await waitForWorker();
     turn.abort();
     await assert.rejects(running, /cancelled/);

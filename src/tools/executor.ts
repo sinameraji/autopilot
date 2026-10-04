@@ -14,7 +14,7 @@ import { changelogImageTool } from "./changelog-image.js";
 import { browserFetchTool } from "./browser.js";
 import { tasksSetTool } from "./tasks.js";
 import { memoryRememberTool, memoryRecallTool, memoryForgetTool } from "./memory.js";
-import { spawnWorkerTool } from "./spawn-worker.js";
+import { subagentTool } from "./subagent.js";
 import { presentPlanOptionsTool } from "./plan-options.js";
 import { ToolArtifactStore } from "./artifact-store.js";
 import { reduceToolOutput, DEFAULT_REDUCER_CONFIG } from "./reducer.js";
@@ -46,7 +46,7 @@ export const ALL_TOOLS: ToolSpec[] = [
   memoryRememberTool,
   { ...memoryRecallTool, isReadOnly: true },
   memoryForgetTool,
-  spawnWorkerTool,
+  subagentTool,
   { ...presentPlanOptionsTool, isReadOnly: true },
   jobStartTool,
   jobStatusTool,
@@ -302,7 +302,9 @@ export class ToolExecutor {
     ctx: ToolContext,
     onFileChange?: (path: string, content: string) => void,
   ): Promise<ToolResult> {
-    const tool = this.tools.get(call.name);
+    // `spawn_worker` was renamed to `subagent`; resumed sessions and models
+    // primed by old history may still emit the old name.
+    const tool = this.tools.get(call.name) ?? (call.name === "spawn_worker" ? this.tools.get("subagent") : undefined);
     if (!tool) {
       return {
         tool_call_id: call.id,

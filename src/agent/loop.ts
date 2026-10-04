@@ -459,13 +459,18 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
   let toolDefs: ReturnType<typeof toOpenAIToolDefs>;
   let codeModeApiString = "";
 
+  // Code Mode: most tools live inside execute_code's API, but long-running or
+  // parallel tools (subagents) stay direct tools — the sandbox is synchronous
+  // and time-limited, so it can neither host them nor run them concurrently.
+  const sandboxTools = opts.tools.filter((tool) => !tool.codeModeDirect);
+  const directTools = opts.tools.filter((tool) => tool.codeModeDirect);
   if (codeMode) {
-    const toolsKey = stableStringify(opts.tools);
+    const toolsKey = stableStringify(sandboxTools);
     const cached = codeModeApiCache.get(toolsKey);
     if (cached) {
       codeModeApiString = cached;
     } else {
-      codeModeApiString = generateTypeScriptApi(opts.tools);
+      codeModeApiString = generateTypeScriptApi(sandboxTools);
       codeModeApiCache.set(toolsKey, codeModeApiString);
     }
     toolDefs = [
@@ -480,7 +485,10 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
             `IMPORTANT — explore through code, not direct tools: to read files, run shell commands, grep, or glob, ` +
             `call api.read(...), api.bash(...), api.grep(...), api.glob(...) INSIDE this code block and console.log only what you need. ` +
             `Do NOT call read/bash/grep/glob as separate tools — their full output floods your context, while here only what you log returns. ` +
-            `Batch multiple reads/greps/commands into a single execute_code call.`,
+            `Batch multiple reads/greps/commands into a single execute_code call.` +
+            (directTools.length > 0
+              ? `\n\nNot in this API — call these as separate tools instead: ${directTools.map((t) => t.name).join(", ")}.`
+              : ""),
           parameters: {
             type: "object",
             properties: {
@@ -498,6 +506,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           },
         },
       },
+      ...toOpenAIToolDefs(directTools),
     ];
   } else {
     toolDefs = toOpenAIToolDefs(opts.tools);
@@ -730,7 +739,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           const call: ToolCall = {
             id: ev.id,
             type: "function",
-            function: { name: ev.name, arguments: safeArgs },
+            function: { name: normalizeToolName(ev.name, opts.tools), arguments: safeArgs },
           };
           toolCalls.push(call);
           opts.callbacks.onToolCallFinalized?.(call);
@@ -1229,7 +1238,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
 
         const sandboxResult = await runInSandbox({
           code,
-          tools: opts.tools,
+          tools: sandboxTools,
           executor: opts.executor,
           askPermission: opts.callbacks.askPermission,
           ctx: { cwd: opts.cwd, signal: opts.signal, onTasks: wrappedOnTasks, onPlanOptions: opts.callbacks.onPlanOptions, coauthor: opts.coauthor, memoryManager: opts.memoryManager, sessionId: opts.sessionId, githubToken: opts.githubToken },
@@ -1630,6 +1639,12 @@ function parseArgsObject(raw: string): Record<string, unknown> {
 function replaceMessagesInPlace(target: ChatMessage[], next: ChatMessage[]): void {
   if (next === target) return;
   target.splice(0, target.length, ...next);
+}
+
+/** `spawn_worker` was renamed to `subagent`; models primed by older history
+ *  may still emit the old name. The subagent tool accepts the old arguments. */
+function normalizeToolName(name: string, tools: ToolSpec[]): string {
+  return name === "spawn_worker" && tools.some((t) => t.name === "subagent") ? "subagent" : name;
 }
 
 function validateToolArguments(raw: string): string {

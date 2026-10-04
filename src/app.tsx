@@ -41,7 +41,7 @@ import { CheckpointPicker } from "./ui/checkpoint-picker.js";
 import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
 import { QueuePlanPicker } from "./ui/queue-plan-picker.js";
 import { createQueueBatch, type QueuedPrompt } from "./agent/queue-batch.js";
-import { isImmediateSubagentCommand, SubagentPanel } from "./ui/subagent-panel.js";
+import { isImmediateSubagentCommand, isRunNowCommand, SubagentPanel, useSubagentList } from "./ui/subagent-panel.js";
 import { planTriageAction, steerMessage, triageIncoming, type TriageResult } from "./agent/inbox-triage.js";
 import { answerAside } from "./agent/aside.js";
 import { workerRegistry } from "./tools/worker-registry.js";
@@ -284,11 +284,14 @@ function App({
     hasAnyModal,
   } = modals;
   const [queue, setQueue] = useState<QueuedPrompt[]>([]);
+  /** Running subagents, for the Camouflage activity panel (bridge snapshot). */
+  const runningSubagents = useSubagentList();
+  const announcedSubagentsRef = useRef<Set<string>>(new Set());
   /** Latest queue for async triage callbacks (state closures go stale). */
   const queueRef = useRef<QueuedPrompt[]>([]);
   queueRef.current = queue;
   const triageQueuedRef = useRef<((item: QueuedPrompt) => Promise<void>) | null>(null);
-  const promoteQueuedRef = useRef<(() => void) | null>(null);
+  const promoteQueuedRef = useRef<(() => boolean) | null>(null);
   const [queuePlanDraft, setQueuePlanDraft] = useState<QueuedPrompt[] | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -1936,7 +1939,7 @@ function App({
       }
 
       const turnTools = [...ALL_TOOLS, ...mcpToolsRef.current, ...lspToolsRef.current].filter(
-        (tool) => tool.name !== "spawn_worker" || allowsSubagentDispatch(delegationGuidance.kind),
+        (tool) => tool.name !== "subagent" || allowsSubagentDispatch(delegationGuidance.kind),
       );
 
       supervisorRef.current.startTurn(
@@ -2432,6 +2435,16 @@ function App({
         }
       }
 
+      if (isRunNowCommand(trimmedFull)) {
+        setInput("");
+        setHistoryIndex(-1);
+        const promoted = promoteQueuedRef.current?.() ?? false;
+        if (!promoted) {
+          setEvents((e) => [...e, { kind: "info", key: mkKey(), text: busyRef.current || supervisorRef.current.isRunning ? "nothing queued to run now" : "nothing is running — queued messages run next anyway" }]);
+        }
+        return;
+      }
+
       // Subagent management must work mid-turn: workers only run while a turn
       // is busy, so queueing these commands would make them useless.
       if ((busyRef.current || supervisorRef.current.isRunning) && isImmediateSubagentCommand(trimmedFull)) {
@@ -2479,6 +2492,24 @@ function App({
     [processMessage, handleSlash, queue, history, historyIndex, events],
   );
   submitRef.current = submit;
+
+  // Camouflage shows subagents in its activity panel, not inline; announce
+  // each one once so the user knows it exists and how to stop it.
+  useEffect(() => {
+    if (!bridge) return;
+    const seen = announcedSubagentsRef.current;
+    const fresh = runningSubagents.filter((w) => !seen.has(w.id));
+    if (fresh.length === 0) return;
+    for (const w of fresh) seen.add(w.id);
+    setEvents((evts) => [
+      ...evts,
+      ...fresh.map((w) => ({
+        kind: "info" as const,
+        key: mkKey(),
+        text: `subagent #${w.index} started: ${w.task.replace(/\s+/g, " ").slice(0, 100)} · /agents to view or stop`,
+      })),
+    ]);
+  }, [bridge, runningSubagents]);
 
   // --- Mid-turn triage (#725) -------------------------------------------
   // Messages sent while the agent works are queued first; triage may then
@@ -2528,6 +2559,10 @@ function App({
       case "keep-queued":
         if (action.note) {
           setQueue((q) => q.map((i) => (i.key === item.key ? { ...i, triage: { source: result.source, reason: result.reason } } : i)));
+          // Camouflage has no inline queue line; say it in the transcript.
+          if (bridge) {
+            setEvents((evts) => [...evts, { kind: "info", key: mkKey(), text: `${action.note} — runs after the current turn · /now to run it first` }]);
+          }
         }
         return;
       case "aside": {
@@ -2568,10 +2603,11 @@ function App({
     applyTriage(item, result);
   };
   promoteQueuedRef.current = () => {
-    if (!(busyRef.current || supervisorRef.current.isRunning)) return;
+    if (!(busyRef.current || supervisorRef.current.isRunning)) return false;
     const latest = [...queueRef.current].reverse().find((q) => q.triage !== undefined);
-    if (!latest) return;
+    if (!latest) return false;
     applyTriage(latest, { kind: "steer", source: "rule", reason: "you asked to run it now" }, true);
+    return true;
   };
 
   useEffect(() => {
@@ -2811,7 +2847,7 @@ function App({
     bridge.sync({
       events,
       busy,
-      workers: [],
+      workers: runningSubagents,
       mode,
       model: cfg?.model ?? "",
       usage,
@@ -3021,7 +3057,7 @@ function App({
                         {"  · "}
                         {q.triage.source === "pending" ? "deciding…" : q.triage.source === "default" ? "queued (unsure)" : "queued"}
                         {" · "}
-                        <Text bold>Ctrl+G</Text> run this now
+                        <Text bold>Ctrl+G</Text> or <Text bold>/now</Text> run this now
                       </Text>
                     ) : null}
                   </Text>

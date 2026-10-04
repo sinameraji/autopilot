@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { isImmediateSubagentCommand } from "./subagent-panel.js";
+import { isImmediateSubagentCommand, isRunNowCommand } from "./subagent-panel.js";
 import { cancelSubagents, formatElapsed, formatRunningSubagents } from "./slash-commands.js";
 import { workerRegistry } from "../tools/worker-registry.js";
 
@@ -12,6 +12,13 @@ describe("subagent commands", () => {
     for (const cmd of ["/subagents auto", "/subagents off", "/subagentsx", "please /subagents cancel 1"]) {
       assert.equal(isImmediateSubagentCommand(cmd), false, cmd);
     }
+  });
+
+  it("recognizes /now exactly", () => {
+    assert.equal(isRunNowCommand("/now"), true);
+    assert.equal(isRunNowCommand(" /NOW "), true);
+    assert.equal(isRunNowCommand("/now please"), false);
+    assert.equal(isRunNowCommand("do it /now"), false);
   });
 
   it("lists and cancels running workers by number or all", () => {

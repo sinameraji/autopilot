@@ -1,4 +1,4 @@
-import type { ActiveWorker } from "../agent/supervisor.js";
+import type { RunningWorker } from "../tools/worker-registry.js";
 import type { JobRecord } from "../jobs/manager.js";
 
 /** Activity payload understood by camouflage-tui's inline protocol. */
@@ -45,43 +45,15 @@ export function activityFromJob(job: JobRecord): ActivityItem {
   };
 }
 
-export function activityFromWorker(worker: ActiveWorker): ActivityItem {
-  const status: ActivityItem["status"] = worker.status === "pending"
-    ? "waiting"
-    : worker.status === "running"
-      ? "running"
-      : worker.status === "completed"
-        ? "done"
-        : worker.status === "budget_exhausted"
-          ? "needs_attention"
-          : "failed";
-  const steps = worker.steps?.map((step) => ({
-    title: step.label,
-    status: step.status === "active"
-      ? "running" as const
-      : step.status === "completed"
-        ? "done" as const
-        : step.status === "failed"
-          ? "failed" as const
-          : "pending" as const,
-  }));
-  const doneCount = steps?.filter((step) => step.status === "done" || step.status === "failed").length ?? 0;
-  const summary = worker.error
-    ?? worker.steps?.find((step) => step.status === "active")?.label
-    ?? (worker.status === "budget_exhausted" ? "Budget exhausted; inspect partial results" : undefined);
+/** A running subagent as an activity row; each one can be stopped on its own. */
+export function activityFromSubagent(worker: RunningWorker): ActivityItem {
   return {
     id: `agent:${worker.id}`,
     kind: "agent",
-    title: `${worker.mode}: ${worker.task}`,
-    status,
-    // A single worker cannot currently be cancelled independently; the only
-    // available AbortSignal cancels the entire multi-agent batch.
-    stoppable: false,
-    ...(summary ? { summary } : {}),
-    ...(steps && steps.length > 0 ? {
-      progress: worker.status === "completed" ? 1 : doneCount / steps.length,
-      steps,
-    } : {}),
+    title: `subagent #${worker.index}: ${worker.task}`,
+    status: "running",
+    stoppable: worker.status === "running",
+    ...(worker.status === "cancelling" ? { summary: "Stopping…" } : {}),
     started_at_ms: worker.startedAt,
   };
 }

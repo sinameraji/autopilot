@@ -78,6 +78,10 @@ export interface ToolSpec<Args = any> {
    *  Permission prompts for a concurrent batch are serialized and
    *  same-tool calls are approved together (see agent/permission-gate.ts). */
   concurrent?: boolean;
+  /** In Code Mode, expose this tool directly next to `execute_code` instead
+   *  of inside the sandbox API (for long-running or parallel tools that the
+   *  synchronous, time-limited sandbox cannot host). */
+  codeModeDirect?: boolean;
   render?: (args: Args) => ToolRender;
   run: (args: Args, ctx: ToolContext) => Promise<string | ToolOutput>;
 }

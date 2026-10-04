@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolSpec, ToolContext, ToolOutput, Task } from "./registry.js";
-import { Resvg } from "@resvg/resvg-js";
 import { runKimi } from "../agent/client.js";
 import { hasLlmAuth } from "../agent/llm-auth.js";
 
@@ -421,7 +420,9 @@ export const changelogImageTool: ToolSpec<ChangelogImageArgs> = {
     const logoBase64 = await loadLogoBase64();
     const svg = buildChangelogSvg({ owner: args.owner, repo: args.repo, version, writeUp, logoBase64 });
 
-    // 5. Render to PNG
+    // 5. Render to PNG. resvg ships a per-platform native binary; load it only
+    // here so a missing binary can't crash the whole CLI at startup.
+    const { Resvg } = await import("@resvg/resvg-js");
     const resvg = new Resvg(svg, {
       fitTo: { mode: "zoom", value: 2 },
       font: {

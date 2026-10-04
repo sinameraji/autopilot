@@ -1,8 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import type { ActiveWorker } from "../agent/supervisor.js";
+import type { RunningWorker } from "../tools/worker-registry.js";
 import type { JobRecord } from "../jobs/manager.js";
-import { activityFromJob, activityFromWorker, diffActivityItems, isActiveJob } from "./activity.js";
+import { activityFromJob, activityFromSubagent, diffActivityItems, isActiveJob } from "./activity.js";
 
 const job = (status: JobRecord["status"], patch: Partial<JobRecord> = {}): JobRecord => ({
   id: "job-1",
@@ -21,13 +21,13 @@ const job = (status: JobRecord["status"], patch: Partial<JobRecord> = {}): JobRe
   ...patch,
 });
 
-const worker = (patch: Partial<ActiveWorker> = {}): ActiveWorker => ({
+const worker = (patch: Partial<RunningWorker> = {}): RunningWorker => ({
   id: "worker-1",
-  mode: "plan",
+  index: 1,
   task: "inspect sessions",
+  model: "m",
   status: "running",
   startedAt: 100,
-  logs: [],
   ...patch,
 });
 
@@ -73,26 +73,17 @@ describe("activity adapters", () => {
     assert.equal(isActiveJob(job("completed")), false);
   });
 
-  it("maps worker progress and keeps batch-only cancellation unavailable per worker", () => {
-    const item = activityFromWorker(worker({
-      steps: [
-        { label: "Read files", status: "completed" },
-        { label: "Check behavior", status: "active" },
-        { label: "Report findings", status: "pending" },
-      ],
-    }));
-    assert.equal(item.id, "agent:worker-1");
-    assert.equal(item.kind, "agent");
-    assert.equal(item.status, "running");
-    assert.equal(item.stoppable, false);
-    assert.equal(item.summary, "Check behavior");
-    assert.equal(item.progress, 1 / 3);
-    assert.deepEqual(item.steps?.map((step) => step.status), ["done", "running", "pending"]);
-  });
-
-  it("surfaces partial-budget results as needing attention", () => {
-    const item = activityFromWorker(worker({ status: "budget_exhausted" }));
-    assert.equal(item.status, "needs_attention");
-    assert.match(item.summary ?? "", /partial results/);
+  it("maps running subagents as individually stoppable agent rows", () => {
+    assert.deepEqual(activityFromSubagent(worker()), {
+      id: "agent:worker-1",
+      kind: "agent",
+      title: "subagent #1: inspect sessions",
+      status: "running",
+      stoppable: true,
+      started_at_ms: 100,
+    });
+    const stopping = activityFromSubagent(worker({ status: "cancelling" }));
+    assert.equal(stopping.stoppable, false);
+    assert.equal(stopping.summary, "Stopping…");
   });
 });

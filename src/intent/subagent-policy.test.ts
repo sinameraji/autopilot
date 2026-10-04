@@ -79,7 +79,7 @@ describe("resolveSubagentGuidance", () => {
         ask: async () => choose(0.99),
       });
       assert.equal(result.kind, "explicit-sequential", prompt);
-      assert.match(result.directive ?? "", /Do not call spawn_worker/);
+      assert.match(result.directive ?? "", /Do not call the subagent tool/);
     }
   });
 
@@ -95,7 +95,7 @@ describe("resolveSubagentGuidance", () => {
     assert.equal(result.kind, "suggest");
     assert.equal(result.probability, 0.7);
     assert.deepEqual(question?.kind === "choose" ? question.options : [], [...SUBAGENT_JEV_OPTIONS]);
-    assert.match(result.directive ?? "", /normal permission prompt is the required user confirmation/);
+    assert.match(result.directive ?? "", /permission prompt is the user's confirmation/);
   });
 
   it("lets the coordinator assess substantial task structure without magic words or Jev", async () => {
@@ -109,9 +109,9 @@ describe("resolveSubagentGuidance", () => {
     });
     assert.equal(result.kind, "auto-delegate");
     assert.equal(result.reason, "substantial task; coordinator assesses independence");
-    assert.match(result.directive ?? "", /assess its structure, dependencies, and coordination cost/);
-    assert.match(result.directive ?? "", /normal permission approval/);
-    assert.match(result.directive ?? "", /spend cap/);
+    assert.match(result.directive ?? "", /decide whether parts of the investigation are independent/);
+    assert.match(result.directive ?? "", /subagent tool in the same response/);
+    assert.match(result.directive ?? "", /Skip delegation for small, tightly coupled/);
     assert.equal(calls, 0);
   });
 

@@ -40,8 +40,8 @@ import { EVENT_DESCRIPTIONS, EVENT_COMMAND_EXAMPLES, MATCHER_EXAMPLES } from "./
 import { MODES, type Mode } from "./mode.js";
 import { logger } from "./util/logger.js";
 import { JobManager, type JobRecord } from "./jobs/manager.js";
-import { activityFromJob, activityFromWorker, diffActivityItems, isActiveJob, type ActivityItem } from "./ui/activity.js";
-import type { ActiveWorker } from "./agent/supervisor.js";
+import { activityFromJob, activityFromSubagent, diffActivityItems, isActiveJob, type ActivityItem } from "./ui/activity.js";
+import { workerRegistry, type RunningWorker } from "./tools/worker-registry.js";
 
 interface CamouflageHandle {
   send(eventType: string, payload?: Record<string, unknown>): boolean;
@@ -197,7 +197,7 @@ class View implements AppBridge {
   private readonly jobLogOffsets = new Map<string, number>();
   private readonly workerLogOffsets = new Map<string, number>();
   private latestJobs: JobRecord[] = [];
-  private latestWorkers: ActiveWorker[] = [];
+  private latestWorkers: RunningWorker[] = [];
   private activitySnapshotSent = false;
   private activityDetailId: string | null = null;
   private activityPoll: ReturnType<typeof setInterval> | null = null;
@@ -245,6 +245,11 @@ class View implements AppBridge {
   }
 
   stopActivity(id: string): void {
+    if (id.startsWith("agent:")) {
+      // Stops this subagent only; the turn and other subagents keep going.
+      workerRegistry.cancel(id.slice("agent:".length));
+      return;
+    }
     try {
       const job = this.jobs.get(id);
       if (!job || !isActiveJob(job)) return;
@@ -263,7 +268,7 @@ class View implements AppBridge {
     this.jobs.close();
   }
 
-  private syncActivity(workers: ActiveWorker[]): void {
+  private syncActivity(workers: RunningWorker[]): void {
     this.latestWorkers = workers;
     try {
       const records = this.jobs.list({ limit: 100 });
@@ -281,8 +286,8 @@ class View implements AppBridge {
       const id = `agent:${worker.id}`;
       currentWorkers.add(id);
       this.workerActivities.set(id, {
-        item: activityFromWorker(worker),
-        logs: [...worker.logs],
+        item: activityFromSubagent(worker),
+        logs: [`mission: ${worker.task}`, `model: ${worker.model}`],
         active: true,
         expiresAt: Number.POSITIVE_INFINITY,
       });
@@ -292,12 +297,13 @@ class View implements AppBridge {
       activity.active = false;
       activity.expiresAt = now + 10 * 60_000;
       if (activity.item.status === "running" || activity.item.status === "waiting") {
-        const cancelled = activity.logs.some((line) => /cancelled by user|cancelling worker/i.test(line));
-        const failed = activity.logs.some((line) => line.includes("[coordinator] Fetch failed:"));
+        // A subagent that was stopping when it left the registry was cancelled.
+        const cancelled = activity.item.summary === "Stopping…";
         activity.item = {
           ...activity.item,
-          status: cancelled ? "stopped" : failed ? "failed" : "done",
-          summary: cancelled ? "Stopped" : failed ? activity.item.summary ?? "Worker failed" : "Worker finished",
+          status: cancelled ? "stopped" : "done",
+          stoppable: false,
+          summary: cancelled ? "Stopped" : "Finished — results returned to the agent",
           updated_at_ms: now,
         };
       }

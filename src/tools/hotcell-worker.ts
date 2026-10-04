@@ -143,7 +143,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       ...FIND_REPO_ROOT,
       `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
       `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
-      `npm install --prefix ${WORKER_PREFIX} --no-audit --no-fund --omit=optional --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
+      `npm install --prefix ${WORKER_PREFIX} --no-audit --no-fund --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
     ].join(" && ");
     const setup = await execute(command, ["exec", cellId, setupCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs: options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,

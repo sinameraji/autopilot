@@ -1,12 +1,14 @@
 # Local Hotcell subagents
 
-Autopilot runs delegated research workers in **local Hotcell sandboxes only**. There is no remote worker endpoint or remote worker execution mode. The coordinator owns the conversation, decides whether parallel research is useful, and applies any changes itself.
+Autopilot delegates independent investigations to **subagents** through the `subagent` tool. Each subagent is a separate, read-only Autopilot instance running in a **local Hotcell sandbox** (there is no remote worker mode). The main agent owns the conversation, decides whether parallel investigation is useful, and applies any changes itself. The tool used to be called `spawn_worker`; old sessions that reference it keep working.
+
+The `subagent` tool is always offered as a direct tool, including in Code Mode (where it sits next to `execute_code` instead of inside its sandbox API).
 
 ## Automatic delegation
 
-**/subagents auto** is the default. For substantial requests, the coordinator may split independent research into bounded missions, launch read-only plan workers, wait for their results, and synthesize them. Small, sequential, or tightly coupled work stays in the main session. An explicit request for or against delegation takes precedence.
+**/subagents auto** is the default. For substantial requests, the coordinator may split independent research into bounded missions, launch read-only subagents in parallel, wait for their results, and synthesize them. Small, sequential, or tightly coupled work stays in the main session. An explicit request for or against delegation takes precedence.
 
-**/subagents suggest** requests conservative suggestions; **/subagents off** disables automatic suggestions. Worker calls still require normal tool permission. When the coordinator launches several workers in one step they run in parallel, and a single prompt listing every mission approves (or denies) the whole batch. Running subagents are listed above the prompt with their elapsed time; `/subagents list` shows them and `/subagents cancel <n>` (or `/subagents cancel all`) stops one without interrupting the turn or the other workers. These commands run immediately even while the agent is busy. Interrupting a turn (Ctrl+C) is separate and still stops everything. **/multi-agent** is retired and no longer configures remote workers or deploys Cloudflare workers.
+**/subagents suggest** requests conservative suggestions; **/subagents off** disables automatic suggestions. Worker calls still require normal tool permission. When the coordinator launches several workers in one step they run in parallel, and a single prompt listing every mission approves (or denies) the whole batch. Running subagents are listed above the prompt with their elapsed time (Ink) or in the activity panel opened with `/agents` (Camouflage, which also has a Stop action per subagent); `/subagents list` shows them and `/subagents cancel <n>` (or `/subagents cancel all`) stops one without interrupting the turn or the other workers. These commands run immediately even while the agent is busy. Interrupting a turn (Ctrl+C) is separate and still stops everything. **/multi-agent** is retired and no longer configures remote workers or deploys Cloudflare workers.
 
 Automatic subagents are for research only. Workers cannot edit files, open PRs, or execute the old remote execute mode. The coordinator performs implementation in the local checkout after reviewing findings.
 

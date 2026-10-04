@@ -668,4 +668,103 @@ describe("runAgentTurn", () => {
     assert.equal(messages, original);
     assert.equal(messages.at(-1)!.content, "final", "messages appended after the hook reach the caller's array");
   });
+
+  it("keeps subagents as direct tools next to execute_code in Code Mode", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "investigate auth and billing" },
+    ];
+    let active = 0;
+    let maxActive = 0;
+    const read: ToolSpec = { name: "read", description: "read a file", parameters: { type: "object", properties: {} }, needsPermission: false, isReadOnly: true, run: async () => "x" };
+    const subagent: ToolSpec<{ mission: string }> = {
+      name: "subagent",
+      description: "delegate",
+      parameters: { type: "object", properties: { mission: { type: "string" } } },
+      needsPermission: false,
+      concurrent: true,
+      codeModeDirect: true,
+      run: async (args) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 30));
+        active--;
+        return `findings: ${args.mission}`;
+      },
+    };
+    const bodies: Array<{ tools?: Array<{ function: { name: string; description: string } }> }> = [];
+    let requests = 0;
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [
+            { choices: [{ delta: { tool_calls: ["auth", "billing"].map((mission, index) => ({ index, id: `s-${mission}`, type: "function", function: { name: "subagent", arguments: JSON.stringify({ mission }) } })) } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [{ choices: [{ delta: { content: "done" } }] }, { choices: [{ finish_reason: "stop" }] }];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [read, subagent],
+      executor: new RealToolExecutor([read, subagent]),
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      codeMode: true,
+      callbacks: { askPermission: async () => "allow" },
+    });
+    const offered = bodies[0]!.tools!.map((t) => t.function.name);
+    assert.deepEqual(offered, ["execute_code", "subagent"]);
+    const api = bodies[0]!.tools![0]!.function.description;
+    assert.match(api, /read/);
+    assert.doesNotMatch(api.split("Not in this API")[0]!, /subagent/, "subagent is not in the sandbox API");
+    assert.match(api, /Not in this API — call these as separate tools instead: subagent/);
+    assert.equal(maxActive, 2, "both subagents ran in parallel");
+    assert.deepEqual(messages.filter((m) => m.role === "tool").map((m) => m.content), ["findings: auth", "findings: billing"]);
+  });
+
+  it("maps the legacy spawn_worker name onto the subagent tool", async () => {
+    const messages: ChatMessage[] = [{ role: "system", content: "sys" }, { role: "user", content: "go" }];
+    const seen: string[] = [];
+    const subagent: ToolSpec = { name: "subagent", description: "d", parameters: { type: "object", properties: {} }, needsPermission: false, concurrent: true, run: async (args) => { seen.push(JSON.stringify(args)); return "ok"; } };
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "old", type: "function", function: { name: "spawn_worker", arguments: JSON.stringify({ mode: "plan", task: "legacy mission" }) } }] } }] }, { choices: [{ finish_reason: "tool_calls" }] }]
+        : [{ choices: [{ delta: { content: "done" } }] }, { choices: [{ finish_reason: "stop" }] }];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [subagent],
+      executor: new RealToolExecutor([subagent]),
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      callbacks: { askPermission: async () => "allow" },
+    });
+    assert.equal(seen.length, 1, "executed rather than rejected as unavailable");
+    assert.equal(messages.find((m) => m.role === "assistant")?.tool_calls?.[0]?.function.name, "subagent");
+  });
 });
