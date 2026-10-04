@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { useSyncExternalStore } from "react";
 import { Text } from "ink";
 
@@ -21,14 +22,25 @@ export type SpinnerType = keyof typeof FRAMES;
 export const ANIMATION_TICK_MS = 100;
 
 let tick = 0;
+let startedAt: number | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 const listeners = new Set<() => void>();
+
+/** Compute the clock tick from elapsed time so delayed callbacks don't slow the animation. */
+export function animationTickAt(start: number, now: number): number {
+  return Math.max(0, Math.floor((now - start) / ANIMATION_TICK_MS));
+}
 
 function subscribe(listener: () => void): () => void {
   listeners.add(listener);
   if (!timer) {
+    tick = 0;
+    startedAt = performance.now();
     timer = setInterval(() => {
-      tick++;
+      if (startedAt === null) return;
+      const nextTick = animationTickAt(startedAt, performance.now());
+      if (nextTick === tick) return;
+      tick = nextTick;
       for (const l of listeners) l();
     }, ANIMATION_TICK_MS);
     timer.unref?.();
@@ -38,6 +50,7 @@ function subscribe(listener: () => void): () => void {
     if (listeners.size === 0 && timer) {
       clearInterval(timer);
       timer = null;
+      startedAt = null;
     }
   };
 }
