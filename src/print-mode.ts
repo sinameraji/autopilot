@@ -16,6 +16,7 @@ import { ToolExecutor, getWorkerTools, RESEARCH_WORKER_TOOL_NAMES } from "./tool
 import type { ChatMessage, ContentPart } from "./agent/messages.js";
 import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "./sessions.js";
+import { sessionFileCompactionTarget } from "./agent/context-budget.js";
 import { encodeImageFile, isImagePath } from "./util/image.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { glob } from "./util/glob.js";
@@ -229,7 +230,11 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
     });
   } else {
     // Continue: load existing messages, filter out old system prompts, keep context
-    const nonSystem = sessionFile.messages.filter((m) => m.role !== "system");
+    // Keep the compiled session state from earlier compaction; it summarizes
+    // archived turns. Other system messages are rebuilt for this run.
+    const nonSystem = sessionFile.messages.filter(
+      (m) => m.role !== "system" || (typeof m.content === "string" && m.content.startsWith("[compiled session state]")),
+    );
     messages.push({
       role: "system",
       content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests}),
@@ -415,6 +420,9 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
           : undefined,
       allowDirectPush: opts.allowDirectPush,
       preferPullRequests: opts.preferPullRequests,
+      // --continue sessions grow across runs; archive older turns onto the
+      // session file (saved below) instead of failing on context size.
+      compaction: sessionFileCompactionTarget(sessionFile),
       callbacks,
     });
   } catch (err) {

@@ -21,6 +21,7 @@ import { ensureOpenRouterCatalog } from "../models/openrouter-catalog.js";
 import { ensureRequestyCatalog } from "../models/requesty-catalog.js";
 import { resolveCustomEndpoint } from "../agent/custom-endpoint.js";
 import { logger } from "../util/logger.js";
+import { sessionFileCompactionTarget, type CompactionTarget } from "../agent/context-budget.js";
 import { resolveSdkConfig } from "./config.js";
 import type { CreateSessionOptions, KimiFlareSession, SessionEvent, SessionUsage, SessionStatus, PromptOptions } from "./types.js";
 import { createDefaultPermissionHandler } from "./permissions.js";
@@ -195,8 +196,14 @@ class InternalSession implements KimiFlareSession {
   };
   private disposed = false;
 
+  /** Persisted compaction state (session state + archived artifacts). */
+  private readonly compactionState: Pick<SessionFile, "sessionState" | "artifactStore">;
+  private readonly compaction: CompactionTarget;
+
   constructor(opts: InternalSessionOpts) {
     this.sessionId = opts.sessionFile.id;
+    this.compactionState = { sessionState: opts.sessionFile.sessionState, artifactStore: opts.sessionFile.artifactStore };
+    this.compaction = sessionFileCompactionTarget(this.compactionState);
     this.cwd = opts.cwd;
     this.messages = opts.messages;
     this.config = opts.config;
@@ -385,6 +392,8 @@ class InternalSession implements KimiFlareSession {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messages: this.messages,
+      sessionState: this.compactionState.sessionState,
+      artifactStore: this.compactionState.artifactStore,
     });
   }
 
@@ -408,6 +417,15 @@ class InternalSession implements KimiFlareSession {
         : undefined;
 
     const callbacks: AgentCallbacks = {
+      onCompacted: (info) => {
+        this.emit({
+          type: "context.compacted",
+          tokensBefore: info.tokensBefore,
+          tokensAfter: info.tokensAfter,
+          turnsRemoved: info.turnsRemoved,
+          artifactsArchived: info.artifactsArchived,
+        });
+      },
       onAssistantStart: () => {
         const messageId = `msg_${this.nextMessageId++}`;
         this.currentAssistantMessageId = messageId;
@@ -549,6 +567,7 @@ class InternalSession implements KimiFlareSession {
       coauthor,
       sessionId: this.sessionId,
       memoryManager: this.memoryManager,
+      compaction: this.compaction,
       allowDirectPush: this.config.allowDirectPush,
       preferPullRequests: this.config.preferPullRequests,
       onIterationEnd: async (messages, _signal) => {
