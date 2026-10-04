@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.17.0](https://github.com/sinameraji/autopilot/compare/v1.16.0...v1.17.0) (2026-10-04)
+
+
+### Features
+
+* **subagents:** see uncommitted work and start in seconds ([dc0d894](https://github.com/sinameraji/autopilot/commit/dc0d89483adcf38a8374b21623953e7fe895503d))
+* **subagents:** see uncommitted work and start in seconds ([fd2b893](https://github.com/sinameraji/autopilot/commit/fd2b893ebdb302c782b676c5452481c34f89a836))
+
 ## [1.16.0](https://github.com/sinameraji/autopilot/compare/v1.15.0...v1.16.0) (2026-10-04)
 
 
