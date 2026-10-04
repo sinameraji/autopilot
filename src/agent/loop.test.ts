@@ -550,4 +550,122 @@ describe("runAgentTurn", () => {
     }
     assert.ok(!JSON.stringify(messages).includes("Delegate independent research"), "directive is never persisted");
   });
+
+  it("compacts older turns at preflight to fit the model budget, in place", async () => {
+    const big = "y".repeat(140_000); // ~40k estimated tokens per turn
+    const messages: ChatMessage[] = [{ role: "system", content: "sys" }];
+    for (let i = 0; i < 4; i++) {
+      messages.push({ role: "user", content: `q${i}` });
+      messages.push({ role: "assistant", content: null, tool_calls: [{ id: `r${i}`, type: "function", function: { name: "read", arguments: "{}" } }] });
+      messages.push({ role: "tool", tool_call_id: `r${i}`, name: "read", content: big });
+      messages.push({ role: "assistant", content: `a${i}` });
+    }
+    messages.push({ role: "user", content: "current question" });
+    const original = messages;
+    let sentTokens = 0;
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as { messages: ChatMessage[] };
+      sentTokens = body.messages.reduce((n, m) => n + String(m.content ?? "").length, 0) / 3.5;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of [{ choices: [{ delta: { content: "ok" } }] }, { choices: [{ finish_reason: "stop" }] }]) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          }
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const state = { value: (await import("./session-state.js")).emptySessionState() };
+    const { ArtifactStore } = await import("./session-state.js");
+    const store = new ArtifactStore();
+    const compacted: Array<{ tokensBefore: number; tokensAfter: number }> = [];
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "unknown/small-model", // inferred 128k window → ~103k input budget
+      messages,
+      tools: [],
+      executor: { list: () => [], run: async () => ({ ok: true, content: "" }) } as unknown as ToolExecutor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      compaction: { getState: () => state.value, setState: (s) => { state.value = s; }, getStore: () => store },
+      callbacks: { askPermission: async () => "allow", onCompacted: (info) => compacted.push(info) },
+    });
+    assert.equal(compacted.length, 1);
+    assert.ok(compacted[0]!.tokensBefore > 103_424 && compacted[0]!.tokensAfter <= 103_424);
+    assert.ok(sentTokens <= 103_424, `request fit the budget: ${sentTokens}`);
+    assert.equal(messages, original, "same array instance");
+    assert.equal(messages.at(-1)!.content, "ok", "host's array holds the final answer");
+    assert.ok(store.list().length > 0, "archived raw tool output is kept");
+  });
+
+  it("fails deterministically with ContextBudgetError when the active turn alone is too large", async () => {
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      return new Response("unexpected", { status: 500 });
+    };
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "z".repeat(500_000) },
+    ];
+    const { ArtifactStore, emptySessionState } = await import("./session-state.js");
+    const store = new ArtifactStore();
+    await assert.rejects(
+      runAgentTurn({
+        openrouterApiKey: "sk-or-test",
+        model: "unknown/small-model",
+        messages,
+        tools: [],
+        executor: { list: () => [], run: async () => ({ ok: true, content: "" }) } as unknown as ToolExecutor,
+        cwd: "/tmp",
+        signal: new AbortController().signal,
+        compaction: { getState: emptySessionState, setState: () => {}, getStore: () => store },
+        callbacks: { askPermission: async () => "allow" },
+      }),
+      (err: Error) => err.name === "ContextBudgetError" && /current turn alone is too large/.test(err.message),
+    );
+    assert.equal(requests, 0, "no request was sent");
+  });
+
+  it("keeps the caller's messages array in sync when onIterationEnd returns a new one", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "sys" },
+      { role: "user", content: "go" },
+    ];
+    const original = messages;
+    let requests = 0;
+    globalThis.fetch = async () => {
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [{ choices: [{ delta: { tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "read", arguments: "{}" } }] } }] }, { choices: [{ finish_reason: "tool_calls" }] }]
+        : [{ choices: [{ delta: { content: "final" } }] }, { choices: [{ finish_reason: "stop" }] }];
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const read: ToolSpec = { name: "read", description: "read", parameters: { type: "object", properties: {} }, needsPermission: false, run: async () => "data" };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [read],
+      executor: { list: () => [read], run: async (call: { id: string; name: string }) => ({ tool_call_id: call.id, name: call.name, ok: true, content: "data" }) } as unknown as ToolExecutor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      // Simulates a host compaction that returns a fresh array.
+      onIterationEnd: async (current) => current.filter(() => true),
+      callbacks: { askPermission: async () => "allow" },
+    });
+    assert.equal(messages, original);
+    assert.equal(messages.at(-1)!.content, "final", "messages appended after the hook reach the caller's array");
+  });
 });

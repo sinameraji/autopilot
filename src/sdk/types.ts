@@ -76,6 +76,8 @@ export type SessionEvent =
 
   // Warnings
   | { type: "warning"; message: string }
+  /** Older turns were archived so the next request fits the model's input budget. */
+  | { type: "context.compacted"; tokensBefore: number; tokensAfter: number; turnsRemoved: number; artifactsArchived: number }
 
   // Status
   | { type: "status"; status: "idle" | "streaming" | "tool_executing" | "compacting" | "error" };

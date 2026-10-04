@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import { buildSystemPrompt, buildSessionPrefix } from "./system-prompt.js";
 import { getModelOrInfer } from "../models/registry.js";
 import { createPermissionGate } from "./permission-gate.js";
+import { compactToFit, ContextBudgetError, effectiveInputBudget, type CompactionTarget } from "./context-budget.js";
 import { withTurnDirective } from "./turn-directive.js";
 import type { Mode } from "../mode.js";
 
@@ -63,6 +64,8 @@ export interface AgentCallbacks {
   onRunYield?: (request: RunWaitRequest) => void;
   /** Called when a durable run budget is exhausted at a tool boundary. */
   onRunBudgetExceeded?: (reason: string) => void;
+  /** Called after preflight compaction archived older turns to fit the model budget. */
+  onCompacted?: (info: { tokensBefore: number; tokensAfter: number; turnsRemoved: number; artifactsArchived: number; budgetTokens: number }) => void;
 }
 
 /** Credentials come in as `LlmAuth` fields — spread `llmAuthFromConfig(cfg)`. */
@@ -119,8 +122,13 @@ export interface AgentTurnOpts extends LlmAuth {
    * automatically — no need to thread `hooks` through to those.
    */
   hooks?: import("../hooks/manager.js").HooksManager;
+  /** Where request preflight archives older turns when the next request
+   *  would not fit the model's input budget. Without it, an oversized prompt
+   *  fails with ContextBudgetError. */
+  compaction?: CompactionTarget;
   /** Called after each tool-iteration cycle to allow external compaction or state management.
-   *  Return the (possibly mutated) messages array. */
+   *  Return the (possibly mutated) messages array; the caller's array is
+   *  updated in place, so hosts holding a reference to it stay in sync. */
   onIterationEnd?: (messages: ChatMessage[], signal: AbortSignal) => Promise<ChatMessage[]>;
   /** Pull user input that arrived mid-turn (e.g. steering). Called at every
    *  tool boundary and again when the model answers without tool calls;
@@ -248,16 +256,6 @@ function isHighSignalMemory(memory: {
     (memory.category === "event" && memory.importance >= 3)
   );
 }
-
-/** Default completion budget if the caller doesn't pin one. Mirrors
- *  client.ts. The API counts `input + max_completion_tokens` against the
- *  context window, so this must be subtracted from the soft limit. */
-const DEFAULT_MAX_COMPLETION_TOKENS = 16_384;
-
-/** Extra headroom on top of `max_completion_tokens` to absorb estimator
- *  drift (we estimate prompt tokens via chars-per-token, which under-counts
- *  for code- and JSON-heavy content vs. the server-side tokenizer). */
-const BUDGET_SAFETY_MARGIN_TOKENS = 8_192;
 
 /** Max characters for a single tool result message before truncation.
  *  ~10k chars ≈ 2,500 tokens — generous but prevents runaway growth. */
@@ -620,63 +618,68 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     const keepLastRaw = process.env.KIMIFLARE_REASONING_KEEP_LAST;
     const keepLast = keepLastRaw ? parseInt(keepLastRaw, 10) : 1;
 
-    let apiMessages = opts.messages;
     let shadowStripMetrics:
       | { originalApproxTokens: number; strippedApproxTokens: number; savingsPct: number }
       | undefined;
 
-    if (stripReasoning || shadowStrip) {
-      const stripped = stripHistoricalReasoning(opts.messages, {
-        keepLast: Number.isNaN(keepLast) ? 1 : keepLast,
-      });
-      if (shadowStrip) {
-        const originalSections = analyzePrompt(opts.messages);
-        const strippedSections = analyzePrompt(stripped);
-        const originalApproxTokens = originalSections.reduce(
-          (sum, s) => sum + s.approxTokens,
-          0,
-        );
-        const strippedApproxTokens = strippedSections.reduce(
-          (sum, s) => sum + s.approxTokens,
-          0,
-        );
-        shadowStripMetrics = {
-          originalApproxTokens,
-          strippedApproxTokens,
-          savingsPct:
-            originalApproxTokens > 0
-              ? Math.round(
-                  ((originalApproxTokens - strippedApproxTokens) / originalApproxTokens) * 100,
-                )
-              : 0,
+    /** History → the exact messages sent for this request. */
+    const buildApiMessages = (): ChatMessage[] => {
+      let out = opts.messages;
+      if (stripReasoning || shadowStrip) {
+        const stripped = stripHistoricalReasoning(opts.messages, {
+          keepLast: Number.isNaN(keepLast) ? 1 : keepLast,
+        });
+        if (shadowStrip) {
+          const originalApproxTokens = analyzePrompt(opts.messages).reduce((sum, sec) => sum + sec.approxTokens, 0);
+          const strippedApproxTokens = analyzePrompt(stripped).reduce((sum, sec) => sum + sec.approxTokens, 0);
+          shadowStripMetrics = {
+            originalApproxTokens,
+            strippedApproxTokens,
+            savingsPct:
+              originalApproxTokens > 0
+                ? Math.round(((originalApproxTokens - strippedApproxTokens) / originalApproxTokens) * 100)
+                : 0,
+          };
+        }
+        if (stripReasoning) out = stripped;
+      }
+      if (opts.keepLastImageTurns !== undefined) {
+        out = stripOldImages(out, opts.keepLastImageTurns);
+      }
+      // Per-turn delegation guidance is request-only: it reaches the model on
+      // every iteration of this turn, regardless of skill routing, and is never
+      // persisted into history or the system prompt.
+      return withTurnDirective(out, opts.delegationDirective, turnUserMessage);
+    };
+
+    let apiMessages = buildApiMessages();
+    let promptTokens = estimatePromptTokens(apiMessages);
+    // The API rejects when `input + max_completion_tokens > ctxWindow`, so the
+    // budget comes from those exact terms plus a margin for estimator drift.
+    const maxPromptTokens = effectiveInputBudget(opts.model, opts.maxCompletionTokens);
+    if (promptTokens > maxPromptTokens && opts.compaction) {
+      // One bounded pass: archive older complete turns (raw content stays in
+      // the artifact store), keep the active turn, then re-estimate.
+      const requestOverhead = Math.max(0, promptTokens - estimatePromptTokens(opts.messages));
+      const outcome = compactToFit(opts.messages, maxPromptTokens - requestOverhead, opts.compaction);
+      if (outcome) {
+        opts.messages.splice(0, opts.messages.length, ...outcome.messages);
+        apiMessages = buildApiMessages();
+        promptTokens = estimatePromptTokens(apiMessages);
+        const info = {
+          tokensBefore: outcome.tokensBefore,
+          tokensAfter: outcome.tokensAfter,
+          turnsRemoved: outcome.turnsRemoved,
+          artifactsArchived: outcome.artifactsArchived,
+          budgetTokens: maxPromptTokens,
         };
-      }
-      if (stripReasoning) {
-        apiMessages = stripped;
+        logger.info("context:compacted", { sessionId: opts.sessionId, ...info });
+        opts.callbacks.onCompacted?.(info);
       }
     }
-
-    if (opts.keepLastImageTurns !== undefined) {
-      apiMessages = stripOldImages(apiMessages, opts.keepLastImageTurns);
-    }
-
-    // Per-turn delegation guidance is request-only: it reaches the model on
-    // every iteration of this turn, regardless of skill routing, and is never
-    // persisted into history or the system prompt.
-    apiMessages = withTurnDirective(apiMessages, opts.delegationDirective, turnUserMessage);
-
-    const promptTokens = estimatePromptTokens(apiMessages);
-    const ctxWindow = getModelOrInfer(opts.model).contextWindow;
-    // The API rejects when `input + max_completion_tokens > ctxWindow`,
-    // so compute the budget from those exact terms (plus a safety margin
-    // for estimator drift) rather than a flat percentage.
-    const completionBudget = opts.maxCompletionTokens ?? DEFAULT_MAX_COMPLETION_TOKENS;
-    const maxPromptTokens = ctxWindow - completionBudget - BUDGET_SAFETY_MARGIN_TOKENS;
     if (promptTokens > maxPromptTokens) {
-      throw new Error(
-        `kimiflare: context window exceeded (~${promptTokens.toLocaleString()} / ${ctxWindow.toLocaleString()} tokens). ` +
-          `Run /compact to summarize older turns, or /clear to start fresh.`,
-      );
+      logger.warn("context:irreducible", { sessionId: opts.sessionId, promptTokens, budgetTokens: maxPromptTokens });
+      throw new ContextBudgetError(promptTokens, maxPromptTokens, getModelOrInfer(opts.model).contextWindow);
     }
 
     logger.debug("turn:api_request", { sessionId: opts.sessionId, messageCount: apiMessages.length });
@@ -1372,7 +1375,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
         opts.callbacks.onToolResult?.(result);
         if (result.waitRequest) {
           if (opts.onIterationEnd) {
-            opts.messages = await opts.onIterationEnd(opts.messages, opts.signal);
+            replaceMessagesInPlace(opts.messages, await opts.onIterationEnd(opts.messages, opts.signal));
           }
           logger.info("run:yielded", {
             runId: result.waitRequest.runId,
@@ -1548,7 +1551,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
 
     // Allow external compaction / state management between iterations
     if (opts.onIterationEnd) {
-      opts.messages = await opts.onIterationEnd(opts.messages, opts.signal);
+      replaceMessagesInPlace(opts.messages, await opts.onIterationEnd(opts.messages, opts.signal));
       if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
     }
 
@@ -1619,6 +1622,14 @@ function parseArgsObject(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** Hosts keep a reference to the messages array they passed in; replacing
+ *  the array would leave them holding stale history (everything appended
+ *  after a mid-turn compaction would be lost on save). Mutate in place. */
+function replaceMessagesInPlace(target: ChatMessage[], next: ChatMessage[]): void {
+  if (next === target) return;
+  target.splice(0, target.length, ...next);
 }
 
 function validateToolArguments(raw: string): string {
