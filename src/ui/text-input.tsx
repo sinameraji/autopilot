@@ -165,6 +165,7 @@ export function CustomTextInput({
       if (key.ctrl && input === "c") return;
       if (key.ctrl && input === "r") return;
       if (key.ctrl && input === "o") return;
+      if (key.ctrl && input === "g") return;
       if (key.tab) return;
 
       if (pickerActive) {

@@ -42,6 +42,9 @@ import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
 import { QueuePlanPicker } from "./ui/queue-plan-picker.js";
 import { createQueueBatch, type QueuedPrompt } from "./agent/queue-batch.js";
 import { isImmediateSubagentCommand, SubagentPanel } from "./ui/subagent-panel.js";
+import { planTriageAction, steerMessage, triageIncoming, type TriageResult } from "./agent/inbox-triage.js";
+import { answerAside } from "./agent/aside.js";
+import { workerRegistry } from "./tools/worker-registry.js";
 import { TaskList } from "./ui/task-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
@@ -281,6 +284,11 @@ function App({
     hasAnyModal,
   } = modals;
   const [queue, setQueue] = useState<QueuedPrompt[]>([]);
+  /** Latest queue for async triage callbacks (state closures go stale). */
+  const queueRef = useRef<QueuedPrompt[]>([]);
+  queueRef.current = queue;
+  const triageQueuedRef = useRef<((item: QueuedPrompt) => Promise<void>) | null>(null);
+  const promoteQueuedRef = useRef<(() => void) | null>(null);
   const [queuePlanDraft, setQueuePlanDraft] = useState<QueuedPrompt[] | null>(null);
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -390,6 +398,9 @@ function App({
   /** Holds the latest Ctrl+C interrupt logic so the SIGINT handler can delegate to it. */
   const sigintHandlerRef = useRef<(() => void) | null>(null);
   const pendingToolCallsRef = useRef<Map<string, string>>(new Map());
+  /** Mid-turn messages triaged as steers, delivered at the next tool
+   *  boundary or before the final answer (drainPendingInput). */
+  const pendingSteersRef = useRef<Array<{ key: string; full: string; display: string; content: string }>>([]);
   const modeRef = useRef<Mode>(mode);
   const effortRef = useRef<ReasoningEffort>(effort);
   const usageRef = useRef<Usage | null>(null);
@@ -927,6 +938,10 @@ function App({
     }
     if (key.ctrl && inputChar === "r") {
       turn.toggleReasoning();
+      return;
+    }
+    if (key.ctrl && inputChar === "g") {
+      promoteQueuedRef.current?.();
       return;
     }
     if (key.shift && key.tab) {
@@ -1951,6 +1966,8 @@ function App({
           allowDirectPush: cfg.allowDirectPush,
           preferPullRequests: cfg.preferPullRequests,
           onIterationEnd,
+          drainPendingInput: () =>
+            pendingSteersRef.current.splice(0).map((steer) => ({ role: "user" as const, content: steer.content })),
           // Request preflight archives older turns here when the next request
           // would not fit the model's input budget.
           compaction: {
@@ -2305,6 +2322,14 @@ function App({
         return;
       }
 
+      // Steers the turn never picked up (it was interrupted or failed) run
+      // next as normal prompts instead of being lost.
+      if (pendingSteersRef.current.length > 0) {
+        const leftovers = pendingSteersRef.current.splice(0).map(({ key, full, display }) => ({ key, full, display }));
+        setQueue((q) => [...leftovers, ...q]);
+        return;
+      }
+
       if (queue.length > 0) {
         const next = queue[0]!;
         setQueue((q) => q.slice(1));
@@ -2419,10 +2444,22 @@ function App({
 
       if (busyRef.current || supervisorRef.current.isRunning) {
         const key = mkKey();
+        const isChatPrompt = !trimmedFull.startsWith("/") && parseBangCommand(trimmedFull) === null;
         setEvents((e) => [...e, { kind: "user", key, text: trimmedDisplay, queued: true }]);
-        setQueue((q) => [...q, { full: trimmedFull, display: trimmedDisplay, key }]);
-        if (!trimmedFull.startsWith("/") && parseBangCommand(trimmedFull) === null) {
+        // Queue first so order is preserved and "unsure" already means queued;
+        // triage then decides whether to pull it out to steer, interrupt, or
+        // answer as an aside (#725).
+        const queued: QueuedPrompt = {
+          full: trimmedFull,
+          display: trimmedDisplay,
+          key,
+          ...(isChatPrompt ? { triage: { source: "pending" as const, reason: "deciding…" } } : {}),
+        };
+        queueRef.current = [...queueRef.current, queued];
+        setQueue((q) => [...q, queued]);
+        if (isChatPrompt) {
           latestPromptRef.current = { key, historyText: historyEntry, messagesBefore: null };
+          void triageQueuedRef.current?.(queued);
         }
         setHistory((h) => (h.length > 0 && h[h.length - 1] === historyEntry ? h : [...h, historyEntry]));
         setInput("");
@@ -2442,6 +2479,100 @@ function App({
     [processMessage, handleSlash, queue, history, historyIndex, events],
   );
   submitRef.current = submit;
+
+  // --- Mid-turn triage (#725) -------------------------------------------
+  // Messages sent while the agent works are queued first; triage may then
+  // pull them out to steer the current turn, interrupt it, or answer as an
+  // aside. Unsure → stays queued, and Ctrl+G promotes it.
+  const textOf = (m: ChatMessage | undefined): string =>
+    !m ? "" : typeof m.content === "string" ? m.content : Array.isArray(m.content)
+      ? m.content.filter((p): p is { type: "text"; text: string } => p.type === "text").map((p) => p.text).join(" ")
+      : "";
+  const describeActivity = (): { currentTask: string; activity?: string; progress?: string; recentAssistantText?: string } => {
+    const msgs = messagesRef.current;
+    const currentTask = textOf([...msgs].reverse().find((m) => m.role === "user" && typeof m.content === "string" && !m.content.startsWith("[Message from the user") && !m.content.startsWith("[The user asked to handle")));
+    const recentAssistantText = textOf([...msgs].reverse().find((m) => m.role === "assistant" && textOf(m).length > 0));
+    const inProgress = tasksRef.current.find((t) => t.status === "in_progress");
+    const done = tasksRef.current.filter((t) => t.status === "completed").length;
+    const progress = tasksRef.current.length > 0
+      ? `${done}/${tasksRef.current.length} tasks done${inProgress ? `; working on: ${inProgress.title}` : ""}`
+      : undefined;
+    const tools = [...pendingToolCallsRef.current.values()];
+    const workers = workerRegistry.list();
+    const activity = [
+      tools.length ? `tools: ${tools.join(", ")}` : "",
+      workers.length ? `${workers.length} subagent(s): ${workers.map((w) => w.task.slice(0, 60)).join("; ")}` : "",
+    ].filter(Boolean).join(" · ") || undefined;
+    return { currentTask, activity, progress, recentAssistantText };
+  };
+  const removeQueued = (key: string): QueuedPrompt | null => {
+    const item = queueRef.current.find((q) => q.key === key) ?? null;
+    if (!item) return null;
+    queueRef.current = queueRef.current.filter((q) => q.key !== key);
+    setQueue((q) => q.filter((i) => i.key !== key));
+    return item;
+  };
+  const markDelivered = (key: string, note: string) => {
+    setEvents((evts) => [
+      ...evts.map((e) => (e.kind === "user" && e.key === key ? { ...e, queued: false } : e)),
+      { kind: "info", key: mkKey(), text: note },
+    ]);
+  };
+  const applyTriage = (item: QueuedPrompt, result: TriageResult, promoted = false): void => {
+    const action = planTriageAction(result, {
+      busy: busyRef.current || supervisorRef.current.isRunning,
+      subagentsRunning: workerRegistry.list().length > 0,
+      promoted,
+    });
+    switch (action.do) {
+      case "keep-queued":
+        if (action.note) {
+          setQueue((q) => q.map((i) => (i.key === item.key ? { ...i, triage: { source: result.source, reason: result.reason } } : i)));
+        }
+        return;
+      case "aside": {
+        if (!cfg) return;
+        void answerAside(item.full, describeActivity(), { ...llmAuthFromConfig(cfg), model: cfg.plumbingModel ?? cfg.model })
+          .then((answer) => {
+            if (!removeQueued(item.key)) return; // already ran as a normal turn
+            markDelivered(item.key, `aside (the agent keeps working): ${answer}`);
+          })
+          .catch(() => {
+            setQueue((q) => q.map((i) => (i.key === item.key ? { ...i, triage: { source: "default", reason: "couldn't answer as an aside" } } : i)));
+          });
+        return;
+      }
+      case "interrupt": {
+        if (!removeQueued(item.key)) return;
+        // Run it next, ahead of anything else queued; completed tool results are kept.
+        const front: QueuedPrompt = { ...item, triage: undefined };
+        queueRef.current = [front, ...queueRef.current];
+        setQueue((q) => [front, ...q]);
+        setEvents((evts) => [...evts, { kind: "info", key: mkKey(), text: action.note }]);
+        runInterruptTurn(interruptDepsRef.current!);
+        return;
+      }
+      case "steer":
+        if (!removeQueued(item.key)) return;
+        pendingSteersRef.current.push({ key: item.key, full: item.full, display: item.display, content: steerMessage(item.full, action.urgent) });
+        markDelivered(item.key, action.note);
+        return;
+    }
+  };
+  triageQueuedRef.current = async (item: QueuedPrompt) => {
+    const result = await triageIncoming(item.full, describeActivity(), {
+      apiKey: cfg?.openrouterApiKey,
+      customEndpoint: Boolean(cfg?.baseUrl),
+    });
+    if (!queueRef.current.some((q) => q.key === item.key)) return; // promoted or already ran
+    applyTriage(item, result);
+  };
+  promoteQueuedRef.current = () => {
+    if (!(busyRef.current || supervisorRef.current.isRunning)) return;
+    const latest = [...queueRef.current].reverse().find((q) => q.triage !== undefined);
+    if (!latest) return;
+    applyTriage(latest, { kind: "steer", source: "rule", reason: "you asked to run it now" }, true);
+  };
 
   useEffect(() => {
     if (usage && usage.prompt_tokens / modelContextLimit < AUTO_COMPACT_THRESHOLD * 0.7) {
@@ -2885,6 +3016,14 @@ function App({
                 {queue.map((q, i) => (
                   <Text key={`queue_${i}`} color={theme.info.color} dimColor={theme.info.dim}>
                     ⏳ {q.display}
+                    {busy && q.triage ? (
+                      <Text>
+                        {"  · "}
+                        {q.triage.source === "pending" ? "deciding…" : q.triage.source === "default" ? "queued (unsure)" : "queued"}
+                        {" · "}
+                        <Text bold>Ctrl+G</Text> run this now
+                      </Text>
+                    ) : null}
                   </Text>
                 ))}
                 {queue.length > 1 && (

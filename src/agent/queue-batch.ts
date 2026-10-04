@@ -6,6 +6,8 @@ export interface QueuedPrompt {
   batchPrompts?: string[];
   /** Original queue rows represented by this item after batching. */
   sourceKeys?: string[];
+  /** Mid-turn triage outcome while this item waits in the queue (#725). */
+  triage?: { source: "rule" | "model" | "default" | "pending"; reason: string };
 }
 
 /** Build one coordinated user turn from ordinary queued chat prompts. */
