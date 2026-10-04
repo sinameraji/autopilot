@@ -1770,8 +1770,8 @@ function App({
             endTurn();
           }
           updateTool(r.tool_call_id, {
-            status: !r.ok && typeof r.content === "string" && r.content.startsWith("Permission denied") ? "rejected" : r.ok ? "done" : "error",
-            result: r.content,
+            status: r.guardrail ? "blocked" : !r.ok && typeof r.content === "string" && r.content.startsWith("Permission denied") ? "rejected" : r.ok ? "done" : "error",
+            result: r.guardrail ? undefined : r.content,
           });
         },
         onUsage: (u: Usage) => {
@@ -1805,6 +1805,7 @@ function App({
         },
         askPermission: askForPermission,
         onGuardrail: (ev: GuardrailEvent) => {
+          if (ev.kind === "loop_recovery" || ev.kind === "loop_stopped") return;
           setEvents((e) => [...e, { kind: "info", key: mkKey(), text: ev.message }]);
         },
         onKimiMdStale: () => {

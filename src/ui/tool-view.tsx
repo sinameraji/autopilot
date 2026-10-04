@@ -11,7 +11,7 @@ export interface ToolEventState {
   id: string;
   name: string;
   args: string;
-  status: "queued" | "running" | "done" | "error" | "cancelled" | "rejected";
+  status: "queued" | "running" | "done" | "error" | "blocked" | "cancelled" | "rejected";
   result?: string;
   render?: { title: string; body?: string; diff?: { path: string; before: string; after: string } };
   expanded?: boolean;
@@ -57,6 +57,8 @@ export const ToolView = React.memo(function ToolView({ evt, verbose, isRepeated,
       <Text color={theme.info.color}>
         <Spinner type="dots" />
       </Text>
+    ) : evt.status === "blocked" ? (
+      <Text color={theme.muted?.color ?? theme.info.color} dimColor>[skip]</Text>
     ) : evt.status === "error" ? (
       <Text color={theme.palette.error}>[err]</Text>
     ) : evt.status === "cancelled" ? (
@@ -84,7 +86,8 @@ export const ToolView = React.memo(function ToolView({ evt, verbose, isRepeated,
   const showItalic = evt.status === "queued" || evt.status === "cancelled" || evt.status === "rejected";
 
   const expand = Boolean(evt.expanded || verbose);
-  const lines = evt.result ? evt.result.split("\n") : [];
+  const visibleResult = evt.status === "blocked" ? undefined : evt.result;
+  const lines = visibleResult ? visibleResult.split("\n") : [];
   const showLimit = verbose ? 200 : 20;
 
   return (
@@ -102,7 +105,7 @@ export const ToolView = React.memo(function ToolView({ evt, verbose, isRepeated,
           <DiffView {...evt.render.diff} />
         </Box>
       ) : null}
-      {evt.result && expand ? (
+      {visibleResult && expand ? (
         <Box
           marginLeft={2}
           marginTop={1}
@@ -123,9 +126,9 @@ export const ToolView = React.memo(function ToolView({ evt, verbose, isRepeated,
           )}
         </Box>
       ) : null}
-      {evt.result && !expand && evt.status !== "running" && evt.status !== "queued" && evt.status !== "cancelled" && evt.status !== "rejected" ? (
+      {visibleResult && !expand && evt.status !== "running" && evt.status !== "queued" && evt.status !== "cancelled" && evt.status !== "rejected" ? (
         <Text color={theme.info.color}>
-          {"  "}{firstLine(evt.result)}
+          {"  "}{firstLine(visibleResult)}
         </Text>
       ) : null}
     </Box>

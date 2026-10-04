@@ -232,6 +232,8 @@ export interface ToolResult {
   recoverable?: boolean;
   /** Optional one-line UI hint describing how to recover. */
   suggestion?: string;
+  /** True when this result is an internal safety block rather than a tool failure. */
+  guardrail?: boolean;
   /** Durable wait signal that ends the current agent turn after persisting state. */
   waitRequest?: RunWaitRequest;
 }
