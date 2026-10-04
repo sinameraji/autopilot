@@ -86,6 +86,7 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
         model,
         budgetUsd,
         timeoutMs,
+        setupTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_SETUP_TIMEOUT_MS"),
         maxParallel: cfg.workerMaxParallel,
         cwd: ctx.cwd,
         signal: ctx.signal,

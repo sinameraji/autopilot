@@ -4,11 +4,27 @@ import { execFile } from "node:child_process";
 import { resolve } from "node:path";
 import type { WorkerFinding, WorkerResultMessage } from "../agent/messages.js";
 import { validateModelId } from "../agent/client.js";
+import { getAppVersion, PACKAGE_NAME, CLI_NAME } from "../util/version.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = 1_000_000;
 const MAX_PROMPT_CHARS = 40_000;
 const DEFAULT_CELL_TIMEOUT_MS = 300_000;
+const DEFAULT_SETUP_TIMEOUT_MS = 300_000;
+/** Private install prefix for the worker CLI inside the cell. The target
+ *  repository is only ever read; its own install scripts never run. */
+const WORKER_PREFIX = "/tmp/autopilot-worker";
+const WORKER_BIN = `${WORKER_PREFIX}/node_modules/.bin/${CLI_NAME}`;
+/** npm package specs we accept for the worker runtime (name@version, tags,
+ *  scoped names, tarball URLs). Quoted regardless; this rejects obvious junk. */
+const PACKAGE_SPEC = /^[\w@./:+~^=<>#-]+$/;
+/** Locates the cloned repository inside the cell; repeated per exec because
+ *  shell state does not persist between Hotcell exec calls. */
+const FIND_REPO_ROOT = [
+  'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
+  'test -n "$GIT_DIR"',
+  'REPO_ROOT="${GIT_DIR%/.git}"',
+];
 const MAX_PARALLEL_WORKERS = 3;
 let runningWorkers = 0;
 const workerQueue: Array<() => void> = [];
@@ -19,6 +35,10 @@ export interface HotcellWorkerOptions {
   model: string;
   budgetUsd: number;
   timeoutMs?: number;
+  /** Timeout for cell setup (checkout + worker CLI install), separate from research. */
+  setupTimeoutMs?: number;
+  /** npm spec for the worker CLI. Defaults to KIMIFLARE_WORKER_PACKAGE or the coordinator's own version. */
+  workerPackage?: string;
   maxParallel?: number;
   cwd?: string;
   hotcellCommand?: string;
@@ -55,6 +75,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     throw new Error("Hotcell worker spend cap must be a positive number.");
   }
   if (options.signal?.aborted) return terminalResult(workerId, options.task, "cancelled", "Cancelled before worker setup.");
+  const workerPackage = resolveWorkerPackage(options.workerPackage);
 
   await acquireSlot(options.maxParallel ?? MAX_PARALLEL_WORKERS, options.signal);
   let cellId: string | undefined;
@@ -97,6 +118,41 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       return result;
     }
 
+    // Setup runs in its own exec (not Hotcell's best-effort --setup hook) so
+    // failures surface, and with its own timeout so slow installs don't eat
+    // the research budget. Only the pinned Autopilot CLI is installed; the
+    // target repository's dependencies and install scripts are never run.
+    const setupCommand = [
+      ...FIND_REPO_ROOT,
+      `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
+      `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
+      `npm install --prefix ${WORKER_PREFIX} --no-audit --no-fund --omit=optional --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
+    ].join(" && ");
+    const setup = await execute(command, ["exec", cellId, setupCommand, "--cwd", "/workspace"], {
+      cwd, signal: options.signal, timeoutMs: options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
+    });
+    if (setup.timedOut || setup.aborted) {
+      result = terminalResult(
+        workerId,
+        options.task,
+        options.signal?.aborted ? "cancelled" : "timed_out",
+        options.signal?.aborted ? "Cancelled during worker setup." : `Worker setup (checkout and ${workerPackage} install) timed out.`,
+        model,
+      );
+      return result;
+    }
+    if (setup.code !== 0) {
+      const detail = sanitizeHotcellDiagnostic(`${setup.stderr}\n${setup.stdout}`);
+      result = terminalResult(
+        workerId,
+        options.task,
+        "failed",
+        `Worker setup failed (exit ${setup.code}) while checking out the commit or installing ${workerPackage}${detail ? `: ${detail}` : "."}`,
+        model,
+      );
+      return result;
+    }
+
     const prompt = [
       "You are an isolated, read-only research worker. You cannot edit files, run shell commands, push, publish, or call write-capable integrations.",
       "Use the exact requested model and return concise findings, recommendations, and relevant file paths. Do not claim to have changed files.",
@@ -107,16 +163,11 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     // host key is never passed; Hotcell injects its revocable gateway token.
     const encodedPrompt = Buffer.from(prompt, "utf8").toString("base64");
     const shellCommand = [
-      'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
-      'test -n "$GIT_DIR"',
-      'REPO_ROOT="${GIT_DIR%/.git}"',
-      `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
-      `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
+      ...FIND_REPO_ROOT,
       'cd "$REPO_ROOT"',
-      "npm ci --no-audit --no-fund --loglevel=error 1>&2",
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
-      `node --import tsx "$REPO_ROOT/src/index.tsx" --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
+      `${WORKER_BIN} --format json --max-input-tokens 14000 --model ${shellQuote(model)} --worker-profile research -p "$PROMPT"`,
     ].join(" && ");
     const execution = await execute(command, ["exec", cellId, shellCommand, "--cwd", "/workspace"], {
       cwd, signal: options.signal, timeoutMs,
@@ -208,7 +259,26 @@ export async function getCleanRepository(cwd: string): Promise<{ url: string; co
   if (!/^(https:\/\/|git@|ssh:\/\/)/i.test(url) || /:\/\/[^/]*@/.test(url)) {
     throw new Error("Hotcell workers require a credential-free HTTPS or SSH origin URL that the Hotcell daemon can clone.");
   }
+  // The cell fetches the exact commit from origin, so it must have been pushed.
+  // Checked against local remote-tracking refs: no network, no credentials.
+  const pushed = (await execFileAsync("git", ["branch", "-r", "--contains", commit], { cwd: root })).stdout.trim();
+  if (!pushed) {
+    throw new Error(
+      `Hotcell workers clone from origin, but HEAD (${commit.slice(0, 8)}) is not on any remote-tracking branch. ` +
+        `Push it first (git push -u origin ${ref}), or run git fetch if it was pushed elsewhere, then retry.`,
+    );
+  }
   return { url, commit, ref };
+}
+
+/** npm spec for the worker CLI: explicit option, KIMIFLARE_WORKER_PACKAGE, or
+ *  the coordinator's own published version so worker flags always match. */
+export function resolveWorkerPackage(override?: string): string {
+  const spec = (override ?? process.env.KIMIFLARE_WORKER_PACKAGE ?? `${PACKAGE_NAME}@${getAppVersion()}`).trim();
+  if (!spec || !PACKAGE_SPEC.test(spec)) {
+    throw new Error(`Invalid Hotcell worker package spec: ${JSON.stringify(spec)}.`);
+  }
+  return spec;
 }
 
 export function parseCellId(output: string): string | undefined {

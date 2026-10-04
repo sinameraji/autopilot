@@ -474,7 +474,7 @@ const handleSubagents: Handler = (ctx, _rest, arg) => {
     setEvents((events) => [...events, {
       kind: "info",
       key: mkKey(),
-      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean committed Git checkout; workers are read-only.`,
+      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean, pushed Git checkout; workers are read-only.`,
     }]);
     return true;
   }
