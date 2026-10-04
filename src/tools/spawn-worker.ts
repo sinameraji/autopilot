@@ -1,6 +1,7 @@
 import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
 import { loadConfig, resolveWorkerBudgetUsd } from "../config.js";
 import { runHotcellWorker } from "./hotcell-worker.js";
+import { workerRegistry } from "./worker-registry.js";
 import type { WorkerResultMessage } from "../agent/messages.js";
 
 interface SpawnWorkerArgs {
@@ -92,6 +93,9 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
       throw new Error("Hotcell worker spend cap must be a positive number.");
     }
 
+    // Each worker gets its own cancel handle (see /subagents cancel), linked
+    // to the turn: cancelling one never interrupts the turn or other workers.
+    const handle = workerRegistry.start(args.task, model, ctx.signal);
     let result;
     try {
       result = await runHotcellWorker({
@@ -103,10 +107,16 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
         setupTimeoutMs: readNumberEnv("KIMIFLARE_WORKER_SETUP_TIMEOUT_MS"),
         maxParallel: cfg.workerMaxParallel,
         cwd: ctx.cwd,
-        signal: ctx.signal,
+        signal: handle.signal,
       });
     } catch (error) {
+      if (handle.cancelledByUser) return textOutput(userCancelledMessage(handle.index, args.task));
       throw new Error("Failed to spawn local Hotcell worker: " + (error instanceof Error ? error.message : String(error)), { cause: error });
+    } finally {
+      handle.finish();
+    }
+    if (handle.cancelledByUser && !ctx.signal?.aborted) {
+      return textOutput(userCancelledMessage(handle.index, args.task));
     }
     if (result.status !== "completed" && result.status !== "budget_exhausted") {
       throw new Error("Local Hotcell worker " + result.status + ": " + (result.error ?? "unknown error"));
@@ -139,6 +149,16 @@ export function formatWorkerResult(result: WorkerResultMessage, model: string): 
     lines.push("\nWorker input-token budget was exhausted; review partial findings before relying on them.");
   }
   return lines.join("\n");
+}
+
+/** A user-cancelled worker is a decision, not a failure: tell the coordinator
+ *  plainly so it continues without relaunching the same mission. */
+function userCancelledMessage(index: number, task: string): string {
+  return [
+    `Subagent #${index} was cancelled by the user before it finished; no findings were returned.`,
+    `Mission: ${task.slice(0, 200)}`,
+    "Do not relaunch this mission unless the user asks. Continue with the other results, or do the work yourself if it is still needed.",
+  ].join("\n");
 }
 
 function textOutput(content: string): ToolOutput {

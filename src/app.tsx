@@ -41,6 +41,7 @@ import { CheckpointPicker } from "./ui/checkpoint-picker.js";
 import { PlanOptionsPicker } from "./ui/plan-options-picker.js";
 import { QueuePlanPicker } from "./ui/queue-plan-picker.js";
 import { createQueueBatch, type QueuedPrompt } from "./agent/queue-batch.js";
+import { isImmediateSubagentCommand, SubagentPanel } from "./ui/subagent-panel.js";
 import { TaskList } from "./ui/task-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
@@ -2406,6 +2407,16 @@ function App({
         }
       }
 
+      // Subagent management must work mid-turn: workers only run while a turn
+      // is busy, so queueing these commands would make them useless.
+      if ((busyRef.current || supervisorRef.current.isRunning) && isImmediateSubagentCommand(trimmedFull)) {
+        setHistory((h) => (h.length > 0 && h[h.length - 1] === historyEntry ? h : [...h, historyEntry]));
+        setInput("");
+        setHistoryIndex(-1);
+        void handleSlash(trimmedFull);
+        return;
+      }
+
       if (busyRef.current || supervisorRef.current.isRunning) {
         const key = mkKey();
         setEvents((e) => [...e, { kind: "user", key, text: trimmedDisplay, queued: true }]);
@@ -2428,7 +2439,7 @@ function App({
         historyText: historyEntry,
       });
     },
-    [processMessage, queue, history, historyIndex, events],
+    [processMessage, handleSlash, queue, history, historyIndex, events],
   );
   submitRef.current = submit;
 
@@ -2868,6 +2879,7 @@ function App({
                 tokensDelta={Math.max(0, (usage?.prompt_tokens ?? 0) - tasksStartTokens)}
               />
             )}
+            <SubagentPanel />
             {queue.length > 0 && (
               <Box flexDirection="column" marginBottom={1}>
                 {queue.map((q, i) => (

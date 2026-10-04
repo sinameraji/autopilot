@@ -8,6 +8,7 @@
  * `handleSlash` callback.
  */
 import React from "react";
+import { workerRegistry } from "../tools/worker-registry.js";
 import { join } from "node:path";
 import { unlink } from "node:fs/promises";
 import QRCode from "qrcode";
@@ -467,14 +468,58 @@ const handleShell: Handler = (ctx, _rest, arg) => {
   return true;
 };
 
-const handleSubagents: Handler = (ctx, _rest, arg) => {
+/** `/subagents list` and the running section of `/subagents`. */
+export function formatRunningSubagents(now = Date.now()): string {
+  const workers = workerRegistry.list();
+  if (workers.length === 0) return "no subagents running";
+  return [
+    `${workers.length} subagent${workers.length === 1 ? "" : "s"} running:`,
+    ...workers.map((w) => `  #${w.index}  ${formatElapsed(now - w.startedAt)}  ${w.status === "cancelling" ? "(cancelling) " : ""}${oneLine(w.task, 90)}`),
+    "cancel one with /subagents cancel <n>, or all with /subagents cancel all — the turn keeps going",
+  ].join("\n");
+}
+
+/** `/subagents cancel <n>|all`: stop specific workers without interrupting the turn. */
+export function cancelSubagents(target: string | undefined): string {
+  if (!target) return "usage: /subagents cancel <n>|all";
+  if (target.toLowerCase() === "all") {
+    const n = workerRegistry.cancelAll();
+    return n === 0 ? "no subagents running" : `cancelling ${n} subagent${n === 1 ? "" : "s"}; the turn continues without their results`;
+  }
+  const ref = target.replace(/^#/, "");
+  const cancelled = workerRegistry.cancel(/^\d+$/.test(ref) ? Number(ref) : ref);
+  if (!cancelled) return `no running subagent #${ref} (see /subagents list)`;
+  return `cancelling subagent #${cancelled.index} (${oneLine(cancelled.task, 60)}); the turn continues`;
+}
+
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return m > 0 ? `${m}m${String(sec).padStart(2, "0")}s` : `${sec}s`;
+}
+
+function oneLine(text: string, max: number): string {
+  const single = text.replace(/\s+/g, " ").trim();
+  return single.length > max ? `${single.slice(0, max - 1)}…` : single;
+}
+
+const handleSubagents: Handler = (ctx, rest, arg) => {
   const { cfg, setCfg, setEvents, mkKey, busy } = ctx;
   const policy = arg as SubagentPolicy;
+  if (arg === "list" || arg === "ls") {
+    setEvents((events) => [...events, { kind: "info", key: mkKey(), text: formatRunningSubagents() }]);
+    return true;
+  }
+  if (arg.startsWith("cancel") || arg.startsWith("stop")) {
+    setEvents((events) => [...events, { kind: "info", key: mkKey(), text: cancelSubagents(rest[1]) }]);
+    return true;
+  }
   if (!arg || arg === "help") {
     setEvents((events) => [...events, {
       kind: "info",
       key: mkKey(),
-      text: `subagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean, pushed Git checkout; workers are read-only.`,
+      text: `${formatRunningSubagents()}\n\nsubagent policy: ${cfg?.subagentPolicy ?? "auto"}\nusage: /subagents off|suggest|auto · /subagents list · /subagents cancel <n>|all\n\nauto (default) lets the coordinator assess substantial tasks and delegate independent work; it is conditional, not a promise to spawn. suggest surfaces possible opportunities; off disables automatic suggestions. Explicit user instructions still win. Worker calls use normal permission checks and respect spend, concurrency, timeout, and read-only limits. Hotcell is the only worker backend: install the local CLI/daemon, configure its OpenRouter route, and use a clean, pushed Git checkout; workers are read-only.`,
     }]);
     return true;
   }
