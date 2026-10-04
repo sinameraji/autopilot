@@ -6,26 +6,33 @@ import type { WorkerFinding, WorkerResultMessage } from "../agent/messages.js";
 import { validateModelId } from "../agent/client.js";
 import { getAppVersion, PACKAGE_NAME, CLI_NAME } from "../util/version.js";
 import { getModelOrInfer } from "../models/registry.js";
+import { chunkPayload, getRepositorySnapshot } from "./hotcell-snapshot.js";
+import { CACHED_WORKER_DIR, ensureWorkerBackup } from "./hotcell-worker-cache.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_OUTPUT_BYTES = 1_000_000;
 const MAX_PROMPT_CHARS = 40_000;
 const DEFAULT_CELL_TIMEOUT_MS = 300_000;
 const DEFAULT_SETUP_TIMEOUT_MS = 300_000;
-/** Private install prefix for the worker CLI inside the cell. The target
- *  repository is only ever read; its own install scripts never run. */
-const WORKER_PREFIX = "/tmp/autopilot-worker";
-const WORKER_BIN = `${WORKER_PREFIX}/node_modules/.bin/${CLI_NAME}`;
+/** The subagent runtime (Autopilot CLI) inside the cell: restored from the
+ *  local cache, or installed there when the cache is unavailable. The target
+ *  repository's own dependencies and install scripts never run. */
+const WORKER_BIN = `${CACHED_WORKER_DIR}/node_modules/.bin/${CLI_NAME}`;
 /** npm package specs we accept for the worker runtime (name@version, tags,
  *  scoped names, tarball URLs). Quoted regardless; this rejects obvious junk. */
 const PACKAGE_SPEC = /^[\w@./:+~^=<>#-]+$/;
-/** Locates the cloned repository inside the cell; repeated per exec because
- *  shell state does not persist between Hotcell exec calls. */
-const FIND_REPO_ROOT = [
-  'GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -name .git -print -quit)"',
+/** Records where the cloned repo is, skipping the runtime directory (its
+ *  node_modules may contain .git folders). Shell state does not persist
+ *  between execs, so later steps read the recorded path. */
+const LOCATE_REPO_ROOT = [
+  `GIT_DIR="$(find /workspace -mindepth 2 -maxdepth 5 -path ${CACHED_WORKER_DIR} -prune -o -name .git -print -quit)"`,
   'test -n "$GIT_DIR"',
-  'REPO_ROOT="${GIT_DIR%/.git}"',
+  'printf "%s" "${GIT_DIR%/.git}" > /tmp/autopilot-repo-root',
 ];
+const READ_REPO_ROOT = ['REPO_ROOT="$(cat /tmp/autopilot-repo-root)"', 'test -n "$REPO_ROOT"'];
+/** Repo is parked here while a cached runtime is restored into /workspace. */
+const REPO_ASIDE = "/tmp/autopilot-repo-aside";
+const SNAPSHOT_PREFIX = "/workspace/.autopilot-snapshot-";
 const MAX_PARALLEL_WORKERS = 3;
 /** Cumulative input-token budget bounds for a research worker. The Hotcell
  *  egress spend cap is the hard money stop; this keeps the worker's own
@@ -55,6 +62,8 @@ export interface HotcellWorkerOptions {
   workerPackage?: string;
   /** Cumulative input-token budget for the worker. Defaults to resolveWorkerInputBudget(). */
   maxInputTokens?: number;
+  /** Use the locally cached runtime backup (default true; KIMIFLARE_WORKER_CACHE=0 disables). */
+  useRuntimeCache?: boolean;
   maxParallel?: number;
   cwd?: string;
   hotcellCommand?: string;
@@ -102,7 +111,12 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   const timeoutMs = options.timeoutMs ?? DEFAULT_CELL_TIMEOUT_MS;
 
   try {
-    const repo = await getCleanRepository(cwd);
+    const repo = await getRepositorySnapshot(cwd);
+    const useCache = options.useRuntimeCache ?? process.env.KIMIFLARE_WORKER_CACHE !== "0";
+    // Build or look up the cached runtime while the sandbox is created.
+    const backupPromise = useCache
+      ? ensureWorkerBackup({ packageSpec: workerPackage, command, execute, cwd, signal: options.signal })
+      : Promise.resolve(null);
     const cellName = "autopilot-" + workerId;
     const created = await execute(command, [
       "create", "-n", "1", "--name", cellName, "--repo", repo.url,
@@ -135,40 +149,66 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       return result;
     }
 
-    // Setup runs in its own exec (not Hotcell's best-effort --setup hook) so
-    // failures surface, and with its own timeout so slow installs don't eat
-    // the research budget. Only the pinned Autopilot CLI is installed; the
-    // target repository's dependencies and install scripts are never run.
+    const setupTimeoutMs = options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS;
+    const setupFailed = (step: string, r: HotcellProcessResult): WorkerResultMessage => {
+      if (r.timedOut || r.aborted) {
+        return terminalResult(
+          workerId,
+          options.task,
+          options.signal?.aborted ? "cancelled" : "timed_out",
+          options.signal?.aborted ? "Cancelled during subagent setup." : `Subagent setup timed out while ${step}.`,
+          model,
+        );
+      }
+      const detail = sanitizeHotcellDiagnostic(`${r.stderr}\n${r.stdout}`);
+      return terminalResult(workerId, options.task, "failed", `Subagent setup failed (exit ${r.code}) while ${step}${detail ? `: ${detail}` : "."}`, model);
+    };
+    const run = (args: string[], timeout = setupTimeoutMs) => execute(command, args, { cwd, signal: options.signal, timeoutMs: timeout });
+
+    // 1. Locate the clone; with a cached runtime, park it and restore the
+    //    runtime into /workspace (a restore replaces /workspace wholesale).
+    const backupId = await backupPromise;
+    const locate = await run(["exec", cellId, [...LOCATE_REPO_ROOT, ...(backupId ? [`mv "$(cat /tmp/autopilot-repo-root)" ${REPO_ASIDE}`] : [])].join(" && "), "--cwd", "/workspace"]);
+    if (locate.code !== 0 || locate.timedOut || locate.aborted) return (result = setupFailed("locating the cloned repository", locate));
+    let usedCache = false;
+    if (backupId) {
+      const restored = await run(["restore", cellId, backupId], 120_000);
+      usedCache = restored.code === 0;
+      if (!usedCache && (restored.timedOut || restored.aborted)) return (result = setupFailed("restoring the cached subagent runtime", restored));
+    }
+
+    // 2. Carry your local changes in as a patch (written after the restore).
+    const chunks = repo.patch ? chunkPayload(repo.patch) : [];
+    for (const [i, chunk] of chunks.entries()) {
+      const wrote = await run(["files", "write", cellId, `${SNAPSHOT_PREFIX}${String(i).padStart(4, "0")}`, "--content", chunk], 60_000);
+      if (wrote.code !== 0 || wrote.timedOut || wrote.aborted) return (result = setupFailed("copying your local changes", wrote));
+    }
+
+    // 3. Pin the commit, apply local changes, and make sure the runtime exists.
+    //    Runs in its own exec (not Hotcell's best-effort --setup hook) so
+    //    failures surface, with its own timeout separate from research.
     const setupCommand = [
-      ...FIND_REPO_ROOT,
+      ...(backupId ? [`mv ${REPO_ASIDE} "$(cat /tmp/autopilot-repo-root)"`] : []),
+      ...READ_REPO_ROOT,
       `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
       `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
-      `npm install --prefix ${WORKER_PREFIX} --no-audit --no-fund --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
+      ...(chunks.length
+        ? [
+            `cat ${SNAPSHOT_PREFIX}* | base64 -d > /tmp/autopilot-snapshot.patch`,
+            `rm -f ${SNAPSHOT_PREFIX}*`,
+            'git -C "$REPO_ROOT" apply --binary --whitespace=nowarn /tmp/autopilot-snapshot.patch',
+          ]
+        : []),
+      usedCache
+        ? `test -x ${WORKER_BIN}`
+        : `npm install --prefix ${CACHED_WORKER_DIR} --no-audit --no-fund --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
     ].join(" && ");
-    const setup = await execute(command, ["exec", cellId, setupCommand, "--cwd", "/workspace"], {
-      cwd, signal: options.signal, timeoutMs: options.setupTimeoutMs ?? DEFAULT_SETUP_TIMEOUT_MS,
-    });
-    if (setup.timedOut || setup.aborted) {
-      result = terminalResult(
-        workerId,
-        options.task,
-        options.signal?.aborted ? "cancelled" : "timed_out",
-        options.signal?.aborted ? "Cancelled during worker setup." : `Worker setup (checkout and ${workerPackage} install) timed out.`,
-        model,
-      );
-      return result;
+    const setup = await run(["exec", cellId, setupCommand, "--cwd", "/workspace"]);
+    if (setup.code !== 0 || setup.timedOut || setup.aborted) {
+      return (result = setupFailed(usedCache ? "preparing the repository" : `installing ${workerPackage}`, setup));
     }
-    if (setup.code !== 0) {
-      const detail = sanitizeHotcellDiagnostic(`${setup.stderr}\n${setup.stdout}`);
-      result = terminalResult(
-        workerId,
-        options.task,
-        "failed",
-        `Worker setup failed (exit ${setup.code}) while checking out the commit or installing ${workerPackage}${detail ? `: ${detail}` : "."}`,
-        model,
-      );
-      return result;
-    }
+    const snapshotNote = repo.note
+      ?? (repo.changedFiles > 0 ? `Included your ${repo.changedFiles} local change${repo.changedFiles === 1 ? "" : "s"} on top of origin/${repo.ref}.` : undefined);
 
     const prompt = [
       "You are an isolated, read-only research worker. You cannot edit files, run shell commands, push, publish, or call write-capable integrations.",
@@ -181,7 +221,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     // host key is never passed; Hotcell injects its revocable gateway token.
     const encodedPrompt = Buffer.from(prompt, "utf8").toString("base64");
     const shellCommand = [
-      ...FIND_REPO_ROOT,
+      ...READ_REPO_ROOT,
       'cd "$REPO_ROOT"',
       'export OPENROUTER_BASE_URL="${OPENROUTER_BASE_URL%/}/v1"',
       `PROMPT="$(printf '%s' '${encodedPrompt}' | base64 -d)"`,
@@ -219,6 +259,7 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       findings,
       recommendations: [],
       filesRead: report?.filesRead ?? [],
+      ...(snapshotNote ? { snapshotNote } : {}),
       ...(report ? { structured: true, openQuestions: report.openQuestions } : {}),
       webSources: [],
       costUsd: metrics.costUsd ?? 0,
@@ -270,28 +311,6 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   return result!;
 }
 
-export async function getCleanRepository(cwd: string): Promise<{ url: string; commit: string; ref: string }> {
-  const root = (await execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd })).stdout.trim();
-  const status = (await execFileAsync("git", ["status", "--porcelain"], { cwd: root })).stdout;
-  if (status.trim()) throw new Error("Hotcell workers require a clean Git checkout; commit or stash local changes first.");
-  const commit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
-  const ref = (await execFileAsync("git", ["branch", "--show-current"], { cwd: root })).stdout.trim();
-  if (!ref) throw new Error("Hotcell workers require a named branch so the daemon can clone before pinning the exact commit.");
-  const url = (await execFileAsync("git", ["config", "--get", "remote.origin.url"], { cwd: root })).stdout.trim();
-  if (!/^(https:\/\/|git@|ssh:\/\/)/i.test(url) || /:\/\/[^/]*@/.test(url)) {
-    throw new Error("Hotcell workers require a credential-free HTTPS or SSH origin URL that the Hotcell daemon can clone.");
-  }
-  // The cell fetches the exact commit from origin, so it must have been pushed.
-  // Checked against local remote-tracking refs: no network, no credentials.
-  const pushed = (await execFileAsync("git", ["branch", "-r", "--contains", commit], { cwd: root })).stdout.trim();
-  if (!pushed) {
-    throw new Error(
-      `Hotcell workers clone from origin, but HEAD (${commit.slice(0, 8)}) is not on any remote-tracking branch. ` +
-        `Push it first (git push -u origin ${ref}), or run git fetch if it was pushed elsewhere, then retry.`,
-    );
-  }
-  return { url, commit, ref };
-}
 
 const WORKER_REPORT_INSTRUCTIONS = [
   "Finish your answer with one fenced ```json block, and nothing after it, of exactly this shape:",

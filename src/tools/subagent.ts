@@ -37,7 +37,7 @@ export const subagentTool: ToolSpec<SubagentArgs> = {
     "Delegate a self-contained investigation to a subagent: a separate Autopilot instance that explores this repository in its own sandbox and reports back cited findings (files, line numbers, open questions).",
     "Use it to work in parallel. When a task touches several independent areas — e.g. how auth works, where billing is computed, which tests cover a module, how two subsystems interact — launch one subagent per area IN THE SAME RESPONSE; they run at the same time, behind a single approval, while their results come back to you together.",
     "Also use it for broad searches you would otherwise do with many read/grep calls, and to get an independent second look at a plan or a bug.",
-    "Subagents can read and search code but cannot edit files, run commands, or see uncommitted changes; do the edits yourself after reading their findings.",
+    "Subagents see your current working tree (including uncommitted changes) and can read and search code, but cannot edit files or run commands; do the edits yourself after reading their findings.",
     "Give each subagent a specific mission: what to find, where to start if you know, and what to report. Do not use it for a lookup you can do in one or two tool calls, or for steps that depend on each other.",
   ].join(" "),
   parameters: {
@@ -147,6 +147,9 @@ export function formatWorkerResult(result: WorkerResultMessage, model: string): 
       "\n## " + finding.topic + (result.structured ? " (" + finding.confidence + " confidence)" : "") + "\n" + finding.summary +
       (finding.sources.length ? "\nFiles: " + finding.sources.join(", ") : "")),
   ];
+  if (result.snapshotNote) {
+    lines.push("\n" + result.snapshotNote);
+  }
   if (result.openQuestions?.length) {
     lines.push("\n## Open questions\n" + result.openQuestions.map((q) => "- " + q).join("\n"));
   }

@@ -1,11 +1,11 @@
-import { afterEach, describe, it } from "node:test";
+import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { getRepositorySnapshot } from "./hotcell-snapshot.js";
 import {
-  getCleanRepository,
   parseWorkerReport,
   resolveWorkerInputBudget,
   resolveWorkerPackage,
@@ -19,6 +19,16 @@ import {
 } from "./hotcell-worker.js";
 
 const directories: string[] = [];
+// These tests cover the install path; the runtime cache has its own tests.
+let savedCacheEnv: string | undefined;
+before(() => {
+  savedCacheEnv = process.env.KIMIFLARE_WORKER_CACHE;
+  process.env.KIMIFLARE_WORKER_CACHE = "0";
+});
+after(() => {
+  if (savedCacheEnv === undefined) delete process.env.KIMIFLARE_WORKER_CACHE;
+  else process.env.KIMIFLARE_WORKER_CACHE = savedCacheEnv;
+});
 const cellId = "12345678-1234-1234-1234-123456789abc";
 
 async function makeRepo(): Promise<string> {
@@ -58,8 +68,8 @@ function fakeRunner(options: {
       timedOut: options.createTimedOut,
     };
     if (args[0] === "ls") return { code: 0, stdout: options.listOutput ?? "", stderr: "", aborted: false };
-    if (args[0] === "exec" && args[2]?.includes("npm install --prefix")) {
-      return { code: 0, stdout: "", stderr: "", aborted: false };
+    if (args[0] === "exec" && !args[2]?.includes("--format json")) {
+      return { code: 0, stdout: "", stderr: "", aborted: false }; // locate / setup
     }
     if (args[0] === "exec") {
       options.onExec?.(runOptions.signal);
@@ -95,36 +105,10 @@ describe("Hotcell worker helpers", () => {
     assert.equal(shellQuote("a'b"), "'a'\\''b'");
   });
 
-  it("requires a clean repository with a credential-free origin", async () => {
+  it("requires a credential-free origin the daemon can clone", async () => {
     const cwd = await makeRepo();
-    const repo = await getCleanRepository(cwd);
-    assert.match(repo.commit, /^[0-9a-f]{40}$/);
-    assert.equal(repo.url, "https://github.com/example/project.git");
-    await writeFile(join(cwd, "dirty.txt"), "uncommitted");
-    await assert.rejects(() => getCleanRepository(cwd), /clean Git checkout/);
-  });
-
-  it("requires HEAD to be pushed before creating any cell", async () => {
-    const cwd = await makeRepo();
-    await writeFile(join(cwd, "local.txt"), "local only\n");
-    execFileSync("git", ["add", "local.txt"], { cwd });
-    execFileSync("git", ["commit", "-qm", "unpushed"], { cwd });
-    await assert.rejects(() => getCleanRepository(cwd), /not on any remote-tracking branch.*git push/s);
-
-    let processCalls = 0;
-    const result = await runHotcellWorker({
-      task: "Research",
-      model: "openai/gpt-6-luna",
-      budgetUsd: 0.25,
-      cwd,
-      processRunner: async () => {
-        processCalls++;
-        return { code: 0, stdout: "", stderr: "", aborted: false };
-      },
-    });
-    assert.equal(result.status, "failed");
-    assert.match(result.error ?? "", /git push/);
-    assert.equal(processCalls, 0, "no cell is created for an unpushed commit");
+    execFileSync("git", ["remote", "set-url", "origin", "https://user:token@github.com/example/project.git"], { cwd });
+    await assert.rejects(() => getRepositorySnapshot(cwd), /credential-free/);
   });
 
   it("pins the worker CLI to the coordinator version unless overridden", () => {
@@ -161,29 +145,32 @@ describe("Hotcell worker helpers", () => {
     assert.ok(calls[0]!.args.includes("--egress-spend-cap"));
     assert.ok(calls[0]!.args.includes("0.25"));
     assert.ok(calls[0]!.args.includes("--ref"));
-    const repo = await getCleanRepository(cwd);
+    const repo = await getRepositorySnapshot(cwd);
     const createArgs = calls[0]!.args;
     assert.equal(createArgs[createArgs.indexOf("--ref") + 1], repo.ref);
-    assert.equal(createArgs[createArgs.indexOf("--ref") + 1], repo.ref);
     assert.ok(!createArgs.includes("--setup"), "mandatory setup runs in exec so errors are not swallowed by Hotcell's best-effort setup hook");
-    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "exec", "exec", "stats", "rm"]);
+    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "exec", "exec", "exec", "stats", "rm"]);
+
+    // Locate exec: records the clone, skipping the runtime directory.
+    const locate = calls[1]!.args[2]!;
+    assert.ok(locate.includes("-path /workspace/.autopilot-worker -prune -o -name .git"));
+    assert.ok(locate.includes("/tmp/autopilot-repo-root"));
 
     // Setup exec: pinned checkout plus a private install of the worker CLI.
-    const setup = calls[1]!.args[2]!;
-    assert.ok(setup.includes('find /workspace -mindepth 2 -maxdepth 5 -name .git'));
+    const setup = calls[2]!.args[2]!;
     assert.ok(setup.includes(`git -C "$REPO_ROOT" fetch --quiet origin '${repo.commit}'`));
     assert.ok(setup.includes(`git -C "$REPO_ROOT" checkout --quiet --detach '${repo.commit}'`));
-    assert.match(setup, /npm install --prefix \/tmp\/autopilot-worker .*'autopilot-ai@\d+\.\d+\.\d+'/);
-    assert.equal(calls[1]!.options.timeoutMs, 300_000, "setup has its own timeout");
+    assert.match(setup, /npm install --prefix \/workspace\/.autopilot-worker .*'autopilot-ai@\d+\.\d+\.\d+'/);
+    assert.equal(calls[2]!.options.timeoutMs, 300_000, "setup has its own timeout");
 
     // Research exec: runs the installed CLI from the target repo, never the repo's own code or install.
-    const command = calls[2]!.args[2]!;
+    const command = calls[3]!.args[2]!;
     for (const text of [setup, command]) {
       assert.ok(!text.includes("npm ci"), "target repo dependencies are never installed");
       assert.ok(!text.includes("src/index.tsx"), "target repo is not assumed to be Autopilot");
     }
     assert.ok(command.includes('cd "$REPO_ROOT"'));
-    assert.ok(command.includes("/tmp/autopilot-worker/node_modules/.bin/autopilot --format json"));
+    assert.ok(command.includes("/workspace/.autopilot-worker/node_modules/.bin/autopilot --format json"));
     assert.match(command, /--model 'openai\/gpt-6-luna'/);
     assert.match(command, /--worker-profile research/);
     assert.ok(!command.includes("Inspect the repository"), "mission should not be interpolated as shell text");
@@ -219,7 +206,7 @@ describe("Hotcell worker helpers", () => {
     });
 
     assert.equal(result.status, "completed");
-    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "ls", "exec", "exec", "stats", "rm"]);
+    assert.deepEqual(calls.map((call) => call.args[0]), ["create", "ls", "exec", "exec", "exec", "stats", "rm"]);
     assert.deepEqual(calls.at(-1)?.args, ["rm", cellId]);
   });
 
@@ -302,8 +289,8 @@ describe("Hotcell worker helpers", () => {
   it("reports worker setup failure and timeout distinctly, then removes the cell", async () => {
     const cwd = await makeRepo();
     for (const [setupResult, status, pattern] of [
-      [{ code: 1, stdout: "", stderr: "npm ERR! 404 autopilot-ai@9.9.9 OPENROUTER_API_KEY=do-not-leak", aborted: false }, "failed", /Worker setup failed \(exit 1\).*404/s],
-      [{ code: 124, stdout: "", stderr: "", aborted: true, timedOut: true }, "timed_out", /setup .*timed out/],
+      [{ code: 1, stdout: "", stderr: "npm ERR! 404 autopilot-ai@9.9.9 OPENROUTER_API_KEY=do-not-leak", aborted: false }, "failed", /Subagent setup failed \(exit 1\).*404/s],
+      [{ code: 124, stdout: "", stderr: "", aborted: true, timedOut: true }, "timed_out", /setup timed out/],
     ] as const) {
       const calls: string[][] = [];
       const runner: HotcellProcessRunner = async (_executable, args) => {
@@ -500,10 +487,52 @@ describe("Hotcell worker helpers", () => {
     assert.deepEqual(result.findings[0]!.sources, ["src/index.tsx:10"]);
     assert.deepEqual(result.openQuestions, ["Q?"]);
     assert.deepEqual(result.filesRead, ["src/index.tsx"]);
-    const research = calls.filter((args) => args[0] === "exec")[1]![2]!;
+    const research = calls.filter((args) => args[0] === "exec").at(-1)![2]!;
     assert.match(research, /--max-input-tokens 200000 /);
     assert.doesNotMatch(research, /--max-input-tokens 14000\b/);
     const prompt = Buffer.from(/printf '%s' '([A-Za-z0-9+/=]+)'/.exec(research)![1]!, "base64").toString("utf8");
     assert.match(prompt, /fenced ```json block/);
+  });
+
+  it("restores the cached runtime around the clone and carries local changes in", async () => {
+    const cwd = await makeRepo();
+    await writeFile(join(cwd, "README.md"), "edited locally\n");
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = await mkdtemp(join(tmpdir(), "autopilot-cache-xdg-"));
+    directories.push(process.env.XDG_CONFIG_HOME);
+    const { _resetWorkerCacheForTests } = await import("./hotcell-worker-cache.js");
+    _resetWorkerCacheForTests();
+    try {
+      const calls: string[][] = [];
+      const runner: HotcellProcessRunner = async (_exe, args) => {
+        calls.push(args);
+        const ok = (stdout = "") => ({ code: 0, stdout, stderr: "", aborted: false });
+        if (args[0] === "create") return ok(args.includes("--repo") ? cellId : "Created sandbox bbbbccccdddd");
+        if (args[0] === "backup") return ok("Backed up bbbbccccdddd -> bk987654321 (1 bytes).");
+        if (args[0] === "exec" && args[2]?.includes("--format json")) return ok(JSON.stringify({ text: "found it" }));
+        if (args[0] === "stats") return ok("Cost: 0.01");
+        return ok();
+      };
+      const result = await runHotcellWorker({
+        task: "Research", model: "openai/gpt-6-luna", budgetUsd: 0.25, cwd, processRunner: runner, useRuntimeCache: true,
+      });
+      assert.equal(result.status, "completed");
+      assert.match(result.snapshotNote ?? "", /Included your 1 local change on top of origin\/main/);
+
+      const workerCalls = calls.filter((a) => a.includes(cellId) || a[0] === "files");
+      const kinds = workerCalls.map((a) => (a[0] === "exec" ? (a[2]!.includes("--format json") ? "research" : a[2]!.includes("autopilot-repo-aside") && a[2]!.includes("find /workspace") ? "locate" : "setup") : a[0]));
+      assert.deepEqual(kinds, ["locate", "restore", "files", "setup", "research", "stats", "rm"]);
+      const restore = workerCalls.find((a) => a[0] === "restore")!;
+      assert.deepEqual(restore, ["restore", cellId, "bk987654321"]);
+      const setup = workerCalls.find((a) => a[0] === "exec" && !a[2]!.includes("find /workspace") && !a[2]!.includes("--format json"))![2]!;
+      assert.match(setup, /^mv \/tmp\/autopilot-repo-aside "\$\(cat \/tmp\/autopilot-repo-root\)"/);
+      assert.match(setup, /git -C "\$REPO_ROOT" apply --binary/);
+      assert.match(setup, /test -x \/workspace\/.autopilot-worker\/node_modules\/.bin\/autopilot$/);
+      assert.ok(!setup.includes("npm install"), "cached runtime: no install in the subagent's sandbox");
+      assert.ok(calls.some((a) => a[0] === "rm" && a[1] === "bbbbccccdddd"), "build sandbox removed");
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedXdg;
+    }
   });
 });
