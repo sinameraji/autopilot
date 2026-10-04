@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.14.0](https://github.com/sinameraji/autopilot/compare/v1.13.0...v1.14.0) (2026-10-04)
+
+
+### Features
+
+* **agent:** run parallel subagent calls concurrently with one approval ([56e7226](https://github.com/sinameraji/autopilot/commit/56e7226fc085bbc4fa64a6e3aedbaf2f0777cebf))
+* **agent:** run parallel subagent calls concurrently with one approval ([29deb87](https://github.com/sinameraji/autopilot/commit/29deb873ddaa76d5f83266f383507689e3ed5fbe)), closes [#723](https://github.com/sinameraji/autopilot/issues/723)
+* **worker:** size research budgets from spend cap and return structured findings ([7660837](https://github.com/sinameraji/autopilot/commit/76608378e3d8b65f80b149fbaac7d490ccc5edfe))
+* **worker:** size research budgets from spend cap and return structured findings ([500eb16](https://github.com/sinameraji/autopilot/commit/500eb16f3c9951a7b5031d00b7a47c90dffe996e)), closes [#727](https://github.com/sinameraji/autopilot/issues/727)
+
+
+### Bug Fixes
+
+* **agent:** compact history against the model budget in every host ([2febee7](https://github.com/sinameraji/autopilot/commit/2febee74c9e6794b214ed8862fc4ad4458958f88))
+* **agent:** compact history against the model budget in every host ([aec5164](https://github.com/sinameraji/autopilot/commit/aec5164ddf9ad21606d28c3e050a0b2c05359fab)), closes [#717](https://github.com/sinameraji/autopilot/issues/717)
+* **agent:** send the subagent directive per request, never persist it ([6e094a8](https://github.com/sinameraji/autopilot/commit/6e094a8313e1e5fa84b260497b7954e1e42c798a))
+* **agent:** send the subagent directive per request, never persist it ([773797d](https://github.com/sinameraji/autopilot/commit/773797de7d6ae84d6e49aad14629331f3e8750ca)), closes [#724](https://github.com/sinameraji/autopilot/issues/724)
+* **bash:** keep co-author values out of generated shell source ([b43c6ba](https://github.com/sinameraji/autopilot/commit/b43c6ba54c4e241a9c976444a361ed1e555f0e7c))
+* **bash:** keep co-author values out of generated shell source ([d622192](https://github.com/sinameraji/autopilot/commit/d6221921e62634272246cf3cca6fb40b39221089)), closes [#716](https://github.com/sinameraji/autopilot/issues/716)
+* quiet repeated-call guardrails ([ead1b0a](https://github.com/sinameraji/autopilot/commit/ead1b0a89a2c403d2b57da182dcc70b02b9b57d2))
+* reduce noisy loop guardrail feedback ([8552596](https://github.com/sinameraji/autopilot/commit/8552596a14414b75014e603c47f040322ac126e1))
+* **sdk:** persist errored turns, deliver late steers, run follow-ups ([c40aa89](https://github.com/sinameraji/autopilot/commit/c40aa899653561491b6eeadb0f337274b9fa2de4))
+* **sdk:** persist errored turns, deliver late steers, run follow-ups ([0aafe3f](https://github.com/sinameraji/autopilot/commit/0aafe3f38067a299bc2ab2b71d2b93ad9793be29)), closes [#637](https://github.com/sinameraji/autopilot/issues/637) [#725](https://github.com/sinameraji/autopilot/issues/725)
+* **ui:** keep spinner animation in sync with elapsed time ([da36f53](https://github.com/sinameraji/autopilot/commit/da36f53f9b9bf90c5c0303b266219d8af053c7de))
+* **ui:** keep spinner animation in sync with elapsed time ([bcb59ca](https://github.com/sinameraji/autopilot/commit/bcb59ca06dec691d36fe5f65cc2f61f1cc9ca113))
+* **worker:** run the pinned Autopilot CLI in Hotcell cells ([7cff17a](https://github.com/sinameraji/autopilot/commit/7cff17a5ea0fdea25b4b765c2bf6c53acf55d8e3))
+* **worker:** run the pinned Autopilot CLI in Hotcell cells ([0d4ce96](https://github.com/sinameraji/autopilot/commit/0d4ce961948cf73323a7cb382ae5912ac8ace7f5)), closes [#722](https://github.com/sinameraji/autopilot/issues/722)
+
 ## [1.13.0](https://github.com/sinameraji/autopilot/compare/v1.12.2...v1.13.0) (2026-10-03)
 
 
