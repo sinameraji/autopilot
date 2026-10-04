@@ -13,6 +13,7 @@ import {
   recallArtifacts,
   estimatePromptTokens,
 } from "./agent/artifact-compaction.js";
+import { proactiveCompactionThreshold } from "./agent/context-budget.js";
 import {
   emptySessionState,
   ArtifactStore,
@@ -778,7 +779,9 @@ function App({
   const onIterationEnd = useCallback(
     async (messages: ChatMessage[], signal: AbortSignal): Promise<ChatMessage[]> => {
       if (signal.aborted) return messages;
-      if (!shouldCompact({ messages })) return messages;
+      // Budget-aware: small-context models compact before the hard preflight
+      // limit; large ones still compact at the cost-driven 80k cap.
+      if (!shouldCompact({ messages, tokenThreshold: cfg ? proactiveCompactionThreshold(cfg.model) : undefined })) return messages;
 
       // M6.1: fire PreCompact before either compaction path runs.
       // Best-effort + fire-and-forget — never block compaction on a
@@ -1689,6 +1692,16 @@ function App({
       // lifecycle and the turn's abort signal.
 
       const sharedCallbacks = {
+        onCompacted: (info: { tokensBefore: number; tokensAfter: number; turnsRemoved: number; artifactsArchived: number }) => {
+          setEvents((e) => [
+            ...e,
+            {
+              kind: "info",
+              key: mkKey(),
+              text: `context budget: compacted ${info.turnsRemoved} older turn${info.turnsRemoved === 1 ? "" : "s"} (${info.tokensBefore} → ${info.tokensAfter} tokens, ${info.artifactsArchived} artifacts archived)`,
+            },
+          ]);
+        },
         onAssistantStart: () => {
           const id = mkAssistantId();
           activeAsstIdRef.current = id;
@@ -1937,6 +1950,15 @@ function App({
           allowDirectPush: cfg.allowDirectPush,
           preferPullRequests: cfg.preferPullRequests,
           onIterationEnd,
+          // Request preflight archives older turns here when the next request
+          // would not fit the model's input budget.
+          compaction: {
+            getState: () => sessionStateRef.current,
+            setState: (state) => {
+              sessionStateRef.current = state;
+            },
+            getStore: () => artifactStoreRef.current,
+          },
           intentClassification: classification,
           delegationDirective: delegationGuidance.directive,
           sessionStartRecall: sessionStartRecallRef.current ?? undefined,
@@ -1978,7 +2000,7 @@ function App({
               // context on, use the heuristic compactor; otherwise fall back to the
               // LLM summarizer so users have a safety net regardless of the flag.
               let didCompact = false;
-              if (shouldCompact({ messages: messagesRef.current })) {
+              if (shouldCompact({ messages: messagesRef.current, tokenThreshold: proactiveCompactionThreshold(overrideModel ?? cfg.model) })) {
                 // M6.1: same PreCompact fire as the mid-turn site above.
                 if (hooksManagerRef.current.hasEnabledHooks("PreCompact")) {
                   void hooksManagerRef.current

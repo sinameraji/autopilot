@@ -15,6 +15,7 @@ import { ToolExecutor, ALL_TOOLS } from "../tools/executor.js";
 import type { PermissionDecision, PermissionRequest } from "../tools/executor.js";
 import type { ChatMessage, ContentPart } from "../agent/messages.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "../sessions.js";
+import { sessionFileCompactionTarget } from "../agent/context-budget.js";
 import { logger } from "../util/logger.js";
 import { createSseStream, type SseClient } from "./sse.js";
 import { getOpenApiSpec } from "./openapi.js";
@@ -870,6 +871,8 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
     },
   };
 
+  // Archived turns land on the session file, so every save below persists them.
+  const compaction = sessionFileCompactionTarget(sessionFile);
   try {
     if (run && runStore) {
 
@@ -890,6 +893,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
         codeMode: false,
         allowDirectPush: config.allowDirectPush,
         preferPullRequests: config.preferPullRequests,
+        compaction,
         callbacks,
         onIterationEnd: async (updatedMessages) => {
           sessionFile.messages = updatedMessages;
@@ -916,6 +920,7 @@ async function runAgentTurnForSession(active: ActiveSession, config: KimiConfig,
         codeMode: config.codeMode,
         allowDirectPush: config.allowDirectPush,
         preferPullRequests: config.preferPullRequests,
+        compaction,
         callbacks,
       });
     }
