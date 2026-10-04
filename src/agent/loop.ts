@@ -21,6 +21,7 @@ import type Database from "better-sqlite3";
 import { buildSystemPrompt, buildSessionPrefix } from "./system-prompt.js";
 import { getModelOrInfer } from "../models/registry.js";
 import { createPermissionGate } from "./permission-gate.js";
+import { withTurnDirective } from "./turn-directive.js";
 import type { Mode } from "../mode.js";
 
 export interface AgentCallbacks {
@@ -340,6 +341,8 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
   let skillResult: SemanticSkillRoutingResult | undefined;
 
   const lastUserPrompt = extractLastUserText(opts.messages);
+  // Anchor for the transient per-turn directive (see withTurnDirective).
+  const turnUserMessage = [...opts.messages].reverse().find((m) => m.role === "user");
   const userPromptPreview = lastUserPrompt.slice(0, 200);
 
   // Light + trivially short prompts skip skill routing entirely. These almost
@@ -420,7 +423,6 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           mode: opts.mode,
           skillContext: skillResult.skillContext,
           preferPullRequests: opts.preferPullRequests,
-          delegationDirective: opts.delegationDirective,
         }),
       };
     } else {
@@ -433,7 +435,6 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
           mode: opts.mode,
           skillContext: skillResult.skillContext,
           preferPullRequests: opts.preferPullRequests,
-          delegationDirective: opts.delegationDirective,
         }),
       };
     }
@@ -648,6 +649,11 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
     if (opts.keepLastImageTurns !== undefined) {
       apiMessages = stripOldImages(apiMessages, opts.keepLastImageTurns);
     }
+
+    // Per-turn delegation guidance is request-only: it reaches the model on
+    // every iteration of this turn, regardless of skill routing, and is never
+    // persisted into history or the system prompt.
+    apiMessages = withTurnDirective(apiMessages, opts.delegationDirective, turnUserMessage);
 
     const promptTokens = estimatePromptTokens(apiMessages);
     const ctxWindow = getModelOrInfer(opts.model).contextWindow;
