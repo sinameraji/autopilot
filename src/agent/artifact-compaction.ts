@@ -274,13 +274,21 @@ export function shouldCompact(opts: {
   return tokens > tokenThreshold || turns.length > turnThreshold;
 }
 
+function isCompiledStateMessage(m: ChatMessage): boolean {
+  return m.role === "system" && typeof m.content === "string" && m.content.startsWith("[compiled session state]");
+}
+
 /** Run compaction: collapse older turns into SessionState, keep recent raw turns. */
 /**
  * Use when you want to extract structured artifacts and state deltas from turns instead of raw text.
  */
 export function compactMessagesViaArtifacts(opts: CompactionOpts): CompactionResult {
   const keepLastTurns = opts.keepLastTurns ?? 4;
-  const { prefix, turns } = groupIntoTurns(opts.messages);
+  const grouped = groupIntoTurns(opts.messages);
+  const turns = grouped.turns;
+  // A previous compaction's state message sits in the prefix; the new state
+  // already merges it (opts.state), so drop it instead of stacking copies.
+  const prefix = grouped.prefix.filter((m) => !isCompiledStateMessage(m));
 
   const tokensBefore = estimatePromptTokens(opts.messages);
 
