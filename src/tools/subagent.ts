@@ -2,6 +2,7 @@ import type { ToolSpec, ToolContext, ToolOutput } from "./registry.js";
 import { loadConfig, resolveWorkerBudgetUsd } from "../config.js";
 import { runHotcellWorker } from "./hotcell-worker.js";
 import { workerRegistry } from "./worker-registry.js";
+import { failureReason, recordSubagentEvent } from "./subagent-stats.js";
 import type { WorkerResultMessage } from "../agent/messages.js";
 
 export interface SubagentArgs {
@@ -107,6 +108,18 @@ export const subagentTool: ToolSpec<SubagentArgs> = {
     // Each subagent gets its own cancel handle (see /subagents cancel), linked
     // to the turn: cancelling one never interrupts the turn or other subagents.
     const handle = workerRegistry.start(args.mission, model, ctx.signal);
+    const startedAt = Date.now();
+    const record = (status: string, extra: { costUsd?: number; error?: string; localChanges?: number } = {}) =>
+      void recordSubagentEvent({
+        kind: "subagent",
+        ts: Date.now(),
+        sessionId: ctx.sessionId ?? "unknown",
+        status,
+        durationMs: Date.now() - startedAt,
+        costUsd: extra.costUsd ?? 0,
+        ...(failureReason(extra.error) ? { reason: failureReason(extra.error) } : {}),
+        ...(extra.localChanges ? { localChanges: extra.localChanges } : {}),
+      });
     let result;
     try {
       result = await runHotcellWorker({
@@ -121,11 +134,20 @@ export const subagentTool: ToolSpec<SubagentArgs> = {
         signal: handle.signal,
       });
     } catch (error) {
-      if (handle.cancelledByUser) return textOutput(userCancelledMessage(handle.index, args.mission));
+      if (handle.cancelledByUser) {
+        record("cancelled", { error: "cancelled by user" });
+        return textOutput(userCancelledMessage(handle.index, args.mission));
+      }
+      record("failed", { error: error instanceof Error ? error.message : String(error) });
       throw new Error("Subagent could not start: " + (error instanceof Error ? error.message : String(error)), { cause: error });
     } finally {
       handle.finish();
     }
+    record(handle.cancelledByUser ? "cancelled" : result.status, {
+      costUsd: result.costUsd,
+      error: handle.cancelledByUser ? "cancelled by user" : result.error,
+      localChanges: Number(/Included your (\d+)/.exec(result.snapshotNote ?? "")?.[1] ?? 0),
+    });
     if (handle.cancelledByUser && !ctx.signal?.aborted) {
       return textOutput(userCancelledMessage(handle.index, args.mission));
     }

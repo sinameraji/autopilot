@@ -29,6 +29,10 @@ Workers add model cost and latency. Defaults are $1 per worker, a $5 hard ceilin
 
 Legacy workerEndpoint, workerApiKey, KIMIFLARE_WORKER_ENDPOINT, and KIMIFLARE_WORKER_BACKEND settings do not enable or route workers. The separate /remote command for interactive remote sessions is unaffected.
 
+## Usage stats
+
+`/subagents stats` summarizes the last 7 days on this machine: sessions, how many offered the subagent tool and how many used it, completion rate, failure categories (repository, hotcell, provider, budget, timeout, cancelled), median duration, and total cost. Events are appended to `~/.local/share/kimiflare/subagents.jsonl` and contain only session ids, the policy decision, outcomes, durations, and costs — never prompts, missions, or code.
+
 ## If a worker cannot start
 
 Autopilot reports Hotcell setup, repository, provider, and spend failures as tool errors. It does not silently fall back to a remote service. The coordinator can continue locally, but should not claim a worker ran when it did not.

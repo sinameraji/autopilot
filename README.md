@@ -100,7 +100,7 @@ For substantial tasks, the agent can hand independent investigations to **subage
 
 Setup: install and start Hotcell, then add your OpenRouter key to its host key store (`hotcell keys add openrouter`). The real key never enters a sandbox. Subagents are read-only (no edits, shell, PRs, or MCP) and see your current working tree, including uncommitted changes (secrets like `.env` are never copied). The first subagent after an install builds a cached runtime (about two minutes, once per version); later ones start in seconds. See [docs/subagents.md](docs/subagents.md) for limits and troubleshooting.
 
-While subagents run they are listed above the prompt (Ink) or in the activity panel (`/agents`, Camouflage). `/subagents cancel <n>` stops one without interrupting the turn.
+While subagents run they are listed above the prompt (Ink) or in the activity panel (`/agents`, Camouflage). `/subagents cancel <n>` stops one without interrupting the turn, and `/subagents stats` shows how often subagents were offered, used, and succeeded over the last week (kept locally in `~/.local/share/kimiflare/subagents.jsonl`; no prompts or code are recorded).
 
 ### Model
 

@@ -8,7 +8,7 @@ export const BUILTIN_COMMANDS: SlashItem[] = [
   { name: "help", description: "Show keybindings and command list", source: "builtin" },
   { name: "model", argHint: "[list|<id>]", description: "Pick model (no args opens picker)", source: "builtin" },
   { name: "jev", argHint: "[yes|choose|score]", description: "Ask Jev for a one-shot decision with scoped chat/project context", source: "builtin" },
-  { name: "subagents", argHint: "[list|cancel <n>|all|off|suggest|auto]", description: "List or stop running subagents; set the delegation policy", source: "builtin" },
+  { name: "subagents", argHint: "[list|cancel <n>|all|stats|off|suggest|auto]", description: "List or stop running subagents; set the delegation policy", source: "builtin" },
   { name: "now", description: "Run your latest queued message now instead of after the current turn", source: "builtin" },
   { name: "mode", argHint: "[edit|plan|auto]", description: "Switch agent mode", source: "builtin" },
   { name: "multi-agent", argHint: "[status]", description: "Legacy remote worker setup is disabled; use local Hotcell subagents", source: "builtin" },

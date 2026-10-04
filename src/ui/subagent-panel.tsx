@@ -8,7 +8,7 @@ import { formatElapsed } from "./slash-commands.js";
  *  even while a turn is busy (subagents only exist during a turn). Policy
  *  changes (`/subagents off|suggest|auto`) still wait for the turn. */
 export function isImmediateSubagentCommand(text: string): boolean {
-  return /^\/subagents(?:\s+(?:list|ls|help|cancel|stop)\b.*|\s*)$/i.test(text.trim());
+  return /^\/subagents(?:\s+(?:list|ls|help|cancel|stop|stats)\b.*|\s*)$/i.test(text.trim());
 }
 
 /** `/now`: promote the latest queued message (same as Ctrl+G, which the
