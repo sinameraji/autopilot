@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { chmod, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { formatWorkerResult, spawnWorkerTool } from "./spawn-worker.js";
+import { workerRegistry } from "./worker-registry.js";
+import type { ToolContext } from "./registry.js";
 
 const realFetch = globalThis.fetch;
 const ENV_KEYS = [
@@ -17,6 +21,7 @@ const ENV_KEYS = [
   "KIMIFLARE_WORKER_API_KEY",
   "KIMI_MODEL",
   "XDG_CONFIG_HOME",
+  "HOTCELL_BIN",
 ] as const;
 const saved: Record<string, string | undefined> = {};
 let configHome = "";
@@ -108,5 +113,64 @@ describe("formatWorkerResult", () => {
       filesRead: [],
     }, "openai/gpt-6-luna");
     assert.match(text, /did not return a structured report/);
+  });
+});
+
+describe("cancelling a running subagent", () => {
+  async function setup(): Promise<{ cwd: string; ctx: (signal: AbortSignal) => ToolContext }> {
+    const cwd = await mkdtemp(join(configHome, "repo-"));
+    for (const args of [["init", "-q", "-b", "main"], ["config", "user.email", "t@example.com"], ["config", "user.name", "T"]]) execFileSync("git", args, { cwd });
+    await writeFile(join(cwd, "README.md"), "x\n");
+    execFileSync("git", ["add", "-A"], { cwd });
+    execFileSync("git", ["commit", "-qm", "init"], { cwd });
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/example/project.git"], { cwd });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", "HEAD"], { cwd });
+    // Fake Hotcell: setup succeeds instantly, research blocks until killed.
+    const bin = join(configHome, "fake-hotcell");
+    await writeFile(bin, [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  create) echo "12345678-1234-1234-1234-123456789abc" ;;',
+      '  exec) case "$3" in *"npm install"*) exit 0 ;; *) exec sleep 30 ;; esac ;;',
+      '  stats) echo "Cost: 0.0" ;;',
+      "  *) exit 0 ;;",
+      "esac",
+      "",
+    ].join("\n"));
+    await chmod(bin, 0o755);
+    process.env.HOTCELL_BIN = bin;
+    process.env.OPENROUTER_API_KEY = "sk-or-test";
+    return { cwd, ctx: (signal) => ({ cwd, signal, model: "openai/gpt-6-luna" }) as unknown as ToolContext };
+  }
+
+  async function waitForWorker(): Promise<void> {
+    for (let i = 0; i < 100 && workerRegistry.list().length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 300)); // let the research exec start
+  }
+
+  it("returns a plain cancellation result for the coordinator, and the turn is untouched", { skip: process.platform === "win32" }, async () => {
+    const { ctx } = await setup();
+    const turn = new AbortController();
+    const running = spawnWorkerTool.run({ mode: "plan", task: "map the auth flow" }, ctx(turn.signal));
+    await waitForWorker();
+    const [worker] = workerRegistry.list();
+    assert.ok(worker, "worker is registered while running");
+    workerRegistry.cancel(worker.index);
+    const out = await running;
+    const content = typeof out === "string" ? out : out.content;
+    assert.match(content, /Subagent #\d+ was cancelled by the user/);
+    assert.match(content, /Do not relaunch/);
+    assert.equal(turn.signal.aborted, false);
+    assert.equal(workerRegistry.list().length, 0, "worker removed after it stops");
+  });
+
+  it("still reports a turn abort as a failure, not a user decision", { skip: process.platform === "win32" }, async () => {
+    const { ctx } = await setup();
+    const turn = new AbortController();
+    const running = spawnWorkerTool.run({ mode: "plan", task: "map the auth flow" }, ctx(turn.signal));
+    await waitForWorker();
+    turn.abort();
+    await assert.rejects(running, /cancelled/);
+    assert.equal(workerRegistry.list().length, 0);
   });
 });
