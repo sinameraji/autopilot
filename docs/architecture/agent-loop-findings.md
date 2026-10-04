@@ -1,503 +1,174 @@
-# Agent loop — red flags and opportunities
-
-Companion to [`agent-loop.md`](./agent-loop.md). Everything here is grounded
-in the code as it exists on the branch that introduced this document; line
-numbers will drift, but the underlying patterns are stable enough that a
-quick `rg` should re-locate any item.
-
-Each entry: short title, code reference, why it matters, suggested effort
-(**S** = ≤ 1 day, **M** = a few days, **L** = a week or more of focused
-work).
-
-> Context for prioritization: ~14k weekly NPM downloads and 145+ GitHub
-> stars at time of writing. We are past the "personal toy" phase — the
-> long tail of users notices roughness that wouldn't matter at 100 DL/wk.
-
----
-
-## Red flags
-
-### RF-1 — Fire-and-forget memory extraction swallows errors (S → M) — ✅ shipped (OP-7)
-
-`src/agent/loop.ts:752–810`, error swallowed at `:806`.
-
-Memory extraction after each tool result is intentionally async and
-non-blocking, but the error path is a bare swallow with no logging, no
-counter, and no retry. If extraction is failing systemically (bad embedding
-endpoint, DB lock, schema mismatch), we never know. Visibility comes only
-from "memory recall is empty."
-
-**Fix:** route extraction errors through `onWarning` (already in the
-callback surface) at debug level; add a per-session error counter exposed
-in `/cost` or a `/memory health` subcommand.
-
-**Status:**
-- Errors increment a per-session counter in
-  `memoryExtractionErrorCounts` (module-level Map, same pattern as the
-  drift accumulator).
-- The first error per session also fires `onWarning(…)` with a `[memory]`
-  prefix — subsequent failures stay silent on the UI but still increment
-  the counter, and every error is sent to `logger.debug` with the
-  underlying message.
-- `getMemoryExtractionErrorCount(sessionId)` is exported for the eventual
-  `/memory health` subcommand (TUI work, M4-adjacent).
-
-### RF-2 — Drift accumulator decays as fast as it fires (S) — ✅ shipped (OP-8)
-
-`DRIFT_THRESHOLD = 5` at `src/agent/loop.ts:138`, decay −1 per turn at turn
-end (~`loop.ts:825`).
-
-The `onKimiMdStale()` signal is meant to nudge users to refresh `KIMI.md`
-once a session has drifted. With a 5-event threshold and a 1-per-turn
-decay, it almost never fires on long sessions — the accumulator hovers
-near zero. The result is a feature that exists in code but rarely surfaces
-in the UI.
-
-**Fix:** either drop the decay to 0.5/turn (rounded fractional accumulator)
-or change the trigger to a sliding window (e.g., 3 high-signal memories
-in 10 turns).
-
-**Status:** Replaced the counter-with-decay with a sliding window —
-`driftEvents` is a `Map<sessionId, number[]>` of turn indices, and
-`onKimiMdStale` fires when **≥ 3 high-signal memories land within 10
-turns**. After firing, the window is cleared so we don't re-nudge on
-every subsequent turn. The end-of-turn decay block is gone.
-
-### RF-3 — Web-fetch spiral guardrail is per-turn only (S) — ✅ shipped (OP-6)
-
-`src/agent/loop.ts:609–666`.
-
-The `MAX_WEB_FETCH_PER_TURN = 5` and `WEB_FETCH_DOMAIN_THRESHOLD = 2`
-counters reset every turn. An agent that splits a research spiral across
-three turns can re-fetch the same domain ~15 times. Cheap to abuse.
-
-**Fix:** lift `totalWebFetches` and `domainCounts` to session state. Add a
-soft session cap (e.g., 25 fetches before a "synthesize what you have"
-nudge).
-
-**Status:** Web-fetch history now lives in a module-level
-`Map<sessionId, …>` (same pattern as the drift accumulator). The
-per-turn ceiling (5) stays — a new `webFetchesThisTurn` counter
-guards the burst case — while the domain count and the new
-`SESSION_WEB_FETCH_CAP = 25` are evaluated against the whole session.
-Crossing the session cap returns a "synthesize what you have learned
-from prior fetches" warning as the tool result.
-
-### RF-4 — Anti-loop signature is sensitive to nonces (M)
-
-`src/agent/loop.ts:584–607`, signature = `name + stableStringify(args)`.
-
-If a tool's args contain a timestamp, request ID, or any non-deterministic
-field, two semantically identical calls produce different signatures and
-the guardrail never fires. Affects bash with `--date=now`, MCP tools that
-pass correlation IDs, any tool that mints a UUID internally before
-hashing.
-
-**Fix:** allow each `ToolSpec` to declare a `signatureKey(args)` projector
-that strips known nonce fields. Default falls back to current behavior.
-
-### RF-5 — Budget exhaustion only triggers when tools were called (S) — ✅ shipped (OP-9)
-
-`src/agent/loop.ts:530–574`. The condition is
-`cumulativePromptTokens >= maxInputTokens && toolCalls.length > 0`.
-
-A turn that ends with zero tool calls bypasses budget enforcement. In
-practice agents do sometimes emit long pure-text turns past the cap.
-
-**Fix:** evaluate budget on every iteration end; let the no-tools case
-short-circuit straight to `BudgetExhaustedError` instead of an extra
-synthesis turn.
-
-**Status:** Removed `toolCalls.length > 0` from the budget condition.
-Pure-text turns past the cap now flip `budgetExhausted`, and the
-existing no-tools branch (which throws `BudgetExhaustedError` when the
-flag is set) short-circuits without an extra synthesis turn.
-
-### RF-6 — `MAX_PROMPT_TOKENS = 240_000` hard error (S)
-
-`src/agent/loop.ts:157, 455–459`. Throws if the local estimate exceeds the
-cap.
-
-The estimator's accuracy isn't independently verified anywhere in the
-repo. If the estimate is conservative we throw early; if it's permissive
-we still hit the 256k Kimi context limit at the API. Either way, a hard
-throw at the loop boundary is a worse UX than a compaction prompt.
-
-**Fix:** at the cap, try one round of message compaction (drop oldest
-tool results, keep their artifacts) before throwing.
-
-### RF-7 — SSE idle timeout is global (S) — ✅ shipped (OP-4)
-
-`src/agent/client.ts:254`, default 60_000 ms.
-
-Cold Workers AI inferences on first-token-after-tool-use can exceed 60 s
-under load. There is no per-call override and no exponential extend on
-first-byte.
-
-**Fix:** expose `idleTimeoutMs` on the call options. Bonus: once the first
-data byte arrives, drop the idle timeout to 30 s — the model is alive.
-
-**Status:** `idleTimeoutMs` and `postFirstByteIdleTimeoutMs` are now
-plumbed through `AgentTurnOpts` → `RunKimiOpts` → `readSSE`. Defaults
-are 60s pre-first-byte, 30s post-first-byte. Callers can override per
-turn (long embedding/image turns can bump the pre-first-byte budget).
-
-### RF-8 — Retry backoff has weak jitter (S) — ✅ shipped (M1.1)
-
-`src/agent/client.ts:116`, `500 * 2^attempt + random(0..250)`.
-
-Under a thundering herd (e.g., a Cloudflare incident affecting Workers
-AI), all clients retry on nearly identical schedules. The ±250 ms jitter
-window is too narrow at the larger waits.
-
-**Fix:** full-jitter backoff: `random(0, 500 * 2^attempt)`.
-
-**Status:** Applied to both retry sites (network-error branch and
-API-error branch including rate-limit handling) in `src/agent/client.ts`.
-
-### RF-9 — Artifact eviction is age-only (S) — ✅ shipped (OP-2)
-
-`src/agent/session-state.ts:82–88`.
-
-LRU-by-timestamp ignores artifact size. Evicting one 200 KB artifact
-frees more headroom than evicting five 5 KB ones, but the policy will
-prefer the latter.
-
-**Fix:** size-weighted LRU: pick the oldest item whose size would
-materially relieve pressure (e.g., evict the largest among the oldest
-quartile).
-
-**Status:** When the char cap is exceeded, `ArtifactStore.add()` now
-calls `evictSizeWeighted()` — sort by ts, slice the oldest quartile,
-drop the largest in that window. Count-cap eviction stays age-only
-(sizes don't matter when the count is the constraint).
-
-### RF-10 — In-place mutation of `opts.messages` during skill rebuild (M)
-
-`src/agent/loop.ts:248–272`.
-
-The system message is mutated in place. If skill selection partially
-succeeds and a downstream step fails, the messages array is left in a
-hybrid state. Hard to reason about during error recovery and during
-checkpoint capture.
-
-**Fix:** snapshot messages, build the new system message into a local,
-swap atomically. Guarantees the array is always in one of two known
-states.
-
-### RF-11 — Code-mode API cache key ignores parameter schemas (S)
-
-`src/agent/loop.ts:293–328`. Cache key is `stableStringify(opts.tools)`,
-which includes tool names but is otherwise a simple identity hash.
-
-If a tool's parameter schema changes mid-session (e.g., user enables a new
-LSP capability that widens the rename payload), the cached generated API
-is stale. Code-mode-generated TS still compiles, but the runtime args may
-mismatch.
-
-**Fix:** include each tool's parameter schema digest in the cache key.
-
-### RF-12 — Tool output truncation is silent to the UI (S) — ✅ shipped (OP-3, callback only)
-
-`src/agent/loop.ts:704–708, 736–740`.
-
-The truncation banner (`[truncated: N chars omitted]`) appears in the
-model-facing message but nothing surfaces to the user. They cannot tell
-that important grep matches or bash output disappeared without
-re-running. The artifact store has the raw bytes — the UI just doesn't
-know.
-
-**Fix:** emit a `onTruncation(tool, rawBytes, reducedBytes, artifactId)`
-callback; render an inline hint in the TUI ("output truncated — use
-`expand artifact <id>` to view full").
-
-**Status:** `AgentCallbacks.onTruncation({ tool, toolCallId, rawBytes,
-reducedBytes, artifactId? })` is now fired from both truncation sites
-(regular executor path and code-mode sandbox path). The TUI hint
-itself ("output truncated — use `expand_artifact <id>` to view full")
-is **not yet wired** because that lives in `app.tsx`, which is
-reserved for the M4 breakup; SDK consumers can subscribe today.
-
-### RF-13 — Sync FS tools don't honor `ctx.signal` (M) — ✅ first half shipped (OP-5)
-
-`src/tools/read.ts`, `write.ts`, `edit.ts`, `glob.ts`, `grep.ts`.
-
-`AbortScope` propagates correctly to bash and the network tools, but the
-file-system tools never check `ctx.signal`. A grep over a large monorepo
-or a recursive glob can block Ctrl+C for many seconds. The user
-experience is "the TUI is frozen."
-
-**Fix:** in grep, check `signal.aborted` between batches. In glob, wire
-fast-glob's `signal` option (already supported upstream). In read on
-large files, switch to a streaming read that checks the signal between
-chunks. Edit and write are usually fast enough that a check-at-start is
-sufficient.
-
-**Status (first half):**
-- `grep`: ripgrep path now forwards `ctx.signal` to `execFile`. The JS
-  fallback checks `signal.aborted` between every file. Errata on the
-  upstream `signal` claim — fast-glob 3.x doesn't accept an AbortSignal
-  natively, so glob support is via streaming + destroy on abort instead.
-- `glob`: switched to `fg.stream()`; we check `signal.aborted` between
-  yielded entries and destroy the stream on abort, so a recursive walk
-  of a giant monorepo terminates promptly.
-- `read`: checks `signal.aborted` at entry, after stat, and forwards
-  `ctx.signal` to `fs.readFile`.
-
-**Status (second half):**
-- ✅ `read`: streaming path for files over MAX_BYTES (M3.4). Above the
-  cap, callers must supply `offset`+`limit` and the file is streamed
-  line-by-line with abort-signal checks between chunks; a 50 MB hard
-  ceiling on bytes scanned protects against runaway reads.
-- Still pending: explicit `write`/`edit` check-at-start.
-
-### RF-14 — `src/app.tsx` is a 4,393-line god component (L)
-
-Single `App()` function with ~60 hooks managing session, pickers,
-modals, permissions, checkpoints, remote, theming, tasks, reasoning view,
-input handling, and slash commands. Every change touches risk for every
-other feature. Tests can only smoke-test the whole tree.
-
-**Fix:** progressive extraction. Start with the isolated pieces (already
-co-located but inlined):
-
-1. `PermissionController` — modal + decision threading.
-2. `PickerController` — file/mention/slash pickers share an underlying
-   state machine.
-3. `ModalHost` — limit, loop, command, LSP, theme, remote, inbox modals.
-4. `SessionManager` — load, resume, checkpoint, save.
-5. `TurnController` — supervisor wiring + status pills + reasoning view.
-6. `AppRoot` — what remains.
-
-After each extraction, the diff against `app.tsx` should shrink and the
-new module should ship with its own tests. Track this as a quarter-long
-effort, not a single PR.
-
-### RF-15 — LSP `restartAttempts` is dead state (S) — ✅ shipped in #422
-
-`src/lsp/manager.ts`. The field exists but is never incremented. There is
-no auto-restart for crashed language servers; the session just shows the
-server as "crashed" and stops offering its tools.
-
-**Fix:** on `exit` with non-zero code, requeue start with exponential
-backoff up to N attempts (e.g., 3). Surface attempts in `/lsp status`.
-
-**Status:** Auto-restart with full-jitter exponential backoff (default
-3 attempts, capped at 10s) landed in #422 as M3.3. `restartAttempts`
-is now populated and surfaced on `LspServerStatus`. The `/lsp status`
-slash-command surface itself remains to be built — deferred to avoid
-conflict with the M4 `app.tsx` extractions.
-
-### RF-16 — MCP and LSP tool calls have no per-call timeout (M) — ✅ shipped in #421 and #422
-
-`src/mcp/manager.ts`, `src/lsp/manager.ts`.
-
-A hung MCP server (slow upstream API, stuck stdio) blocks the agent turn
-indefinitely. The session-level abort can still fire, but the loop sits
-waiting on the tool call result until then.
-
-**Fix:** per-tool `timeoutMs` (default 30–60 s for MCP, 10 s for most LSP
-operations). Surface as a `ToolError` so the loop can recover the turn.
-
-**Status:** MCP per-call timeout (default 60s) landed in #421 as
-M3.1; LSP per-request timeout (default 10s) landed in #422 as M3.2.
-Both configurable per server via `timeoutMs`. The structured
-`ToolError` surface is still pending (M2.1) — for now timeouts
-surface as plain labeled `Error` messages flattened to
-`ToolResult.content`.
-
-### RF-17 — Resume after reducer-config change can misread artifacts (M)
-
-`src/agent/session-state.ts` + `src/tools/reducer.ts`.
-
-Artifact contents include reduction hints (e.g., grep "first 50 lines /
-3 matches per file"). Upgrading the reducer config changes the semantics
-of that hint but the artifact text doesn't carry the version. A resumed
-session may show stale framing.
-
-**Fix:** stamp each artifact with `{ reducerName, reducerVersion }`. On
-resume, if the version doesn't match, either re-reduce from raw (if
-present) or annotate the artifact as "reduced under an older config."
-
-### RF-18 — Bash co-author injection builds shell strings via regex (M)
-
-`src/tools/bash.ts`, `injectCoauthor()` (~lines 103–142 in the version
-this doc was written against).
-
-Forty lines of regex matching plus string assembly to add a `Co-authored-by:`
-trailer. The shell-escape story for the name and email is not obvious.
-If the inputs ever come from a user-controlled source without prior
-sanitization, this is a footgun.
-
-**Fix:** assemble the trailer with parameter-style escaping (or a known-
-good escape helper) rather than template strings; add a unit test with
-adversarial inputs (`"`, `$`, `;`, backticks).
-
-### RF-19 — `isolated-vm` → `node:vm` fallback warning fires once per process (S) — ✅ shipped (M1.10)
-
-`src/code-mode/sandbox.ts`, `fallbackWarningShown` flag.
-
-When the sandbox quietly downgrades from isolate to `node:vm`, the
-warning is printed once per process. New sessions in the same process
-(common when embedded via SDK) never see it. Users may not realize
-they're outside a true sandbox.
-
-**Fix:** track per session, not per process. Re-emit on each session
-start that uses code mode.
-
-**Status:** Boolean flag replaced with a `Set<sessionId>` keyed off
-`ctx.sessionId`. New sessions in the same process now see the
-warning.
-
-### RF-20 — Ctrl+C left TUI half-dead (S) — ✅ shipped (M1.0)
-
-`render()` call in `src/app.tsx` was not setting `exitOnCtrlC: false`.
-
-User-reported, long-standing. Symptom: pressing Ctrl+C during a busy
-turn left the TUI in an in-between state where typed characters
-still printed to the screen but Enter did not submit. The session
-appeared usable but was broken.
-
-**Initial misdiagnosis (worth recording so the next investigator does
-not repeat it):** I first attributed this to a race between the
-`useInput` Ctrl+C branch and the `process.on("SIGINT")` fallback
-handler in `app.tsx`. That race is real but rare — it only fires when
-raw mode is disabled by a child process. In normal interactive use,
-SIGINT is never delivered because the terminal emits the raw `0x03`
-byte instead. The first fix (#426) was therefore at the wrong layer
-and was later superseded.
-
-**Actual root cause:** Ink's `render()` defaults to
-`exitOnCtrlC: true`. That means Ink's built-in handler **intercepts
-the Ctrl+C keystroke before `useInput` ever sees it** and calls
-`app.exit()`, which:
-
-1. Unmounts the React tree — the TUI stops rendering and its last
-   frame stays frozen on screen.
-2. Restores the terminal from raw to cooked mode.
-3. Resolves `instance.waitUntilExit()`, but the Node process keeps
-   running because the agent loop, LSP servers, MCP clients and
-   other async work are independent of the render lifecycle.
-
-The result: a frozen Ink frame visible on screen, plus a fresh
-cooked-mode terminal cursor below it echoing the user's keystrokes
-locally; `Enter` goes to a stdin buffer with no readers. The
-carefully-written useInput Ctrl+C branch in `app.tsx` (kill
-supervisor, abort scope, deny pending modals, emit `(interrupted)`)
-was **effectively dead code** the whole time — Ink ate the keystroke
-first.
-
-**Fix shipped:** pass `exitOnCtrlC: false` to `render()`. Per Ink's
-own docs (`node_modules/ink/build/render.d.ts:28`):
-
-> Configure whether Ink should listen for Ctrl+C keyboard input and
-> exit the app. This is needed in case `process.stdin` is in raw
-> mode, because then Ctrl+C is ignored by default and the process is
-> expected to handle it manually.
-
-With this flag, Ctrl+C reaches `useInput` and the existing interrupt
-logic runs as designed. The SIGINT fallback in `app.tsx:646` is
-unchanged and still serves the rare non-raw-mode case.
-
-Tracked as M1.0 in the development roadmap.
-
----
-
-## Opportunities
-
-### Quick wins (S — pick most of these up in a week)
-
-- **OP-1.** Full-jitter retry backoff (fix for RF-8).
-- **OP-2.** Size-aware artifact eviction (fix for RF-9). ✅ shipped
-- **OP-3.** `onTruncation` callback + TUI hint (fix for RF-12). ✅ callback shipped; TUI hint deferred to M4
-- **OP-4.** Per-call SSE idle timeout knob (fix for RF-7). ✅ shipped
-- **OP-5.** `signal.aborted` checks inside grep/glob/read inner loops
-  (fix for RF-13, first half). ✅ shipped
-- **OP-6.** Cross-turn `webFetchHistory` (fix for RF-3). ✅ shipped
-- **OP-7.** Memory extraction error counter + `/memory health` surface
-  (fix for RF-1). ✅ counter + onWarning shipped; `/memory health` surface deferred to M4
-- **OP-8.** Sliding-window drift detection (fix for RF-2). ✅ shipped
-- **OP-9.** Zero-tool-call budget check (fix for RF-5). ✅ shipped
-- **OP-10.** Re-emit isolated-vm fallback warning per session
-  (fix for RF-19).
-
-### Medium investments (M)
-
-- **OP-11.** Pluggable reducer registry. Replace the switch-on-name in
-  `reducer.ts` with `registerReducer(toolName, fn)`. Lets MCP and skill-
-  defined tools bring their own reductions. Pairs with RF-12.
-- **OP-12.** Structured `ToolError { code, message, recoverable,
-  suggestion }`. Today tool errors are strings shoved into the result
-  content. A typed envelope unblocks reliable retry policies, lets the UI
-  render "try X" hints, and lets the loop decide whether to back off vs.
-  fail.
-- **OP-13.** Permission decision returns `{ decision, cached }`. Today
-  the loop cannot tell whether a permission was one-time or session-wide
-  (the callback returns just the decision, the executor decides the
-  caching separately). Pairs with the security audit story.
-- **OP-14.** Artifact reducer-version stamp (fix for RF-17).
-- **OP-15.** Per-call timeouts for MCP and LSP (fix for RF-16).
-- **OP-16.** LSP auto-restart with exponential backoff (fix for RF-15).
-- **OP-17.** Code-mode API freeze per turn. Generate the API once at turn
-  start, hash it, and ensure all `execute_code` calls in the turn see the
-  same snapshot. Eliminates RF-11.
-- **OP-18.** Capture top-level async rejections in the sandbox via
-  `.catch()` around the wrapper IIFE. Today rejected promises silently
-  vanish.
-
-### Bigger bets (L — quarter-scale)
-
-- **OP-19.** Break up `app.tsx` (RF-14). This is the single largest
-  velocity unlock. Until this happens, every UI change carries
-  disproportionate review and regression risk. Sequence it as six
-  extractions over a quarter, each shipping behind a no-op refactor PR.
-- **OP-20.** Structured JSON telemetry. Emit `{ timestamp, level, module,
-  event, fields }` to `~/.config/kimiflare/logs/` and optionally to a
-  user-configured Datadog / Honeycomb / OpenTelemetry collector. Per-tool
-  timing, retry attempts, truncation deltas, memory recall hit-rate,
-  budget headroom — all queryable. Today this kind of analysis requires
-  parsing session JSONs after the fact.
-- **OP-21.** Delta-encoded session checkpoints with zstd. Today each
-  checkpoint is a full snapshot; 1,000-turn sessions are unwieldy. Delta
-  + compression should bring typical sessions to a few hundred KB and
-  unlock much longer sessions without checkpoint storms.
-- **OP-22.** Circuit breaker for MCP servers. After N consecutive
-  failures from a single server, disable its tools for a cool-off and
-  notify the user. Today a flaky MCP server poisons every turn until the
-  user manually disables it.
-- **OP-23.** Quotas / budgets per tool (e.g., max bash calls per turn,
-  max bytes written per session). Complements the existing token budget
-  and the web-fetch guardrail.
-- **OP-24.** Cross-turn loop detection. Today the loop signature window
-  is per-turn (`recentToolCalls`). Lifting it to session state catches
-  the "same investigation, three turns running" pattern that current
-  guardrails miss.
-- **OP-25.** Multi-label cost attribution. The current classifier picks
-  one category per turn. Tagging tokens into a category mix (e.g., 60 %
-  feature, 40 % docs) matches reality better and improves the `/cost`
-  report.
-
----
-
-## Suggested ordering
-
-A pragmatic next-quarter plan, balanced for risk and impact:
-
-1. **Sprint 1 (week 1):** OP-1 through OP-10 — the quick wins. Each is a
-   small, well-bounded PR.
-2. **Sprint 2 (week 2–3):** OP-12 (structured `ToolError`) and OP-13
-   (permission decision shape). These unblock cleaner code in subsequent
-   sprints.
-3. **Sprint 3 (week 4–5):** OP-15, OP-16 (timeouts + LSP auto-restart),
-   plus the RF-13 second half (proper streaming read).
-4. **Background, parallelizable:** start OP-19 (`app.tsx` breakup). Aim
-   for one extraction every two weeks.
-5. **Sprint 6 (week 8+):** OP-20 (structured telemetry). After this
-   ships, the rest of the roadmap becomes data-driven.
-6. **Stretch goals:** OP-21 (session checkpoint compression), OP-24
-   (cross-turn loop detection). Both require schema or protocol changes;
-   schedule alongside a release-please minor.
-
-This roadmap leaves untouched: protocol-level changes (e.g., a Kimi v2 API
-migration), GPU-side improvements (embedding model choice), and the
-remote/Cloud product line. Those belong in separate documents.
+# Agent loop — findings and priorities
+
+Companion to [`agent-loop.md`](./agent-loop.md). Last reviewed October 2026
+against `main` at release 1.13.0. This review builds on the earlier May 2026
+findings; items from that round that shipped are listed at the end.
+
+**Goal:** a harness that coherently decides between sequential work and
+parallel subagents, and handles user input that arrives mid-turn. Today
+those features were added on top of a sequential loop, one at a time, and
+they don't compose:
+
+- delegation policy is decided in the hosts;
+- worker execution happens inside a blocking tool call;
+- the loop's scheduler doesn't know workers exist;
+- the input queue doesn't know any of this is happening.
+
+## Priorities
+
+| P | Issue | Summary |
+| --- | --- | --- |
+| P0 | #722 | Hotcell workers only run when the target repo is Autopilot; unpushed `HEAD` fails setup |
+| P0 | #723 | Parallel `spawn_worker` calls run sequentially, one permission prompt each |
+| P1 | #724 | Subagent directive is dropped unless skill routing succeeds, and stale directives persist |
+| P1 | #725 | Input coordinator: steer, interrupt, or follow up on mid-turn input; SDK steer/followUp bugs |
+| P1 | #726 | SessionCore: one turn-assembly path for all six hosts |
+| P1 | #717 | Budget-aware compaction for every entry point (lands with #726) |
+| P1 | #637 | SDK/RPC saves only on clean turns (lands with #726) |
+| P1 | #716 | Shell injection in co-author trailers |
+| P1 | #727 | Worker budget too small; results unstructured |
+| P2 | #728 | Background subagents on jobs + `wait_for` |
+| P2 | #729 | One tool scheduler instead of two divergent loop bodies |
+| P2 | #730 | Remove remote-era multi-agent dead code |
+| P2 | #718 | Continue decomposing `app.tsx` (after #726) |
+| P3 | — | Open items carried over from May (below) |
+
+Suggested order:
+
+1. **#722 + #723.** Until workers run on any repo, and in parallel, `auto`
+   delegation (the default) costs time and money without delivering
+   parallelism.
+2. **#724 and #716.** Small and independent.
+3. **#726.** Absorbs #717, #637 and the SDK half of #725, then the TUI inbox
+   from #725 on top.
+4. **#728**, with #729 as the enabling refactor. #730 any time.
+5. **#718** continues, pulling logic *into* SessionCore rather than into more
+   UI hooks.
+
+## P0
+
+### Workers can't run outside the Autopilot repo — #722
+
+`runHotcellWorker()` clones the user's repo into the cell, runs `npm ci`
+there, then runs `node --import tsx "$REPO_ROOT/src/index.tsx"`. That only
+works if the user's repo *is* Autopilot. Elsewhere:
+
+- the entry point doesn't exist;
+- `npm ci` fails or runs the project's own install scripts in the cell.
+
+The test asserts this command string, which is why the tests missed it.
+The design spike installed the published CLI instead.
+
+Two related problems:
+
+- `git fetch origin <commit>` in the cell fails for any unpushed commit,
+  and the clean-tree check doesn't catch that.
+- `npm ci` time counts against the 5-minute research timeout.
+
+### Worker calls never run in parallel — #723
+
+The loop only parallelizes a batch when every call is `isReadOnly`.
+`spawn_worker` is permission-gated and not read-only, so N worker calls run
+back to back, with N permission prompts. The delegation directive tells the
+model to delegate "in parallel", and the Hotcell semaphore (3) is never
+reached from one coordinator.
+
+## P1
+
+### Delegation directive delivery — #724
+
+`delegationDirective` is only written into the system prompt inside the
+skill-routing success branch. Without a skills DB or working embeddings, the
+model never sees the policy, but `spawn_worker` is still in its tool list.
+
+When routing does succeed, the system prompt is overwritten in place and
+persisted. A later turn whose guidance is `none` (with `spawn_worker`
+filtered out) can still carry the old "use spawn_worker" directive. This was
+RF-10 in May, rated low; it's a correctness bug.
+
+### No input coordinator — #725
+
+- **TUI:** strict FIFO; a correction waits behind the whole running turn.
+  Blocking workers make that minutes.
+- **SDK:**
+  - steers are drained only in `onIterationEnd`, which isn't called on the
+    final no-tool iteration, so a late steer leaks into the *next* prompt's
+    turn after the model has already replied;
+  - follow-ups are appended to history but never run;
+  - `prompt()` while streaming silently becomes a steer.
+
+The fix is an inbox owned by the session that classifies each message as
+steer (inject at the next boundary, including before the final answer),
+interrupt, follow-up, or command.
+
+### Six divergent hosts — #726 (with #717, #637)
+
+See the host table in `agent-loop.md`. Compaction, delegation policy,
+steering, saving and hooks are wired per host, inconsistently. SDK, server
+and emit expose `spawn_worker` without any policy directive. #717
+(compaction only in TUI/init, with a fixed 80k/12-turn trigger) and #637
+(SDK saves only on success) are symptoms. Fix them once, in a shared core.
+
+### Co-author trailer injection — #716
+
+Config and env values are interpolated into generated shell source in
+`injectCoauthor()`. Exploiting it requires control of the user's own config,
+hence P1 rather than P0.
+
+### Worker budget and result shape — #727
+
+Workers run with a 14k *cumulative* input-token budget, and the design spike
+saw both workers exhaust it. Output is one unstructured blob with a
+hard-coded `confidence: "medium"` and empty `filesRead`/`sources`.
+
+## P2
+
+- **#728, background subagents.** Workers are blocking tool calls with no
+  handle, status, or per-worker cancel. Jobs, `wait_for` and the run store
+  already provide the lifecycle; worker results should arrive through the
+  #725 inbox.
+- **#729, one scheduler.** The parallel and sequential paths in
+  `runAgentTurn` duplicate per-call handling and have already drifted. The
+  parallel path ignores `waitRequest`, drops `onRunBudgetExceeded`, and skips
+  task auto-advance.
+- **#730, dead code.** About 450 lines in `supervisor.ts` (decomposition,
+  synthesis, pre-read, `ActiveWorker`) plus the related config keys and the
+  `/multi-agent` stub.
+- **#718, `app.tsx`** (3,041 LOC). Sequence it after #726.
+
+## P3: open items carried over from May
+
+- **RF-4:** loop-guardrail signatures are sensitive to nonce fields in
+  arguments. Let `ToolSpec` declare a signature projector.
+- **RF-11:** the Code Mode API cache is keyed by `stableStringify(tools)`;
+  freeze the API per turn.
+- **RF-13 (rest):** `write`/`edit` don't check `ctx.signal` at entry.
+- **RF-17:** stamp artifacts with the reducer version for resumed sessions.
+- **RF-12 (rest)** and **OP-7 (rest):** the TUI hint for truncated output
+  and a `/memory health` surface. The callbacks already exist.
+- The intent tier is a keyword regex. That's acceptable as a cheap gate (it
+  only sizes the skills budget and short-circuits light prompts away from
+  delegation), but nothing that spends money should key off it alone.
+- **Delegation telemetry:** policy kind, worker count, setup and research
+  time, cost and outcome, so the `auto` default can be judged on data
+  (#660's evaluation plan).
+
+## Shipped since the May review
+
+- **RF-1:** memory extraction error counter and warning.
+- **RF-2:** sliding-window drift detection.
+- **RF-3:** session-scoped web-fetch caps.
+- **RF-5:** budget check on text-only turns.
+- **RF-6:** preflight derived from the model's context window rather than a
+  fixed 240k.
+- **RF-7:** per-call SSE idle timeouts.
+- **RF-8:** full-jitter retries.
+- **RF-9:** size-weighted artifact eviction.
+- **RF-12:** `onTruncation` callback.
+- **RF-13:** abortable grep, glob and read.
+- **RF-15/16:** LSP restart, plus MCP/LSP timeouts.
+- **RF-18:** now tracked as #716.
+- **RF-19:** per-session sandbox fallback warning.
+- **RF-20:** Ctrl+C handling.
+- **OP-12:** classified tool errors.
+- **#661:** loop and limit guardrails never pause unattended runs.
