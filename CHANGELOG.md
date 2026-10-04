@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.18.0](https://github.com/sinameraji/autopilot/compare/v1.17.0...v1.18.0) (2026-10-04)
+
+
+### Features
+
+* **subagents:** record usage locally and add /subagents stats ([34f6734](https://github.com/sinameraji/autopilot/commit/34f67346f9dc47d62ac6d25b2415739fec8eedfb))
+* **subagents:** record usage locally and add /subagents stats ([baa9a44](https://github.com/sinameraji/autopilot/commit/baa9a44e2f97eef3c798ed37f13e76a771457b90))
+
 ## [1.17.0](https://github.com/sinameraji/autopilot/compare/v1.16.0...v1.17.0) (2026-10-04)
 
 
