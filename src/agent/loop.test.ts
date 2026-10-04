@@ -504,4 +504,50 @@ describe("runAgentTurn", () => {
     });
     assert.equal(maxActive, 1);
   });
+
+  it("sends the delegation directive on every request without persisting it", async () => {
+    const messages: ChatMessage[] = [
+      { role: "system", content: "base prompt" },
+      { role: "user", content: "investigate A and B" },
+    ];
+    const bodies: Array<{ messages: Array<{ role: string; content: unknown }> }> = [];
+    let requests = 0;
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      requests++;
+      const encoder = new TextEncoder();
+      const events = requests === 1
+        ? [
+            { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "read", arguments: "{}" } }] } }] },
+            { choices: [{ finish_reason: "tool_calls" }] },
+          ]
+        : [{ choices: [{ delta: { content: "done" } }] }, { choices: [{ finish_reason: "stop" }] }];
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    const read: ToolSpec = { name: "read", description: "read", parameters: { type: "object", properties: {} }, needsPermission: false, isReadOnly: true, run: async () => "contents" };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages,
+      tools: [read],
+      executor: { list: () => [read], run: async (call: { id: string; name: string }) => ({ tool_call_id: call.id, name: call.name, ok: true, content: "contents" }) } as unknown as ToolExecutor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      delegationDirective: "Delegate independent research with spawn_worker.",
+      callbacks: { askPermission: async () => "allow" },
+    });
+    assert.equal(bodies.length, 2);
+    for (const body of bodies) {
+      const directive = body.messages.findIndex((m) => m.role === "system" && String(m.content).includes("Delegate independent research"));
+      assert.equal(directive, 2, "directive follows the turn's user message on every iteration");
+    }
+    assert.ok(!JSON.stringify(messages).includes("Delegate independent research"), "directive is never persisted");
+  });
 });

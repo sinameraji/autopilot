@@ -225,14 +225,14 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
   if (isNew || sessionFile.messages.length === 0) {
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests, delegationDirective: delegationGuidance.directive }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests}),
     });
   } else {
     // Continue: load existing messages, filter out old system prompts, keep context
     const nonSystem = sessionFile.messages.filter((m) => m.role !== "system");
     messages.push({
       role: "system",
-      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests, delegationDirective: delegationGuidance.directive }),
+      content: buildSystemPrompt({ cwd, tools: workerTools, model: opts.model, preferPullRequests: opts.preferPullRequests}),
     });
     messages.push(...nonSystem);
   }
