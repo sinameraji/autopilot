@@ -15,7 +15,8 @@ Automatic subagents are for research only. Workers cannot edit files, open PRs, 
 - Install and start the Hotcell CLI/daemon locally.
 - Configure the daemon's OpenRouter gateway route with `hotcell keys add openrouter` on the daemon host.
 - Use an OpenRouter-backed Autopilot session. Requesty and custom OpenAI-compatible endpoints are not supported for Hotcell workers.
-- Run from a clean Git checkout on a named branch with a credential-free HTTPS or SSH origin that the daemon can clone. Workers inspect the exact committed revision; uncommitted and untracked files are not included.
+- Run from a clean Git checkout on a named branch with a credential-free HTTPS or SSH origin that the daemon can clone. Workers inspect the exact committed revision; uncommitted and untracked files are not included. That commit must already be pushed to `origin` (the cell clones from it), so `git push` before delegating.
+- Each cell installs the Autopilot CLI matching your local version (`autopilot-ai@<version>`) into a private prefix; your project's own dependencies and install scripts are never run. Set `KIMIFLARE_WORKER_PACKAGE` to override the npm spec (for example a tarball while developing Autopilot), and `KIMIFLARE_WORKER_SETUP_TIMEOUT_MS` to change the setup timeout (default 5 minutes, separate from the research timeout).
 - The same active model ID is passed to the worker. Autopilot does not silently switch models.
 
 Hotcell workers have a narrow read-only tool profile, a per-worker spend cap, and a cleanup lifecycle. The Hotcell daemon owns provider credentials and injects its gateway token; Autopilot does not pass its OpenRouter key to the sandbox.
