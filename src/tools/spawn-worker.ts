@@ -18,6 +18,7 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
   description: [
     "Spawn a read-only research worker in a local Hotcell sandbox. Hotcell is the only worker backend.",
     "Workers inspect the committed repository snapshot and cannot edit files; implement any changes in the coordinator.",
+    "To run several workers in parallel, emit all of their spawn_worker calls in the same response; the user approves them together.",
   ].join(" "),
   parameters: {
     type: "object",
@@ -51,10 +52,22 @@ export const spawnWorkerTool: ToolSpec<SpawnWorkerArgs> = {
     additionalProperties: false,
   },
   needsPermission: true,
-  render: (args) => ({
-    title: "spawn_worker (Hotcell plan)",
-    body: args.task.slice(0, 200),
-  }),
+  // Workers run in isolated Hotcell cells and never touch the workspace, so
+  // several can run at once; the Hotcell slot semaphore bounds concurrency.
+  concurrent: true,
+  render: (args) => {
+    const batch = (args as SpawnWorkerArgs & { batch?: SpawnWorkerArgs[] }).batch;
+    if (Array.isArray(batch) && batch.length > 1) {
+      return {
+        title: `spawn_worker × ${batch.length} (Hotcell plan, run in parallel)`,
+        body: batch.map((item, i) => `${i + 1}. ${String(item.task ?? "").slice(0, 160)}`).join("\n"),
+      };
+    }
+    return {
+      title: "spawn_worker (Hotcell plan)",
+      body: args.task.slice(0, 200),
+    };
+  },
   async run(args, ctx): Promise<ToolOutput> {
     const cfg = await loadConfig().catch(() => null);
     if (!cfg?.openrouterApiKey) {
