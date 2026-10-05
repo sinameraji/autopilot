@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { KimiConfig } from "../config.js";
+import { AsterGitHub, AsterGitHubError } from "./aster-github.js";
 import { AsterApi, type AsterTurnStart } from "./aster-api.js";
 import { AsterStore } from "./aster-store.js";
 import { startServer } from "./index.js";
@@ -529,6 +530,63 @@ describe("Aster control-plane API", () => {
   });
 });
 
+describe("Aster chat/code projects, GitHub, and artifacts", () => {
+  it("lists and creates repositories and provisions code and chat conversations", async () => {
+    const harness = await createHarness("complete");
+    try {
+      const listed = await (await request(harness, "GET", "/api/v1/github/repositories?q=app")).json() as { repositories: Array<{ fullName: string }> };
+      assert.deepEqual(listed.repositories.map((r) => r.fullName), ["me/app"]);
+      const created = await request(harness, "POST", "/api/v1/github/repositories", { name: "fresh", private: true });
+      assert.equal(created.status, 201);
+      assert.deepEqual(harness.createdRepositories, ["me/fresh"]);
+
+      const missing = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "code", repository: "me/nope" });
+      assert.equal(missing.status, 404);
+      const noRepo = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "code" });
+      assert.equal(noRepo.status, 400);
+
+      const code = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "code", repository: "me/app" });
+      assert.equal(code.status, 201);
+      const codeBody = await code.json() as { conversationId: string; kind: string; repository: string; branch: string };
+      assert.equal(codeBody.kind, "code");
+      assert.equal(codeBody.repository, "me/app");
+      assert.equal(codeBody.branch, `aster/${codeBody.conversationId.slice(0, 8)}`);
+      assert.deepEqual(harness.provisionedProjects.at(-1), { kind: "code", repository: "me/app", baseBranch: "main", branch: codeBody.branch });
+
+      const chat = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "chat" });
+      assert.equal(chat.status, 201);
+      assert.deepEqual(harness.provisionedProjects.at(-1), { kind: "chat" });
+      const fetched = await (await request(harness, "GET", `/api/v1/conversations/${codeBody.conversationId}`)).json() as { kind: string };
+      assert.equal(fetched.kind, "code");
+
+      const legacy = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
+      assert.equal(legacy.status, 201);
+      assert.equal(harness.provisionedProjects.at(-1), undefined);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("lists artifacts and downloads one as an attachment", async () => {
+    const harness = await createHarness("complete");
+    try {
+      const created = await (await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "chat" })).json() as { conversationId: string };
+      const base = `/api/v1/conversations/${created.conversationId}/artifacts`;
+      const list = await (await request(harness, "GET", base)).json() as { artifacts: Array<{ path: string }> };
+      assert.deepEqual(list.artifacts.map((a) => a.path), ["deck.pdf"]);
+      const file = await request(harness, "GET", `${base}/file?path=deck.pdf`);
+      assert.equal(file.status, 200);
+      assert.equal(file.headers.get("content-type"), "application/pdf");
+      assert.match(file.headers.get("content-disposition") ?? "", /deck\.pdf/);
+      assert.equal(await file.text(), "%PDF");
+      assert.equal((await request(harness, "GET", `${base}/file?path=../secret`)).status, 400);
+      assert.equal((await request(harness, "GET", `${base}/file?path=missing.pdf`)).status, 404);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
 describe("Aster model catalog, model switching, and checkpoints", () => {
   it("offers the tool-capable OpenRouter catalog and switches models between turns", async () => {
     const harness = await createHarness("complete", { openRouterCatalog: true });
@@ -608,6 +666,8 @@ interface Harness {
   resumedCells: string[];
   modelSwitches: Array<{ cellId: string; model: string }>;
   restores: Array<{ cellId: string; checkpointId: string }>;
+  provisionedProjects: Array<unknown>;
+  createdRepositories: string[];
   close(): Promise<void>;
 }
 
@@ -672,8 +732,27 @@ async function createHarness(mode: "complete" | "hang" | "approval", options: { 
   const resumedCells: string[] = [];
   const modelSwitches: Array<{ cellId: string; model: string }> = [];
   const restores: Array<{ cellId: string; checkpointId: string }> = [];
+  const provisionedProjects: Array<unknown> = [];
+  const createdRepositories: string[] = [];
+  const repo = (fullName: string) => ({
+    fullName, name: fullName.split("/")[1]!, owner: fullName.split("/")[0]!, private: true,
+    description: null, defaultBranch: "main", updatedAt: null,
+  });
+  const fakeGitHub = {
+    configured: true,
+    listRepositories: async (query: string) => [repo("me/app"), repo("me/site")].filter((r) => r.fullName.includes(query)),
+    getRepository: async (fullName: string) => {
+      if (fullName !== "me/app" && !createdRepositories.includes(fullName)) throw new AsterGitHubError("Repository not found", 404, "repository_not_found");
+      return repo(fullName);
+    },
+    createRepository: async (input: { name: string }) => {
+      createdRepositories.push(`me/${input.name}`);
+      return repo(`me/${input.name}`);
+    },
+  } as unknown as AsterGitHub;
   const api = new AsterApi({ openrouterApiKey: "test-key", model: "test/model" } as KimiConfig, {
     provisionConversation: async (input) => {
+      provisionedProjects.push(input.project);
       input.onCellCreated(`cell-${input.conversationId}`);
       return { cellId: `cell-${input.conversationId}` };
     },
@@ -696,7 +775,13 @@ async function createHarness(mode: "complete" | "hang" | "approval", options: { 
       restores.push({ cellId, checkpointId });
       return { id: "c".repeat(40), message: "Restore checkpoint aaaaaaa", createdAt: "2026-10-05T10:02:00Z" };
     },
-  });
+    listArtifacts: async () => [{ path: "deck.pdf", name: "deck.pdf", size: 4, modifiedAt: "2026-10-05T10:03:00Z", mimeType: "application/pdf" }],
+    readArtifact: async (_cellId, path) => {
+      if (path.includes("..")) throw new Error("invalid_artifact_path");
+      if (path !== "deck.pdf") throw new Error("artifact_not_found");
+      return { data: Buffer.from("%PDF"), mimeType: "application/pdf", name: "deck.pdf" };
+    },
+  }, fakeGitHub);
   const server = createServer((req, res) => { void api.handle(req, res); });
   const port = await listen(server);
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -717,6 +802,8 @@ async function createHarness(mode: "complete" | "hang" | "approval", options: { 
     resumedCells,
     modelSwitches,
     restores,
+    provisionedProjects,
+    createdRepositories,
     close,
   };
 }

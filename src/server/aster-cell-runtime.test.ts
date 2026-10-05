@@ -22,10 +22,12 @@ interface FakeCellState {
   paused: number;
   started: number;
   modelSwitches?: string[];
+  commands?: string[];
 }
 
 function fakeSandbox(state: FakeCellState) {
   const exec = async (command: string) => {
+    (state.commands ??= []).push(command);
     if (command.startsWith("test -f ")) {
       return { exitCode: state.files.has(command.slice("test -f ".length)) ? 0 : 1, stdout: "", stderr: "", success: true };
     }
@@ -123,6 +125,10 @@ function realWorkspaceSandbox(state: FakeCellState, root: string) {
       if (path.startsWith("/workspace/.aster/control/")) return fake.writeFile(path, content);
       mkdirSync(dirname(mapPath(path)), { recursive: true });
       writeFileSync(mapPath(path), content);
+    },
+    readFile: async (path: string) => {
+      if (!path.startsWith("/workspace/")) return fake.readFile(path);
+      return readFileSync(mapPath(path), "utf8");
     },
   };
 }
@@ -366,6 +372,45 @@ describe("Aster Hotcell runtime", () => {
     await waitFor(() => turn.finished.length > 0);
     assert.equal(state.processes.filter((proc) => proc.status === "running").length, 1);
     assert.deepEqual(turn.finished, ["completed"]);
+  });
+
+  it("clones code projects through the GitHub gateway and leaves chat cells unseeded", async () => {
+    const cells = new Map<string, FakeCellState>();
+    let archived = 0;
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => { archived++; return "QUJD"; } });
+    const base = { sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo", model: "test/model", allowCreate: true, onCellCreated: () => {} };
+
+    await runtime.provisionConversation({ ...base, conversationId: crypto.randomUUID(), project: { kind: "code", repository: "me/app", baseBranch: "main", branch: "aster/abcd1234" } });
+    const codeCell = [...cells.values()].at(-1)!;
+    const clone = codeCell.commands!.find((command) => command.includes("github-git/me/app.git"))!;
+    assert.match(clone, /\$\{GITHUB_BASE_URL%\/github\}\/github-git\/me\/app\.git/);
+    assert.match(clone, /git checkout -q -b 'aster\/abcd1234' FETCH_HEAD/);
+    assert.doesNotMatch(clone, /github_pat_|ghp_/);
+    assert.ok(codeCell.commands!.some((command) => command.includes("artifacts/")), "code cells exclude artifacts/ from git");
+    assert.match(codeCell.files.get("/workspace/.aster/pending-notes") ?? "", /me\/app is cloned at \/workspace on branch aster\/abcd1234/);
+
+    await runtime.provisionConversation({ ...base, conversationId: crypto.randomUUID(), project: { kind: "chat" } });
+    const chatCell = [...cells.values()].at(-1)!;
+    assert.ok(!chatCell.commands!.some((command) => command.includes("github-git")));
+    assert.match(chatCell.files.get("/workspace/.aster/pending-notes") ?? "", /\/workspace\/artifacts\//);
+    assert.equal(archived, 0, "chat and code cells don't receive the configured workspace");
+
+    await assert.rejects(
+      () => runtime.provisionConversation({ ...base, conversationId: crypto.randomUUID(), project: { kind: "code", repository: "me/app; rm -rf /", baseBranch: "main", branch: "aster/x" } }),
+      /invalid_project/,
+    );
+  });
+
+  it("only reads artifacts by safe relative paths", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD" });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {}, project: { kind: "chat" },
+    });
+    for (const path of ["../etc/passwd", "/etc/passwd", ".git/config", "a/../../b", "", "x\ny"]) {
+      await assert.rejects(() => runtime.readArtifact(cellId, path), /invalid_artifact_path/, path);
+    }
   });
 
   it("switches the cell session's model through the bridge", async () => {

@@ -11,9 +11,11 @@ import { RunStore } from "../runs/store.js";
 import { RunWorktreeManager } from "../runs/worktrees.js";
 import { loadSession, saveSession, sessionsDir, type SessionFile } from "../sessions.js";
 import { getAppVersion } from "../util/version.js";
-import { AsterStore, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
+import { AsterStore, type AsterConversationProject, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
 import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig, type AsterServerConfig } from "./aster-workspaces.js";
 import { loadOpenRouterCatalog } from "../models/openrouter-catalog.js";
+import type { AsterArtifact, AsterCellProject } from "./aster-cell-runtime.js";
+import { AsterGitHub, AsterGitHubError, REPOSITORY_FULL_NAME_RE } from "./aster-github.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -44,7 +46,7 @@ export interface AsterTurnStart {
 }
 
 export interface AsterApiRuntime {
-  provisionConversation?: (input: { conversationId: string; sessionId: string; cellName: string; workspaceId: string; workspaceRoot: string; model: string; allowCreate: boolean; onCellCreated: (cellId: string) => void }) => Promise<{ cellId: string }>;
+  provisionConversation?: (input: { conversationId: string; sessionId: string; cellName: string; workspaceId: string; workspaceRoot: string; model: string; allowCreate: boolean; onCellCreated: (cellId: string) => void; project?: AsterCellProject }) => Promise<{ cellId: string }>;
   findConversationCell?: (conversationId: string) => Promise<{ cellId: string } | undefined>;
   destroyCell?: (cellId: string) => Promise<void>;
   pauseCell?: (cellId: string) => Promise<void>;
@@ -54,6 +56,8 @@ export interface AsterApiRuntime {
   setModel?: (cellId: string, model: string) => Promise<void>;
   listCheckpoints?: (cellId: string) => Promise<AsterCheckpointInfo[]>;
   restoreCheckpoint?: (cellId: string, conversationId: string, checkpointId: string) => Promise<AsterCheckpointInfo>;
+  listArtifacts?: (cellId: string) => Promise<AsterArtifact[]>;
+  readArtifact?: (cellId: string, path: string) => Promise<{ data: Buffer; mimeType: string; name: string }>;
 }
 
 export interface AsterCheckpointInfo {
@@ -91,9 +95,12 @@ export class AsterApi {
   private readonly runtime: AsterApiRuntime;
   private readonly config: KimiConfig;
 
-  constructor(config: KimiConfig, runtime: AsterApiRuntime) {
+  private readonly github: AsterGitHub;
+
+  constructor(config: KimiConfig, runtime: AsterApiRuntime, github: AsterGitHub = new AsterGitHub()) {
     this.config = config;
     this.runtime = runtime;
+    this.github = github;
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -117,7 +124,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
         });
       }
 
@@ -140,8 +147,17 @@ export class AsterApi {
       if (path === `${API_PREFIX}/conversations` && method === "POST") {
         if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
         const body = await readJsonBody(req);
-        if (Object.keys(body).some((key) => key !== "workspaceId" && key !== "model")) {
-          return sendError(res, 400, "unsupported_field", "Conversation creation accepts only workspaceId and model; paths are server-configured");
+        if (Object.keys(body).some((key) => !["workspaceId", "model", "kind", "repository"].includes(key))) {
+          return sendError(res, 400, "unsupported_field", "Conversation creation accepts workspaceId, model, kind, and repository; paths are server-configured");
+        }
+        if (body.kind !== undefined && body.kind !== "chat" && body.kind !== "code") {
+          return sendError(res, 400, "invalid_kind", "kind must be \"chat\" or \"code\"");
+        }
+        if (body.kind === "code" && (typeof body.repository !== "string" || !REPOSITORY_FULL_NAME_RE.test(body.repository))) {
+          return sendError(res, 400, "repository_required", "Code conversations need a repository as owner/name");
+        }
+        if (body.kind !== "code" && body.repository !== undefined) {
+          return sendError(res, 400, "unsupported_field", "repository is only accepted for code conversations");
         }
         if (typeof body.workspaceId !== "string" || !principal.workspaceIds.includes(body.workspaceId)) {
           return sendError(res, 403, "workspace_forbidden", "Workspace ID is not in this credential's scope");
@@ -155,7 +171,28 @@ export class AsterApi {
         if (typeof idempotencyKey !== "string" || !CREATE_IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
           return sendError(res, 400, "idempotency_key_required", "Conversation creation requires an Idempotency-Key header of 1-128 safe characters");
         }
-        return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey);
+        const kind = body.kind as "chat" | "code" | undefined;
+        return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey, kind, body.repository as string | undefined);
+      }
+
+      if (path === `${API_PREFIX}/github/repositories` && (method === "GET" || method === "POST")) {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        try {
+          if (method === "GET") {
+            return json(res, 200, { repositories: await this.github.listRepositories(url.searchParams.get("q") ?? "") });
+          }
+          const body = await readJsonBody(req);
+          if (typeof body.name !== "string") return sendError(res, 400, "invalid_repository_name", "name is required");
+          const repository = await this.github.createRepository({
+            name: body.name.trim(),
+            private: body.private !== false,
+            ...(typeof body.description === "string" ? { description: body.description } : {}),
+          });
+          return json(res, 201, { repository });
+        } catch (error) {
+          if (error instanceof AsterGitHubError) return sendError(res, error.status, error.code, error.message);
+          throw error;
+        }
       }
 
       const eventsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/events$/);
@@ -214,6 +251,34 @@ export class AsterApi {
           : this.resumeConversation(res, store, conversation);
       }
 
+      const artifactsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/artifacts(\/file)?$/);
+      if (artifactsMatch && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const conversation = await this.authorizedConversation(store, principal, artifactsMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.listArtifacts || !this.runtime.readArtifact) return sendError(res, 503, "artifacts_unavailable", "Artifacts are not configured");
+        if (!artifactsMatch[2]) return json(res, 200, { artifacts: await this.runtime.listArtifacts(cell) });
+        try {
+          const artifact = await this.runtime.readArtifact(cell, url.searchParams.get("path") ?? "");
+          res.writeHead(200, {
+            "content-type": artifact.mimeType,
+            "content-length": artifact.data.length,
+            "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          });
+          res.end(artifact.data);
+          return;
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "";
+          if (code === "invalid_artifact_path") return sendError(res, 400, code, "Artifact path is invalid");
+          if (code === "artifact_too_large") return sendError(res, 413, code, "Artifact is larger than 50 MB");
+          return sendError(res, 404, "artifact_not_found", "Artifact not found");
+        }
+      }
+
       const checkpointsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/checkpoints$/);
       if (checkpointsMatch && method === "GET") {
         if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
@@ -255,7 +320,7 @@ export class AsterApi {
         if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
         const conversation = await this.authorizedConversation(store, principal, conversationMatch[1]!);
         if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
-        return json(res, 200, publicConversation(conversation));
+        return json(res, 200, publicConversation(conversation, store.getConversationProject(conversation.id)));
       }
 
       const approvalMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
@@ -368,6 +433,8 @@ export class AsterApi {
     workspace: { id: string; displayName: string; rootPath: string },
     model: string,
     idempotencyKey: string,
+    kind?: "chat" | "code",
+    repository?: string,
   ): Promise<void> {
     const candidateId = randomUUID();
     const candidateSessionId = randomUUID();
@@ -386,11 +453,43 @@ export class AsterApi {
     if (mapping.status === "destroyed") return sendError(res, 410, "conversation_destroyed", "Conversation was already destroyed");
     if (mapping.status === "ready") {
       const existing = store.getConversation(mapping.conversationId);
-      if (existing) return json(res, 200, publicConversation(existing));
+      if (existing) return json(res, 200, publicConversation(existing, store.getConversationProject(existing.id)));
     }
     if (!this.runtime.provisionConversation) {
       store.setCellStatus(mapping.conversationId, "failed");
       return sendError(res, 503, "hotcell_unavailable", "Hotcell conversation runtime is not configured");
+    }
+
+    // The project is fixed on first attempt; retries with the same Idempotency-Key reuse it.
+    let project: AsterCellProject | undefined;
+    if (kind) {
+      let stored = store.getConversationProject(mapping.conversationId);
+      if (!stored) {
+        if (kind === "code") {
+          let repo;
+          try {
+            repo = await this.github.getRepository(repository!);
+          } catch (error) {
+            if (error instanceof AsterGitHubError) return sendError(res, error.status, error.code, error.message);
+            throw error;
+          }
+          store.setConversationProject(mapping.conversationId, {
+            kind,
+            repository: repo.fullName,
+            branch: `aster/${mapping.conversationId.slice(0, 8)}`,
+          });
+          stored = { kind, repository: repo.fullName, branch: `aster/${mapping.conversationId.slice(0, 8)}` };
+          project = { kind, repository: repo.fullName, baseBranch: repo.defaultBranch, branch: stored.branch! };
+        } else {
+          store.setConversationProject(mapping.conversationId, { kind, repository: null, branch: null });
+          stored = { kind, repository: null, branch: null };
+        }
+      }
+      if (!project) {
+        project = stored.kind === "code"
+          ? { kind: "code", repository: stored.repository!, baseBranch: (await this.github.getRepository(stored.repository!).catch(() => undefined))?.defaultBranch ?? "main", branch: stored.branch! }
+          : { kind: "chat" };
+      }
     }
 
     try {
@@ -405,6 +504,7 @@ export class AsterApi {
         model,
         allowCreate,
         onCellCreated: (cellId) => store.setCellId(mapping.conversationId, cellId),
+        ...(project ? { project } : {}),
       });
       store.setCellId(mapping.conversationId, provisioned.cellId);
       const conversation = store.getConversation(mapping.conversationId) ?? store.createConversation({
@@ -428,7 +528,7 @@ export class AsterApi {
       await saveSession(sessionFile);
       store.setCellStatus(mapping.conversationId, "ready");
       store.appendEvent(mapping.conversationId, null, "conversation.created", { conversationId: mapping.conversationId, workspaceId: workspace.id, model });
-      json(res, reservation.kind === "created" ? 201 : 200, publicConversation(conversation));
+      json(res, reservation.kind === "created" ? 201 : 200, publicConversation(conversation, store.getConversationProject(conversation.id)));
     } catch {
       const current = store.getCellMapping(mapping.conversationId);
       if (current?.cellId && this.runtime.destroyCell) {
@@ -926,8 +1026,9 @@ function parseCursor(header: string | string[] | undefined, query: string | null
   return Number.isSafeInteger(cursor) ? cursor : undefined;
 }
 
-function publicConversation(conversation: AsterConversation): Record<string, unknown> {
+function publicConversation(conversation: AsterConversation, project?: AsterConversationProject): Record<string, unknown> {
   return {
+    ...(project ? { kind: project.kind, repository: project.repository, branch: project.branch } : {}),
     conversationId: conversation.id,
     workspaceId: conversation.workspaceId,
     model: conversation.model,

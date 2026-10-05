@@ -13,6 +13,12 @@ const CELL_WORKSPACE = "/workspace";
 const CELL_STATE_DIR = "/workspace/.aster";
 const CHECKPOINT_MESSAGE_FILE = `${CELL_STATE_DIR}/checkpoint-message`;
 const INSTALLED_RUNTIME_PACKAGE = "/opt/autopilot/node_modules/autopilot-ai/package.json";
+const NOTES_FILE = `${CELL_STATE_DIR}/pending-notes`;
+const ARTIFACTS_DIR = `${CELL_WORKSPACE}/artifacts`;
+const MAX_ARTIFACTS = 500;
+const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
+const BRANCH_RE = /^[A-Za-z0-9._/-]{1,200}$/;
+const REPOSITORY_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
 // Fixed identity and no signing so commits never depend on cell-local git config.
 const GIT = `git -C ${CELL_WORKSPACE} -c user.name=Autopilot -c user.email=autopilot@aster.invalid -c commit.gpgsign=false`;
 const COMMIT_SHA_RE = /^[0-9a-f]{7,40}$/;
@@ -42,6 +48,25 @@ export interface AsterHotcellRuntimeOptions {
   healthTimeoutMs?: number;
 }
 
+export interface AsterCellProject {
+  kind: "chat" | "code";
+  /** owner/name, for code cells. */
+  repository?: string;
+  /** Branch to start from (the repository's default branch). */
+  baseBranch?: string;
+  /** Working branch created for this conversation. */
+  branch?: string;
+}
+
+export interface AsterArtifact {
+  /** Path relative to /workspace/artifacts. */
+  path: string;
+  name: string;
+  size: number;
+  modifiedAt: string;
+  mimeType: string;
+}
+
 export interface AsterCheckpoint {
   id: string;
   message: string;
@@ -61,8 +86,6 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
   private readonly pollIntervalMs: number;
   private readonly healthTimeoutMs: number;
   private readonly activeRuns = new Map<string, { cellId: string; stop: () => void }>();
-  /** One-shot notes for the agent's next prompt, e.g. after the user restored a checkpoint. */
-  private readonly pendingNotes = new Map<string, string>();
 
   constructor(
     private readonly provider: HotcellProvider,
@@ -83,6 +106,8 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     model: string;
     allowCreate: boolean;
     onCellCreated: (cellId: string) => void;
+    /** Absent: seed the configured workspace (original behavior). */
+    project?: AsterCellProject;
   }): Promise<{ cellId: string }> {
     let cell = await this.provider.findConversationCell(input.conversationId);
     if (!cell) {
@@ -91,12 +116,18 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
         conversationId: input.conversationId,
         workspaceId: input.workspaceId,
         model: input.model,
+        ...(input.project ? { kind: input.project.kind } : {}),
       });
     }
     input.onCellCreated(cell.getInfo().id);
 
-    await this.seedWorkspace(cell, input.workspaceRoot);
-    await this.ensureRepository(cell);
+    if (input.project?.kind === "code") {
+      await this.cloneRepository(cell, input.project);
+    } else if (input.project?.kind !== "chat") {
+      await this.seedWorkspace(cell, input.workspaceRoot);
+    }
+    await this.ensureRepository(cell, input.project?.kind === "code");
+    if (input.project) await this.addNote(cell, projectNote(input.project));
     await this.installRuntime(cell);
     await this.ensureBridge(cell);
     await this.control(cell, "POST", "/rpc", {
@@ -162,8 +193,9 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
       `${GIT} commit -q --allow-empty -F ${CHECKPOINT_MESSAGE_FILE}`,
     );
     if (restore.exitCode !== 0) throw new Error("checkpoint_restore_failed");
-    this.pendingNotes.set(
-      conversationId,
+    void conversationId;
+    await this.addNote(
+      cell,
       `[The user restored the workspace to checkpoint ${short}. Files changed after that point were reverted; re-read files before relying on earlier observations.]`,
     );
     const [head] = await this.listCheckpoints(cellId);
@@ -200,14 +232,17 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     };
     let outcome: { status: "completed" | "failed" | "cancelled"; reason: string } | undefined;
 
-    const note = this.pendingNotes.get(turn.conversation.id);
-    const message = note ? `${note}\n\n${turn.userText}` : turn.userText;
+    let artifactsBefore: AsterArtifact[] = [];
     try {
       // An idle cell may have been paused (cold-stopped on the container driver):
       // make sure the runtime and bridge are back before prompting.
       await this.ensureReady(cellId);
+      const cell = await this.provider.getCell(cellId);
+      const note = await this.readNotes(cell);
+      const message = note ? `${note}\n\n${turn.userText}` : turn.userText;
+      artifactsBefore = await this.listArtifacts(cellId).catch(() => []);
       await this.controlById(cellId, "POST", "/rpc", { id: runId, type: "prompt", message });
-      this.pendingNotes.delete(turn.conversation.id);
+      if (note) await this.clearNotes(cell);
     } catch {
       finish("failed", "cell_prompt_rejected");
       return;
@@ -286,6 +321,16 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
         if (outcome) break;
       }
     }
+    // Files the turn created or changed under artifacts/ are surfaced to the app.
+    try {
+      const before = new Map(artifactsBefore.map((artifact) => [artifact.path, artifact]));
+      for (const artifact of await this.listArtifacts(cellId)) {
+        const previous = before.get(artifact.path);
+        if (!previous || previous.size !== artifact.size || previous.modifiedAt !== artifact.modifiedAt) {
+          turn.publishEvent("artifact.updated", { ...artifact });
+        }
+      }
+    } catch { /* artifacts are best-effort; the turn's result stands */ }
     // Checkpoint whatever the turn left behind (even partial work from a cancel or
     // failure) before reporting the terminal state, so the client can roll back.
     await this.checkpoint(cellId, turn.userText)
@@ -310,11 +355,13 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
    * bridge's private .aster state. Returns false when the cell image has no git, in
    * which case checkpoints are skipped rather than failing the conversation.
    */
-  private async ensureRepository(cell: Sandbox): Promise<boolean> {
+  private async ensureRepository(cell: Sandbox, excludeArtifacts = false): Promise<boolean> {
     const result = await cell.exec(
       `command -v git >/dev/null || exit 3; ` +
       `if [ ! -d ${CELL_WORKSPACE}/.git ]; then git init -q ${CELL_WORKSPACE} || exit 1; fi; ` +
       `grep -qx '.aster/' ${CELL_WORKSPACE}/.git/info/exclude 2>/dev/null || printf '.aster/\\n' >> ${CELL_WORKSPACE}/.git/info/exclude; ` +
+      // A code cell's artifacts are for the user, not the repository.
+      (excludeArtifacts ? `grep -qx 'artifacts/' ${CELL_WORKSPACE}/.git/info/exclude || printf 'artifacts/\\n' >> ${CELL_WORKSPACE}/.git/info/exclude; ` : "") +
       `${GIT} rev-parse -q --verify HEAD >/dev/null || { ${GIT} add -A && ${GIT} commit -q --allow-empty -m 'Workspace created'; }`,
     );
     return result.exitCode === 0;
@@ -340,6 +387,86 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
    * /opt lives in the cell's root filesystem, which a container-driver pause discards,
    * while an image with the runtime baked in skips the install entirely.
    */
+  /**
+   * Clone a GitHub repository into /workspace on a new working branch, through Hotcell's
+   * credential gateway: the remote points at the gateway and git authenticates with the
+   * cell's own egress token, so the real GitHub token never enters the cell. Idempotent.
+   */
+  private async cloneRepository(cell: Sandbox, project: AsterCellProject): Promise<void> {
+    const seeded = await cell.exec(`test -f ${CELL_STATE_DIR}/.seeded`);
+    if (seeded.exitCode === 0) return;
+    const { repository, baseBranch, branch } = project;
+    if (!repository || !REPOSITORY_RE.test(repository) || !baseBranch || !BRANCH_RE.test(baseBranch) || !branch || !BRANCH_RE.test(branch)) {
+      throw new Error("invalid_project");
+    }
+    await cell.mkdir(CELL_STATE_DIR, { parents: true });
+    const clone = await cell.exec(
+      `set -e; cd ${CELL_WORKSPACE}; ` +
+      `remote="\${GITHUB_BASE_URL%/github}/github-git/${repository}.git"; ` +
+      `git init -q; git remote add origin "$remote" 2>/dev/null || git remote set-url origin "$remote"; ` +
+      `git config credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_API_KEY"; }; f'; ` +
+      `git config user.name "Aster Autopilot"; git config user.email "autopilot@aster.invalid"; ` +
+      `if git ls-remote --exit-code --heads origin '${baseBranch}' >/dev/null 2>&1; then ` +
+      `git fetch -q origin '${baseBranch}'; git checkout -q -b '${branch}' FETCH_HEAD; ` +
+      `else git checkout -q -b '${branch}'; fi; ` +
+      `touch ${CELL_STATE_DIR}/.seeded`,
+    );
+    if (clone.exitCode !== 0) throw new Error("repository_clone_failed");
+  }
+
+  /** Files under /workspace/artifacts, the folder the agent saves user-facing deliverables in. */
+  async listArtifacts(cellId: string): Promise<AsterArtifact[]> {
+    const cell = await this.provider.getCell(cellId);
+    const result = await cell.exec(
+      `[ -d ${ARTIFACTS_DIR} ] || exit 0; cd ${ARTIFACTS_DIR} && ` +
+      `find . -type f ! -path '*/.*' -printf '%P\\t%s\\t%T@\\n' | head -n ${MAX_ARTIFACTS}`,
+    );
+    if (result.exitCode !== 0) return [];
+    return result.stdout.split("\n").filter(Boolean).flatMap((line) => {
+      const [path = "", size = "", modified = ""] = line.split("\t");
+      if (!isSafeArtifactPath(path)) return [];
+      return [{
+        path,
+        name: path.split("/").pop() ?? path,
+        size: Number(size) || 0,
+        modifiedAt: new Date(Math.round(Number(modified) * 1000) || Date.now()).toISOString(),
+        mimeType: artifactMimeType(path),
+      }];
+    }).sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  }
+
+  /** The bytes of one artifact, at most 50 MB. */
+  async readArtifact(cellId: string, path: string): Promise<{ data: Buffer; mimeType: string; name: string }> {
+    if (!isSafeArtifactPath(path)) throw new Error("invalid_artifact_path");
+    const cell = await this.provider.getCell(cellId);
+    const file = shellQuote(`${ARTIFACTS_DIR}/${path}`);
+    const stat = await cell.exec(`[ -f ${file} ] && [ ! -L ${file} ] && stat -c %s -- ${file}`);
+    if (stat.exitCode !== 0) throw new Error("artifact_not_found");
+    if (Number(stat.stdout.trim()) > MAX_ARTIFACT_BYTES) throw new Error("artifact_too_large");
+    const encoded = await cell.exec(`base64 -w0 -- ${file}`);
+    if (encoded.exitCode !== 0) throw new Error("artifact_not_found");
+    return { data: Buffer.from(encoded.stdout.trim(), "base64"), mimeType: artifactMimeType(path), name: path.split("/").pop() ?? path };
+  }
+
+  /** Notes are prepended to the agent's next prompt once; kept in the cell so they survive restarts. */
+  private async addNote(cell: Sandbox, text: string): Promise<void> {
+    const existing = await this.readNotes(cell);
+    await cell.mkdir(CELL_STATE_DIR, { parents: true });
+    await cell.writeFile(NOTES_FILE, existing ? `${existing}\n\n${text}` : text, { mode: "0600" });
+  }
+
+  private async readNotes(cell: Sandbox): Promise<string> {
+    try {
+      return (await cell.readFile(NOTES_FILE)).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  private async clearNotes(cell: Sandbox): Promise<void> {
+    await cell.exec(`rm -f ${NOTES_FILE}`);
+  }
+
   private async installRuntime(cell: Sandbox): Promise<void> {
     const expectedVersion = /@(\d[^@/]*)$/.exec(this.packageSpec)?.[1];
     try {
@@ -393,6 +520,51 @@ async function defaultArchiveWorkspace(workspaceRoot: string): Promise<string> {
     maxBuffer: 512 * 1024 * 1024,
   });
   return Buffer.from(stdout).toString("base64");
+}
+
+function projectNote(project: AsterCellProject): string {
+  const artifacts =
+    "Save anything meant for the user to look at (documents, slides, PDFs, spreadsheets, web pages, images, reports) " +
+    "in /workspace/artifacts/. Files there appear in the user's Aster app, where they can preview, download, and share them. " +
+    "Prefer self-contained formats: PDF, PPTX/DOCX/XLSX, HTML with inline CSS/JS, PNG/SVG.";
+  if (project.kind === "chat") {
+    return `[Aster chat. /workspace is this conversation's private Linux sandbox with internet access. ${artifacts}]`;
+  }
+  const { repository, branch, baseBranch } = project;
+  return (
+    `[Aster code chat. GitHub repository ${repository} is cloned at /workspace on branch ${branch} (from ${baseBranch}). ` +
+    "Commit your work and push with `git push -u origin HEAD`; credentials are preconfigured, so never print or write tokens. " +
+    `To open a pull request: curl -s -X POST "$GITHUB_BASE_URL/repos/${repository}/pulls" -H "Authorization: Bearer $GITHUB_API_KEY" ` +
+    `-H "Accept: application/vnd.github+json" -d '{"title":"…","head":"${branch}","base":"${baseBranch}","body":"…"}'. ` +
+    `${artifacts} The artifacts folder is not committed to the repository.]`
+  );
+}
+
+/** Relative path inside artifacts/, without traversal, hidden segments, or control characters. */
+function isSafeArtifactPath(path: string): boolean {
+  if (!path || path.length > 500 || path.startsWith("/") || /[\x00-\x1f\x7f]/.test(path)) return false;
+  return path.split("/").every((part) => part !== "" && part !== "." && part !== ".." && !part.startsWith("."));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+const ARTIFACT_MIME_TYPES: Record<string, string> = {
+  pdf: "application/pdf",
+  html: "text/html", htm: "text/html",
+  md: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json",
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  key: "application/vnd.apple.keynote", pages: "application/vnd.apple.pages", numbers: "application/vnd.apple.numbers",
+  zip: "application/zip", mp4: "video/mp4", mov: "video/quicktime", mp3: "audio/mpeg",
+};
+
+function artifactMimeType(path: string): string {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return ARTIFACT_MIME_TYPES[extension] ?? "application/octet-stream";
 }
 
 function checkpointMessage(userText: string): string {

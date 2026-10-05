@@ -17,6 +17,8 @@ export interface HotcellProviderConfig {
   sleepAfterMs?: number;
   /** Cell image, e.g. one with the Autopilot runtime preinstalled; omit for the daemon default. */
   image?: string;
+  /** Memory for plain chat cells (no repository); defaults to memoryMb. */
+  chatMemoryMb?: number;
   memoryMb: number;
   cpus: number;
   pidsLimit: number;
@@ -69,6 +71,7 @@ export class HotcellProvider {
       anyModel: env.AUTOPILOT_HOTCELL_ANY_MODEL === "true",
       sleepAfterMs: integerEnv(env.AUTOPILOT_HOTCELL_SLEEP_AFTER_MS, 0, 0, 7 * 24 * 60 * 60 * 1000),
       ...(env.AUTOPILOT_HOTCELL_IMAGE ? { image: env.AUTOPILOT_HOTCELL_IMAGE } : {}),
+      ...(env.AUTOPILOT_HOTCELL_CHAT_MEMORY_MB ? { chatMemoryMb: integerEnv(env.AUTOPILOT_HOTCELL_CHAT_MEMORY_MB, 1024, 512, 65_536) } : {}),
       memoryMb: integerEnv(env.AUTOPILOT_HOTCELL_MEMORY_MB, 4096, 512, 65_536),
       cpus: numberEnv(env.AUTOPILOT_HOTCELL_CPUS, 2, 0.5, 64),
       pidsLimit: integerEnv(env.AUTOPILOT_HOTCELL_PIDS, 256, 32, 8192),
@@ -86,7 +89,13 @@ export class HotcellProvider {
     return matches[0] ? this.client.getSandbox(matches[0].id) : undefined;
   }
 
-  async createConversationCell(input: { conversationId: string; workspaceId: string; model: string }): Promise<Sandbox> {
+  async createConversationCell(input: {
+    conversationId: string;
+    workspaceId: string;
+    model: string;
+    /** "code" cells also get GitHub (API and git) through the credential gateway. */
+    kind?: "chat" | "code";
+  }): Promise<Sandbox> {
     if (!isUuid(input.conversationId) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(input.workspaceId) || !input.model.trim()) {
       throw new HotcellProviderError("Invalid Hotcell conversation provisioning input", "invalid_provisioning_input");
     }
@@ -102,6 +111,9 @@ export class HotcellProvider {
     if (!info.egressProviders.includes("openrouter")) {
       throw new HotcellProviderError("Hotcell OpenRouter credential gateway is unavailable", "hotcell_egress_unavailable");
     }
+    if (input.kind === "code" && !info.egressProviders.includes("github")) {
+      throw new HotcellProviderError("Hotcell GitHub credential gateway is unavailable", "hotcell_github_unavailable");
+    }
 
     const options: CreateOptions = {
       driver: this.config.driver,
@@ -109,12 +121,12 @@ export class HotcellProvider {
       networked: this.config.networked === true,
       persist: true,
       sleepAfter: this.config.sleepAfterMs ?? 0,
-      memoryMb: this.config.memoryMb,
+      memoryMb: input.kind === "chat" ? (this.config.chatMemoryMb ?? this.config.memoryMb) : this.config.memoryMb,
       cpus: this.config.cpus,
       pidsLimit: this.config.pidsLimit,
       egressSpendCapUsd: this.config.spendCapUsd,
       egress: {
-        providers: ["openrouter"],
+        providers: input.kind === "code" ? ["openrouter", "github", "github-git"] : ["openrouter"],
         ...(this.config.anyModel ? {} : { models: [input.model] }),
         spendCapUsd: this.config.spendCapUsd,
         ttlMs: this.config.tokenTtlMs,

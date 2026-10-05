@@ -32,6 +32,13 @@ export interface AsterConversation {
   updatedAt: number;
 }
 
+/** What a conversation's cell holds: a plain chat workspace, or a cloned GitHub repository. */
+export interface AsterConversationProject {
+  kind: "chat" | "code";
+  repository: string | null;
+  branch: string | null;
+}
+
 export interface AsterCellMapping {
   conversationId: string;
   credentialId: string;
@@ -247,6 +254,13 @@ export class AsterStore {
         UNIQUE(credential_id, create_key_hash)
       );
       CREATE INDEX IF NOT EXISTS idx_aster_cells_lifecycle ON aster_cell_mappings(status, updated_at);
+      CREATE TABLE IF NOT EXISTS aster_conversation_projects (
+        conversation_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        repository TEXT,
+        branch TEXT,
+        created_at INTEGER NOT NULL
+      );
     `);
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
@@ -475,6 +489,19 @@ export class AsterStore {
       return true;
     });
     return update.immediate();
+  }
+
+  /** Records a conversation's project once; the first value wins so retries can't change it. */
+  setConversationProject(conversationId: string, project: AsterConversationProject): void {
+    this.db.prepare(`INSERT OR IGNORE INTO aster_conversation_projects (conversation_id, kind, repository, branch, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(conversationId, project.kind, project.repository, project.branch, Date.now());
+  }
+
+  getConversationProject(conversationId: string): AsterConversationProject | undefined {
+    const row = this.db.prepare("SELECT kind, repository, branch FROM aster_conversation_projects WHERE conversation_id = ?")
+      .get(conversationId) as { kind: string; repository: string | null; branch: string | null } | undefined;
+    if (!row) return undefined;
+    return { kind: row.kind === "code" ? "code" : "chat", repository: row.repository, branch: row.branch };
   }
 
   /** Switch an idle conversation's model; refused while a turn is active. */
