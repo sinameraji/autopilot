@@ -272,7 +272,10 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
           case "session.end":
             outcome = {
               status: event.reason === "aborted" ? "cancelled" : event.reason === "complete" ? "completed" : "failed",
-              reason: String(event.reason ?? "cell_session_ended"),
+              // Surface the agent's actual error (redacted, bounded) instead of a bare "error".
+              reason: event.reason === "error" && typeof event.error === "string" && event.error.trim()
+                ? boundedToolText(event.error.trim(), 500)
+                : String(event.reason ?? "cell_session_ended"),
             };
             stopped = true;
             break;

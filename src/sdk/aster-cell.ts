@@ -37,8 +37,17 @@ interface BridgeState {
   cursor: number;
 }
 
+/** Hotcell's gateway base URL is the provider root; Autopilot's OpenRouter client expects `/v1`. */
+export function normalizeGatewayBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim().replace(/\/+$/, "");
+  if (!trimmed) return value;
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
 export async function startAsterCellBridge(port = 31417): Promise<ReturnType<typeof createServer>> {
   process.env.HOME = HOME;
+  const gatewayBaseUrl = normalizeGatewayBaseUrl(process.env.OPENROUTER_BASE_URL);
+  if (gatewayBaseUrl) process.env.OPENROUTER_BASE_URL = gatewayBaseUrl;
   await mkdir(HOME, { recursive: true, mode: 0o700 });
   await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
   const state = await readState();
