@@ -1,5 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { AsterHotcellRuntime } from "./aster-cell-runtime.js";
 import type { HotcellProvider } from "./hotcell-provider.js";
 import type { AsterTurnStart } from "./aster-api.js";
@@ -17,6 +21,7 @@ interface FakeCellState {
   destroyed: boolean;
   paused: number;
   started: number;
+  modelSwitches?: string[];
 }
 
 function fakeSandbox(state: FakeCellState) {
@@ -47,6 +52,10 @@ function fakeSandbox(state: FakeCellState) {
             state.events.push({ cursor: state.events.length + 1, runId: String(body.id), event: { type: "message.delta", text: "cell reply" } });
             state.events.push({ cursor: state.events.length + 1, runId: String(body.id), event: { type: "session.end", reason: "complete" } });
           });
+          return respond({ type: "ok", id: body.id });
+        }
+        if (body.type === "set_model") {
+          (state.modelSwitches ??= []).push(String(body.modelId));
           return respond({ type: "ok", id: body.id });
         }
         if (body.type === "abort") {
@@ -90,6 +99,47 @@ function fakeSandbox(state: FakeCellState) {
   };
 }
 
+/**
+ * A fake cell whose /workspace is a real temp directory: control traffic stays faked,
+ * every other command runs in a real shell so git checkpoint behavior is exercised.
+ */
+function realWorkspaceSandbox(state: FakeCellState, root: string) {
+  const fake = fakeSandbox(state);
+  const mapPath = (value: string) => value.replaceAll("/workspace", root);
+  return {
+    ...fake,
+    exec: async (command: string) => {
+      // Control traffic and runtime installs stay faked; only workspace commands run for real.
+      if (command.startsWith(CONTROL_PREFIX) || command.startsWith("mkdir -p /opt/autopilot")) return fake.exec(command);
+      try {
+        const stdout = execSync(mapPath(command), { shell: "/bin/bash", encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+        return { exitCode: 0, stdout, stderr: "", success: true };
+      } catch (error) {
+        const failure = error as { status?: number; stdout?: string; stderr?: string };
+        return { exitCode: failure.status ?? 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", success: false };
+      }
+    },
+    writeFile: async (path: string, content: string) => {
+      if (path.startsWith("/workspace/.aster/control/")) return fake.writeFile(path, content);
+      mkdirSync(dirname(mapPath(path)), { recursive: true });
+      writeFileSync(mapPath(path), content);
+    },
+  };
+}
+
+function realWorkspaceProvider(state: FakeCellState, root: string): HotcellProvider {
+  return {
+    getCell: async () => realWorkspaceSandbox(state, root) as never,
+  } as unknown as HotcellProvider;
+}
+
+function emptyCellState(id = "real-cell"): FakeCellState {
+  return {
+    id, files: new Map(), processes: [{ command: "startAsterCellBridge", status: "running" }], sessions: [], prompts: [],
+    aborts: 0, events: [], destroyed: false, paused: 0, started: 0,
+  };
+}
+
 function fakeProvider(cells: Map<string, FakeCellState>): HotcellProvider {
   let next = 0;
   return {
@@ -124,8 +174,8 @@ function fakeProvider(cells: Map<string, FakeCellState>): HotcellProvider {
   } as unknown as HotcellProvider;
 }
 
-function fakeTurn(overrides: Partial<AsterTurnStart>): AsterTurnStart & { events: Array<{ type: string }>; finished: string[]; cursors: number[] } {
-  const events: Array<{ type: string }> = [];
+function fakeTurn(overrides: Partial<AsterTurnStart>): AsterTurnStart & { events: Array<{ type: string; data?: Record<string, unknown> }>; finished: string[]; cursors: number[] } {
+  const events: Array<{ type: string; data?: Record<string, unknown> }> = [];
   const finished: string[] = [];
   const cursors: number[] = [];
   return {
@@ -141,7 +191,7 @@ function fakeTurn(overrides: Partial<AsterTurnStart>): AsterTurnStart & { events
     maxToolIterations: null,
     maxRuntimeMs: null,
     askPermission: async () => "deny",
-    publishEvent: (type) => { events.push({ type }); },
+    publishEvent: (type, data) => { events.push({ type, data }); },
     onCellCursor: (cursor) => { cursors.push(cursor); },
     finish: (status) => { finished.push(status); },
     events,
@@ -220,4 +270,120 @@ describe("Aster Hotcell runtime", () => {
     await runtime.destroyCell(cellId);
     assert.equal(state.destroyed, true);
   });
+
+  it("streams tool commands and output, then checkpoints the turn's changes in git", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aster-cell-"));
+    try {
+      writeFileSync(join(root, "README.md"), "seed\n");
+      const state = emptyCellState();
+      state.events.push(
+        { cursor: 1, runId: null, event: { type: "tool.start", toolCallId: "t1", toolName: "bash", args: { command: "ls -la" } } },
+        { cursor: 2, runId: null, event: { type: "tool.result", toolCallId: "t1", toolName: "bash", result: "README.md\nsk-or-v1-abcdefghijklmnopqrstuvwxyz", isError: false } },
+      );
+      const runtime = new AsterHotcellRuntime(realWorkspaceProvider(state, root), { pollIntervalMs: 5 });
+      await runtime.listCheckpoints(state.id); // provisioning creates the repo before any turn
+      // Simulate the agent's work landing in the workspace during the turn.
+      writeFileSync(join(root, "hello.txt"), "made by the agent\n");
+      const turn = fakeTurn({ cellId: state.id, userText: "list files\nand say hi" });
+      runtime.startTurn(turn);
+      await waitFor(() => turn.finished.length > 0);
+
+      const started = turn.events.find((event) => event.type === "tool.activity" && event.data?.activity === "started");
+      assert.deepEqual(started?.data, { tool: "bash", toolCallId: "t1", activity: "started", input: "ls -la" });
+      const completed = turn.events.find((event) => event.type === "tool.activity" && event.data?.activity === "completed");
+      assert.equal(completed?.data?.tool, "bash");
+      assert.match(String(completed?.data?.output), /README\.md/);
+      assert.doesNotMatch(String(completed?.data?.output), /sk-or-v1-/);
+
+      const checkpointEvent = turn.events.find((event) => event.type === "checkpoint.created");
+      assert.equal(checkpointEvent?.data?.message, "list files");
+      assert.deepEqual(turn.finished, ["completed"]);
+      // The checkpoint event is published before the terminal state.
+      assert.ok(turn.events.indexOf(checkpointEvent!) >= 0);
+
+      const checkpoints = await runtime.listCheckpoints(state.id);
+      assert.deepEqual(checkpoints.map((checkpoint) => checkpoint.message), ["list files", "Workspace created"]);
+      assert.ok(!execSync("git ls-files", { cwd: root, encoding: "utf8" }).includes(".aster"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips empty checkpoints and restores a checkpoint as a new, undoable commit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "aster-cell-"));
+    try {
+      writeFileSync(join(root, "a.txt"), "one\n");
+      const state = emptyCellState();
+      const runtime = new AsterHotcellRuntime(realWorkspaceProvider(state, root), { pollIntervalMs: 5 });
+      const conversation = { id: "conv-restore", sessionId: "s" } as never;
+
+      const first = fakeTurn({ cellId: state.id, conversation, userText: "noop turn" });
+      runtime.startTurn(first);
+      await waitFor(() => first.finished.length > 0);
+      assert.ok(!first.events.some((event) => event.type === "checkpoint.created"));
+      const [initial] = await runtime.listCheckpoints(state.id);
+
+      writeFileSync(join(root, "a.txt"), "two\n");
+      writeFileSync(join(root, "b.txt"), "new\n");
+      const second = fakeTurn({ cellId: state.id, conversation, runId: crypto.randomUUID(), cellEventCursor: 2, userText: "change files" });
+      runtime.startTurn(second);
+      await waitFor(() => second.finished.length > 0);
+      assert.ok(second.events.some((event) => event.type === "checkpoint.created"));
+
+      const restored = await runtime.restoreCheckpoint(state.id, "conv-restore", initial!.id);
+      assert.equal(restored.message, `Restore checkpoint ${initial!.id.slice(0, 7)}`);
+      assert.equal(readFileSync(join(root, "a.txt"), "utf8"), "one\n");
+      assert.equal(existsSync(join(root, "b.txt")), false);
+      assert.equal((await runtime.listCheckpoints(state.id)).length, 3);
+
+      // The agent is told about the restore on its next prompt, once.
+      const third = fakeTurn({ cellId: state.id, conversation, runId: crypto.randomUUID(), cellEventCursor: 4, userText: "continue" });
+      runtime.startTurn(third);
+      await waitFor(() => third.finished.length > 0);
+      assert.match(state.prompts.at(-1)!.message, /restored the workspace to checkpoint/);
+      assert.match(state.prompts.at(-1)!.message, /continue$/);
+
+      await assert.rejects(() => runtime.restoreCheckpoint(state.id, "conv-restore", "not-a-sha"), /invalid_checkpoint/);
+      await assert.rejects(() => runtime.restoreCheckpoint(state.id, "conv-restore", "deadbeefdeadbeef"), /checkpoint_not_found/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts the bridge before prompting a cell that was paused while idle", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD", pollIntervalMs: 5 });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {},
+    });
+    const state = [...cells.values()][0]!;
+    // A container-driver pause is a cold stop: the bridge process is gone afterwards.
+    for (const proc of state.processes) proc.status = "exited";
+
+    const turn = fakeTurn({ cellId });
+    runtime.startTurn(turn);
+    await waitFor(() => turn.finished.length > 0);
+    assert.equal(state.processes.filter((proc) => proc.status === "running").length, 1);
+    assert.deepEqual(turn.finished, ["completed"]);
+  });
+
+  it("switches the cell session's model through the bridge", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD" });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {},
+    });
+    await runtime.setModel(cellId, "anthropic/claude-opus-5.5");
+    assert.deepEqual([...cells.values()][0]!.modelSwitches, ["anthropic/claude-opus-5.5"]);
+  });
 });
+
+async function waitFor(condition: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}

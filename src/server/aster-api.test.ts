@@ -529,6 +529,72 @@ describe("Aster control-plane API", () => {
   });
 });
 
+describe("Aster model catalog, model switching, and checkpoints", () => {
+  it("offers the tool-capable OpenRouter catalog and switches models between turns", async () => {
+    const harness = await createHarness("complete", { openRouterCatalog: true });
+    try {
+      const models = await request(harness, "GET", "/api/v1/models");
+      assert.equal(models.status, 200);
+      const body = await models.json() as { models: string[]; catalog: Array<{ id: string; contextWindow: number }> };
+      assert.deepEqual(body.models, ["test/model", "vendor/other-model"]);
+      assert.equal(body.catalog[0]!.contextWindow, 200_000);
+
+      const rejected = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "vendor/no-tools" });
+      assert.equal(rejected.status, 400);
+
+      const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
+      assert.equal(created.status, 201);
+      const conversation = await created.json() as { conversationId: string };
+
+      const first = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "hi", model: "test/model" });
+      assert.equal(first.status, 202);
+      await waitForStatus(harness, conversation.conversationId, "completed");
+      assert.deepEqual(harness.modelSwitches, []);
+
+      const badModel = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "hi", model: "vendor/unknown" });
+      assert.equal(badModel.status, 400);
+
+      const switched = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "again", model: "vendor/other-model" });
+      assert.equal(switched.status, 202);
+      await waitForStatus(harness, conversation.conversationId, "completed");
+      assert.deepEqual(harness.modelSwitches, [{ cellId: `cell-${conversation.conversationId}`, model: "vendor/other-model" }]);
+      const fetched = await (await request(harness, "GET", `/api/v1/conversations/${conversation.conversationId}`)).json() as { model: string };
+      assert.equal(fetched.model, "vendor/other-model");
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("lists and restores checkpoints only between turns", async () => {
+    const harness = await createHarness("hang");
+    try {
+      const created = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
+      const conversation = await created.json() as { conversationId: string };
+      const base = `/api/v1/conversations/${conversation.conversationId}/checkpoints`;
+
+      const list = await request(harness, "GET", base);
+      assert.equal(list.status, 200);
+      const listed = await list.json() as { checkpoints: Array<{ id: string; message: string }> };
+      assert.deepEqual(listed.checkpoints.map((checkpoint) => checkpoint.message), ["second", "Workspace created"]);
+
+      const missing = await request(harness, "POST", `${base}/${"d".repeat(40)}/restore`, {});
+      assert.equal(missing.status, 404);
+      const restored = await request(harness, "POST", `${base}/${"a".repeat(40)}/restore`, {});
+      assert.equal(restored.status, 200);
+      assert.deepEqual(harness.restores, [{ cellId: `cell-${conversation.conversationId}`, checkpointId: "a".repeat(40) }]);
+
+      const turn = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "work" });
+      assert.equal(turn.status, 202);
+      const busy = await request(harness, "POST", `${base}/${"a".repeat(40)}/restore`, {});
+      assert.equal(busy.status, 409);
+      const busySwitch = await request(harness, "POST", `/api/v1/conversations/${conversation.conversationId}/turns`, { text: "x", model: "test/model" });
+      assert.equal(busySwitch.status, 409);
+    } finally {
+      await harness.close();
+    }
+  });
+});
+
 interface Harness {
   baseUrl: string;
   token: string;
@@ -540,10 +606,12 @@ interface Harness {
   destroyedCells: string[];
   pausedCells: string[];
   resumedCells: string[];
+  modelSwitches: Array<{ cellId: string; model: string }>;
+  restores: Array<{ cellId: string; checkpointId: string }>;
   close(): Promise<void>;
 }
 
-async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Harness> {
+async function createHarness(mode: "complete" | "hang" | "approval", options: { openRouterCatalog?: boolean } = {}): Promise<Harness> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "autopilot-aster-api-")));
   tempDirs.push(root);
   const workspaceRoot = join(root, "workspace");
@@ -561,7 +629,7 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
   const runsDb = join(root, "state", "runs.db");
   const configPath = join(root, "aster.json");
   await writeFile(configPath, JSON.stringify({
-    models: ["test/model"],
+    models: options.openRouterCatalog ? "openrouter" : ["test/model"],
     approvalTtlMs: 1500,
     workspaces: [{ id: "default", displayName: "Default workspace", rootPath: workspaceRoot }],
   }));
@@ -571,6 +639,21 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
   setEnv("AUTOPILOT_RUNS_DB", runsDb);
   setEnv("AUTOPILOT_ASTER_CONFIG", configPath);
   setEnv("KIMIFLARE_SERVER_PASSWORD", "legacy-only-secret");
+  if (options.openRouterCatalog) {
+    // A fresh on-disk catalog cache, so the test never reaches the network.
+    const configHome = join(root, "config-home");
+    await mkdir(join(configHome, "kimiflare"), { recursive: true });
+    const entry = (id: string, tools: boolean) => ({
+      id, name: id, contextWindow: 200_000, maxOutputTokens: 8_000,
+      pricing: { inputPerMtok: 1, outputPerMtok: 2 }, supports: { tools, reasoning: true, streaming: true },
+    });
+    await writeFile(join(configHome, "kimiflare", "openrouter-models.json"), JSON.stringify({
+      version: 4,
+      fetchedAt: new Date().toISOString(),
+      models: [entry("test/model", true), entry("vendor/other-model", true), entry("vendor/no-tools", false)],
+    }));
+    setEnv("XDG_CONFIG_HOME", configHome);
+  }
 
   const asterStore = new AsterStore(asterDb);
   const credential = asterStore.createCredential({
@@ -587,6 +670,8 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
   const destroyedCells: string[] = [];
   const pausedCells: string[] = [];
   const resumedCells: string[] = [];
+  const modelSwitches: Array<{ cellId: string; model: string }> = [];
+  const restores: Array<{ cellId: string; checkpointId: string }> = [];
   const api = new AsterApi({ openrouterApiKey: "test-key", model: "test/model" } as KimiConfig, {
     provisionConversation: async (input) => {
       input.onCellCreated(`cell-${input.conversationId}`);
@@ -601,6 +686,16 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
       else if (mode === "approval") void approveWriteTurn(turn, permissionDecisions);
     },
     cancelRun: (runId) => { cancelledRuns.push(runId); },
+    setModel: async (cellId, model) => { modelSwitches.push({ cellId, model }); },
+    listCheckpoints: async () => [
+      { id: "b".repeat(40), message: "second", createdAt: "2026-10-05T10:01:00Z" },
+      { id: "a".repeat(40), message: "Workspace created", createdAt: "2026-10-05T10:00:00Z" },
+    ],
+    restoreCheckpoint: async (cellId, _conversationId, checkpointId) => {
+      if (checkpointId !== "a".repeat(40)) throw new Error("checkpoint_not_found");
+      restores.push({ cellId, checkpointId });
+      return { id: "c".repeat(40), message: "Restore checkpoint aaaaaaa", createdAt: "2026-10-05T10:02:00Z" };
+    },
   });
   const server = createServer((req, res) => { void api.handle(req, res); });
   const port = await listen(server);
@@ -620,6 +715,8 @@ async function createHarness(mode: "complete" | "hang" | "approval"): Promise<Ha
     destroyedCells,
     pausedCells,
     resumedCells,
+    modelSwitches,
+    restores,
     close,
   };
 }

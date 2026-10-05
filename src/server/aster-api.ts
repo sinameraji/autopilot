@@ -12,7 +12,8 @@ import { RunWorktreeManager } from "../runs/worktrees.js";
 import { loadSession, saveSession, sessionsDir, type SessionFile } from "../sessions.js";
 import { getAppVersion } from "../util/version.js";
 import { AsterStore, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
-import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig } from "./aster-workspaces.js";
+import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig, type AsterServerConfig } from "./aster-workspaces.js";
+import { loadOpenRouterCatalog } from "../models/openrouter-catalog.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -50,6 +51,26 @@ export interface AsterApiRuntime {
   resumeCell?: (cellId: string) => Promise<void>;
   startTurn: (turn: AsterTurnStart) => void;
   cancelRun: (runId: string) => void;
+  setModel?: (cellId: string, model: string) => Promise<void>;
+  listCheckpoints?: (cellId: string) => Promise<AsterCheckpointInfo[]>;
+  restoreCheckpoint?: (cellId: string, conversationId: string, checkpointId: string) => Promise<AsterCheckpointInfo>;
+}
+
+export interface AsterCheckpointInfo {
+  id: string;
+  message: string;
+  createdAt: string;
+}
+
+interface AsterModelInfo {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  inputPerMtok?: number;
+  outputPerMtok?: number;
+  created?: number;
+  reasoning?: boolean;
+  vision?: boolean;
 }
 
 interface AsterWaiter {
@@ -96,7 +117,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy"],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
         });
       }
 
@@ -111,7 +132,9 @@ export class AsterApi {
 
       if (path === `${API_PREFIX}/models` && method === "GET") {
         if (!this.hasScope(principal, "models:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks model/read scope");
-        return json(res, 200, { models: config.models });
+        const models = await selectableModels(config);
+        if (models.length === 0) return sendError(res, 503, "model_catalog_unavailable", "The model catalog is unavailable; try again shortly");
+        return json(res, 200, { models: models.map((model) => model.id), catalog: models });
       }
 
       if (path === `${API_PREFIX}/conversations` && method === "POST") {
@@ -125,7 +148,7 @@ export class AsterApi {
         }
         const workspace = findAsterWorkspace(config, body.workspaceId);
         if (!workspace) return sendError(res, 404, "workspace_not_found", "Workspace is not configured");
-        if (typeof body.model !== "string" || !config.models.includes(body.model)) {
+        if (typeof body.model !== "string" || !(await isSelectableModel(config, body.model))) {
           return sendError(res, 400, "model_not_allowed", "Select a model from the configured model list");
         }
         const idempotencyKey = req.headers["idempotency-key"];
@@ -151,7 +174,7 @@ export class AsterApi {
         const conversation = await this.authorizedConversation(store, principal, turnMatch[1]!);
         if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
         const body = await readJsonBody(req);
-        if (Object.keys(body).some((key) => key !== "text" && key !== "clientTurnId")) return sendError(res, 400, "unsupported_field", "Turns accept text and an optional clientTurnId; workspace and model are fixed by the conversation");
+        if (Object.keys(body).some((key) => key !== "text" && key !== "clientTurnId" && key !== "model")) return sendError(res, 400, "unsupported_field", "Turns accept text, an optional clientTurnId, and an optional model; the workspace is fixed by the conversation");
         const hasClientTurnId = Object.hasOwn(body, "clientTurnId");
         const clientTurnId = hasClientTurnId && typeof body.clientTurnId === "string" ? body.clientTurnId : undefined;
         if (hasClientTurnId && (!clientTurnId || !CLIENT_TURN_ID_RE.test(clientTurnId))) return sendError(res, 400, "invalid_client_turn_id", "clientTurnId must be 1-128 ASCII letters, digits, '.', '_', ':', or '-' and start with a letter or digit");
@@ -159,7 +182,18 @@ export class AsterApi {
         const text = requestText.trim();
         if (!text || text.length > MAX_USER_TURN_CHARS) return sendError(res, 400, "invalid_turn", `Turn text must be 1-${MAX_USER_TURN_CHARS} characters`);
         if (containsLikelyProviderSecret(text)) return sendError(res, 400, "secret_input_rejected", "Provider credentials must not be sent in conversation text");
-        return await this.appendTurn(res, store, conversation, clientTurnId, requestText, text);
+        let target = conversation;
+        if (Object.hasOwn(body, "model")) {
+          if (typeof body.model !== "string" || !(await isSelectableModel(config, body.model))) {
+            return sendError(res, 400, "model_not_allowed", "Select a model from the model catalog");
+          }
+          if (body.model !== conversation.model) {
+            const switched = await this.switchModel(res, store, conversation, body.model);
+            if (!switched) return;
+            target = switched;
+          }
+        }
+        return await this.appendTurn(res, store, target, clientTurnId, requestText, text);
       }
 
       const cancelMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/cancel$/);
@@ -178,6 +212,36 @@ export class AsterApi {
         return lifecycleMatch[2] === "pause"
           ? this.pauseConversation(res, store, conversation)
           : this.resumeConversation(res, store, conversation);
+      }
+
+      const checkpointsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/checkpoints$/);
+      if (checkpointsMatch && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const conversation = await this.authorizedConversation(store, principal, checkpointsMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.listCheckpoints) return sendError(res, 503, "checkpoints_unavailable", "Checkpoints are not configured");
+        return json(res, 200, { checkpoints: await this.runtime.listCheckpoints(cell) });
+      }
+
+      const restoreMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/checkpoints\/([0-9a-f]{7,40})\/restore$/);
+      if (restoreMatch && method === "POST") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const conversation = await this.authorizedConversation(store, principal, restoreMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        if (conversation.activeRunId) return sendError(res, 409, "turn_active", "Wait for the current turn to finish or cancel it before restoring");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.restoreCheckpoint) return sendError(res, 503, "checkpoints_unavailable", "Checkpoints are not configured");
+        try {
+          const checkpoint = await this.runtime.restoreCheckpoint(cell, conversation.id, restoreMatch[2]!);
+          store.appendEvent(conversation.id, null, "checkpoint.restored", { restoredFrom: restoreMatch[2]!, ...checkpoint });
+          return json(res, 200, { checkpoint });
+        } catch (error) {
+          if (error instanceof Error && error.message === "checkpoint_not_found") return sendError(res, 404, "checkpoint_not_found", "Checkpoint not found");
+          return sendError(res, 500, "checkpoint_restore_failed", "The workspace could not be restored");
+        }
       }
 
       const conversationMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)$/);
@@ -695,6 +759,56 @@ export class AsterApi {
     }
   }
 
+  /** The conversation's cell id when it can take control requests; otherwise sends the error. */
+  private readyCell(res: ServerResponse, store: AsterStore, conversationId: string): string | undefined {
+    const mapping = store.getCellMapping(conversationId);
+    if (mapping?.status === "paused") {
+      sendError(res, 409, "conversation_paused", "Conversation is paused; resume it first");
+      return undefined;
+    }
+    if (!mapping?.cellId || mapping.status !== "ready") {
+      sendError(res, 409, "conversation_cell_unavailable", "Conversation cell is not available");
+      return undefined;
+    }
+    return mapping.cellId;
+  }
+
+  /** Switch the cell session first, then the record, so a failed switch leaves both on the old model. */
+  private async switchModel(
+    res: ServerResponse,
+    store: AsterStore,
+    conversation: AsterConversation,
+    model: string,
+  ): Promise<AsterConversation | undefined> {
+    if (conversation.activeRunId) {
+      sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
+      return undefined;
+    }
+    const cell = this.readyCell(res, store, conversation.id);
+    if (!cell) return undefined;
+    if (!this.runtime.setModel) {
+      sendError(res, 503, "model_switch_unavailable", "Model switching is not configured");
+      return undefined;
+    }
+    try {
+      await this.runtime.setModel(cell, model);
+    } catch {
+      sendError(res, 503, "model_switch_failed", "The conversation's model could not be switched");
+      return undefined;
+    }
+    if (!store.setConversationModel(conversation.id, model)) {
+      sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
+      return undefined;
+    }
+    try {
+      const sessionPath = resolve(sessionsDir(), conversation.sessionId + ".json");
+      const sessionFile = await loadSession(sessionPath);
+      sessionFile.model = model;
+      await saveSession(sessionFile);
+    } catch { /* the host session copy is informational; the cell owns the live session */ }
+    return store.getConversation(conversation.id);
+  }
+
   private async cancelConversation(res: ServerResponse, store: AsterStore, conversation: AsterConversation): Promise<void> {
     const runId = conversation.activeRunId;
     if (!runId) {
@@ -837,6 +951,33 @@ function publicApproval(approval: import("./aster-store.js").AsterApproval): Rec
     expiresAt: new Date(approval.expiresAt).toISOString(),
     decision: approval.decision,
   };
+}
+
+/**
+ * Models a conversation may use. With the OpenRouter catalog, only tool-calling models
+ * are offered: the cell agent needs tools to do anything.
+ */
+async function selectableModels(config: AsterServerConfig): Promise<AsterModelInfo[]> {
+  if (config.modelCatalog === "fixed") return config.models.map((id) => ({ id }));
+  const catalog = await loadOpenRouterCatalog();
+  return catalog
+    .filter((model) => model.supports.tools)
+    .map((model) => ({
+      id: model.id,
+      ...(model.name ? { name: model.name } : {}),
+      contextWindow: model.contextWindow,
+      inputPerMtok: model.pricing.inputPerMtok,
+      outputPerMtok: model.pricing.outputPerMtok,
+      ...(model.created !== undefined ? { created: model.created } : {}),
+      reasoning: model.supports.reasoning,
+      vision: model.supports.vision === true,
+    }));
+}
+
+async function isSelectableModel(config: AsterServerConfig, model: string): Promise<boolean> {
+  if (!model.trim() || model.length > 200) return false;
+  if (config.modelCatalog === "fixed") return config.models.includes(model);
+  return (await selectableModels(config)).some((entry) => entry.id === model);
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {

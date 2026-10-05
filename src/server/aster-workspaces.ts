@@ -8,7 +8,10 @@ export interface AsterWorkspace {
 }
 
 export interface AsterServerConfig {
+  /** Fixed model allowlist; empty when `modelCatalog` is "openrouter". */
   models: string[];
+  /** "openrouter": every model in OpenRouter's live catalog is selectable. */
+  modelCatalog: "fixed" | "openrouter";
   workspaces: AsterWorkspace[];
   approvalTtlMs: number;
 }
@@ -31,10 +34,11 @@ export async function loadAsterServerConfig(
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new AsterConfigError();
   const record = raw as Record<string, unknown>;
-  if (!Array.isArray(record.models) || record.models.length === 0 || record.models.length > 100) {
+  const modelCatalog = record.models === "openrouter" ? "openrouter" : "fixed";
+  if (modelCatalog === "fixed" && (!Array.isArray(record.models) || record.models.length === 0 || record.models.length > 100)) {
     throw new AsterConfigError();
   }
-  const models = [...new Set(record.models)];
+  const models = modelCatalog === "fixed" ? [...new Set(record.models as unknown[])] : [];
   if (models.some((model) => typeof model !== "string" || !model.trim() || model.length > 200)) {
     throw new AsterConfigError();
   }
@@ -74,7 +78,7 @@ export async function loadAsterServerConfig(
     roots.push(rootPath);
     workspaces.push({ id: workspace.id, displayName: workspace.displayName.trim(), rootPath });
   }
-  return { models, workspaces, approvalTtlMs: approvalTtlMs as number };
+  return { models: models as string[], modelCatalog, workspaces, approvalTtlMs: approvalTtlMs as number };
 }
 
 export function findAsterWorkspace(config: AsterServerConfig, workspaceId: string): AsterWorkspace | undefined {

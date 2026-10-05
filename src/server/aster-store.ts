@@ -477,6 +477,19 @@ export class AsterStore {
     return update.immediate();
   }
 
+  /** Switch an idle conversation's model; refused while a turn is active. */
+  setConversationModel(conversationId: string, model: string): boolean {
+    const update = this.db.transaction(() => {
+      const now = Date.now();
+      const result = this.db.prepare("UPDATE aster_conversations SET model = ?, updated_at = ? WHERE id = ? AND active_run_id IS NULL")
+        .run(model, now, conversationId);
+      if (result.changes !== 1) return false;
+      this.insertEvent(conversationId, null, "model.changed", { model }, now);
+      return true;
+    });
+    return update.immediate();
+  }
+
   appendEvent(conversationId: string, runId: string | null, type: string, data: Record<string, unknown>): AsterEvent {
     const append = this.db.transaction(() => this.insertEvent(conversationId, runId, type, data, Date.now()));
     return append.immediate();

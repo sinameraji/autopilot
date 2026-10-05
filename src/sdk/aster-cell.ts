@@ -12,6 +12,11 @@ const TURN_STATE = join(STATE_DIR, "turn-state.json");
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_EVENTS = 250;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * The cell is a disposable, per-conversation sandbox with its own git history, so the
+ * agent runs autonomously: every tool call (bash, write, edit, …) is auto-approved.
+ */
+const CELL_MODE = "auto";
 
 type RpcCommand = { id: string; type: string; [key: string]: unknown };
 type RpcOutput = { id?: string; type: string; [key: string]: unknown };
@@ -138,7 +143,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
       const apiKey = process.env.OPENROUTER_API_KEY;
       if (!model || !apiKey || !process.env.OPENROUTER_BASE_URL) return send(res, 503, { error: "scoped_openrouter_gateway_unavailable" });
       command.cwd = "/workspace";
-      command.config = { model, mode: "edit", openrouterApiKey: apiKey };
+      command.config = { model, mode: CELL_MODE, openrouterApiKey: apiKey };
       state.sessionId = sessionId;
       state.model = model;
       await persistState(state);
@@ -159,10 +164,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
     return send(res, 202, { accepted: true, runId });
   }
 
+  if (command.type === "set_model") {
+    if (state.activeRunId) return send(res, 409, { error: "session_busy" });
+    if (typeof command.modelId !== "string" || !command.modelId.trim() || command.modelId.length > 200) {
+      return send(res, 400, { error: "invalid_model" });
+    }
+  }
+
   try {
     const response = await sendRpc(input, pending, command);
     if (command.type === "new_session") {
       state.initialized = response.type === "ok";
+      await persistState(state);
+    }
+    if (command.type === "set_model" && response.type !== "error") {
+      state.model = command.modelId as string;
       await persistState(state);
     }
     return send(res, response.type === "error" ? 409 : 200, response);
@@ -222,7 +238,7 @@ async function restoreSession(input: PassThrough, pending: Map<string, PendingRp
     type: "new_session",
     cwd: "/workspace",
     sessionId: state.sessionId,
-    config: { model: state.model, mode: "edit", openrouterApiKey: apiKey },
+    config: { model: state.model, mode: CELL_MODE, openrouterApiKey: apiKey },
   }).catch(() => undefined);
   state.initialized = response?.type === "ok";
   await persistState(state);
