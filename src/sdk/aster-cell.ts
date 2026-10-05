@@ -66,12 +66,23 @@ export async function startAsterCellBridge(port = 31417): Promise<ReturnType<typ
           if (!line) continue;
           let message: RpcOutput;
           try { message = JSON.parse(line) as RpcOutput; } catch { continue; }
-          if (message.id && pending.has(message.id)) {
-            const waiter = pending.get(message.id)!;
-            pending.delete(message.id);
-            clearTimeout(waiter.timer);
-            waiter.resolve(message);
+          if (message.id) {
+            const waiter = pending.get(message.id);
+            if (waiter) {
+              pending.delete(message.id);
+              clearTimeout(waiter.timer);
+              waiter.resolve(message);
+            }
+            // The prompt's RPC reply marks the end of the turn (a successful turn emits no
+            // session.end), and may arrive long after the RPC waiter timed out. Journal a
+            // terminal event so the server sees it. Aborted/failed turns already logged
+            // session.end and cleared activeRunId, so they are not ended twice.
             if (message.id === state.activeRunId) {
+              const event: SessionEvent = message.type === "error"
+                ? { type: "session.end", reason: "error", error: typeof message.error === "string" ? message.error : "prompt_failed" }
+                : { type: "session.end", reason: "complete" };
+              const record: CellEvent = { cursor: ++state.cursor, runId: state.activeRunId, event };
+              await appendFile(EVENT_LOG, JSON.stringify(record) + "\n", { mode: 0o600 });
               state.activeRunId = null;
               await persistState(state);
             }
