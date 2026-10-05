@@ -253,17 +253,18 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
             });
             break;
           case "permission.request": {
-            const approved = await turn.askPermission({
-              tool: { name: event.tool },
+            // Cells run in auto mode, so this only fires if a prompt somehow ran in another mode.
+            const decision = await turn.askPermission({
+              tool: { name: event.toolName },
               args: (event.args as Record<string, unknown>) ?? {},
             } as never);
             await this.controlById(cellId, "POST", "/rpc", {
               id: randomUUID(),
               type: "resolve_permission",
-              permissionId: event.id,
-              approved,
+              requestId: event.requestId,
+              decision,
             }).catch(() => {});
-            turn.publishEvent("tool.activity", { tool: event.tool, activity: approved ? "approved" : "rejected" });
+            turn.publishEvent("tool.activity", { tool: event.toolName, activity: decision === "allow" ? "approved" : "rejected" });
             break;
           }
           case "usage":

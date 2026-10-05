@@ -164,6 +164,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
     if (state.seenRunIds?.includes(runId)) return send(res, 202, { accepted: true, runId, replay: true });
     if (state.activeRunId) return send(res, 409, { error: "session_busy" });
     if (!state.initialized || typeof command.message !== "string" || !command.message.trim()) return send(res, 409, { error: "session_not_ready" });
+    // The session ignores `mode` in its new_session config; the per-prompt option is what
+    // its permission handler reads, so every cell prompt runs autonomously.
+    const options = command.options && typeof command.options === "object" ? command.options as Record<string, unknown> : {};
+    command.options = { ...options, mode: CELL_MODE };
     state.activeRunId = runId;
     state.seenRunIds = [...(state.seenRunIds ?? []), runId];
     await persistState(state);
