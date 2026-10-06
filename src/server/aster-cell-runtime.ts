@@ -14,6 +14,8 @@ const CELL_STATE_DIR = "/workspace/.aster";
 const CHECKPOINT_MESSAGE_FILE = `${CELL_STATE_DIR}/checkpoint-message`;
 const INSTALLED_RUNTIME_PACKAGE = "/opt/autopilot/node_modules/autopilot-ai/package.json";
 const NOTES_FILE = `${CELL_STATE_DIR}/pending-notes`;
+const MEMORY_FILE = `${CELL_STATE_DIR}/memory.md`;
+const MEMORY_EXTRACTION_TIMEOUT_MS = 15_000;
 const ARTIFACTS_DIR = `${CELL_WORKSPACE}/artifacts`;
 const MAX_ARTIFACTS = 500;
 const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
@@ -284,7 +286,11 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
       // make sure the runtime and bridge are back before prompting.
       await this.ensureReady(cellId);
       const cell = await this.provider.getCell(cellId);
-      const note = await this.readNotes(cell);
+      if (turn.memory) {
+        await cell.mkdir(CELL_STATE_DIR, { parents: true });
+        await cell.writeFile(MEMORY_FILE, turn.memory.snapshot, { mode: "0600" });
+      }
+      const note = [await this.readNotes(cell), turn.memory?.note ?? ""].filter(Boolean).join("\n\n");
       const message = note ? `${note}\n\n${turn.userText}` : turn.userText;
       artifactsBefore = await this.listArtifacts(cellId).catch(() => []);
       await this.controlById(cellId, "POST", "/rpc", { id: runId, type: "prompt", message });
@@ -382,6 +388,9 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     await this.checkpoint(cellId, turn.userText)
       .then((checkpoint) => { if (checkpoint) turn.publishEvent("checkpoint.created", { ...checkpoint }); })
       .catch(() => {});
+    if (outcome?.status === "completed" && turn.beforeFinish) {
+      await Promise.race([turn.beforeFinish().catch(() => {}), sleep(MEMORY_EXTRACTION_TIMEOUT_MS)]);
+    }
     finish(outcome?.status ?? "cancelled", outcome?.reason ?? "cell_turn_stopped");
   }
 

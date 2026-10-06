@@ -16,6 +16,7 @@ import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig, type Aster
 import { loadOpenRouterCatalog } from "../models/openrouter-catalog.js";
 import type { AsterArtifact, AsterCellProject } from "./aster-cell-runtime.js";
 import { AsterGitHub, AsterGitHubError, REPOSITORY_FULL_NAME_RE } from "./aster-github.js";
+import { AsterMemory } from "./aster-memory.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -43,6 +44,10 @@ export interface AsterTurnStart {
   publishEvent: (type: string, data: Record<string, unknown>) => void;
   onCellCursor?: (cursor: number) => void;
   finish: (status: "completed" | "failed" | "cancelled", reason?: string) => void;
+  /** Long-term memory for this turn: a note to prepend and the full memory file for the cell. */
+  memory?: { note: string; snapshot: string };
+  /** Runs after a completed turn's output, before its terminal status (e.g. memory extraction). */
+  beforeFinish?: () => Promise<void>;
 }
 
 export interface AsterApiRuntime {
@@ -97,10 +102,22 @@ export class AsterApi {
 
   private readonly github: AsterGitHub;
 
-  constructor(config: KimiConfig, runtime: AsterApiRuntime, github: AsterGitHub = new AsterGitHub()) {
+  private memory: AsterMemory | undefined;
+
+  constructor(config: KimiConfig, runtime: AsterApiRuntime, github: AsterGitHub = new AsterGitHub(), memory?: AsterMemory) {
     this.config = config;
     this.runtime = runtime;
     this.github = github;
+    this.memory = memory;
+  }
+
+  private getMemory(): AsterMemory | undefined {
+    if (process.env.AUTOPILOT_ASTER_MEMORY === "off") return undefined;
+    try {
+      return this.memory ??= new AsterMemory();
+    } catch {
+      return undefined;
+    }
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -124,7 +141,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", "memory", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
         });
       }
 
@@ -173,6 +190,19 @@ export class AsterApi {
         }
         const kind = body.kind as "chat" | "code" | undefined;
         return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey, kind, body.repository as string | undefined);
+      }
+
+      if (path === `${API_PREFIX}/memory` && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const memory = this.getMemory();
+        return json(res, 200, { enabled: Boolean(memory?.enabled), items: memory ? memory.list() : [] });
+      }
+      const memoryMatch = path.match(/^\/api\/v1\/memory\/([^/]+)$/);
+      if (memoryMatch && method === "DELETE") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const memory = this.getMemory();
+        if (!memory || !memory.delete(memoryMatch[1]!)) return sendError(res, 404, "memory_not_found", "Memory item not found");
+        return json(res, 200, { deleted: memoryMatch[1] });
       }
 
       if (path === `${API_PREFIX}/github/repositories` && (method === "GET" || method === "POST")) {
@@ -362,6 +392,8 @@ export class AsterApi {
     }
     this.store?.close();
     this.store = undefined;
+    this.memory?.close();
+    this.memory = undefined;
   }
 
   private getStore(): AsterStore {
@@ -676,6 +708,17 @@ export class AsterApi {
           if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
         },
       };
+      const memory = this.getMemory();
+      if (memory) {
+        active.memory = { note: memory.brief(conversation.id, text), snapshot: memory.snapshot() };
+        const firstSequence = store.getConversation(conversation.id)?.lastEventSequence ?? 0;
+        active.beforeFinish = async () => {
+          const reply = collectAssistantText(store, conversation.id, runId, firstSequence);
+          const project = store.getConversationProject(conversation.id);
+          const changes = await memory.remember({ conversationId: conversation.id, project, userText: text, assistantText: reply });
+          if (changes.length) publishEvent("memory.updated", { items: changes });
+        };
+      }
       this.runtime.startTurn(active);
       json(res, 202, acceptedResponse);
     } catch {
@@ -1024,6 +1067,22 @@ function parseCursor(header: string | string[] | undefined, query: string | null
   if (!/^\d{1,16}$/.test(value)) return undefined;
   const cursor = Number(value);
   return Number.isSafeInteger(cursor) ? cursor : undefined;
+}
+
+/** The assistant's streamed reply for one run, rebuilt from its journaled deltas. */
+function collectAssistantText(store: AsterStore, conversationId: string, runId: string, after: number): string {
+  let text = "";
+  let cursor = after;
+  for (;;) {
+    const events = store.eventsAfter(conversationId, cursor, 500);
+    if (events.length === 0) break;
+    for (const event of events) {
+      if (event.runId === runId && event.type === "assistant.delta" && typeof event.data.text === "string") text += event.data.text;
+    }
+    cursor = events.at(-1)!.sequence;
+    if (text.length > 20_000) break;
+  }
+  return text;
 }
 
 function publicConversation(conversation: AsterConversation, project?: AsterConversationProject): Record<string, unknown> {

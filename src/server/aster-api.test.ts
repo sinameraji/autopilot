@@ -699,6 +699,7 @@ async function createHarness(mode: "complete" | "hang" | "approval", options: { 
   setEnv("AUTOPILOT_RUNS_DB", runsDb);
   setEnv("AUTOPILOT_ASTER_CONFIG", configPath);
   setEnv("KIMIFLARE_SERVER_PASSWORD", "legacy-only-secret");
+  setEnv("AUTOPILOT_ASTER_MEMORY", "off");
   if (options.openRouterCatalog) {
     // A fresh on-disk catalog cache, so the test never reaches the network.
     const configHome = join(root, "config-home");
