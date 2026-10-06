@@ -119,6 +119,7 @@ function WorkerRow({ worker }: { worker: ActiveWorker }) {
 
   const isDone = worker.status === "completed" || worker.status === "failed" || worker.status === "budget_exhausted";
   const hasSteps = worker.steps && worker.steps.length > 0;
+  const logPreview = workerLogPreview(worker);
 
   return (
     <Box flexDirection="column" marginLeft={2}>
@@ -158,14 +159,12 @@ function WorkerRow({ worker }: { worker: ActiveWorker }) {
         </Box>
       )}
 
-      {/* Raw logs — collapsed by default, last 3 lines shown as secondary info */}
-      {worker.logs.length > 0 && (
-        <Box flexDirection="column" marginLeft={4}>
-          {worker.logs.slice(-3).map((line, i) => (
-            <Text key={`${worker.id}-log-${i}`} color={theme.muted?.color ?? theme.info.color} dimColor>
-              {line.slice(0, 120)}
-            </Text>
-          ))}
+      {/* Routine logs duplicate the task/step summaries; keep one line for failures. */}
+      {logPreview && (
+        <Box marginLeft={4}>
+          <Text color={theme.muted?.color ?? theme.info.color} dimColor>
+            Last log: {logPreview}
+          </Text>
         </Box>
       )}
 
@@ -179,6 +178,15 @@ function WorkerRow({ worker }: { worker: ActiveWorker }) {
       )}
     </Box>
   );
+}
+
+export function workerLogPreview(
+  worker: Pick<ActiveWorker, "status" | "logs">,
+): string | undefined {
+  if (worker.status !== "failed" && worker.status !== "budget_exhausted") return undefined;
+  const lastLine = worker.logs.at(-1)?.replace(/\s+/g, " ").trim();
+  if (!lastLine) return undefined;
+  return lastLine.length <= 120 ? lastLine : `${lastLine.slice(0, 119)}…`;
 }
 
 function StepRow({ step, theme }: { step: WorkerStep; theme: Theme }) {
