@@ -34,6 +34,23 @@ describe("Aster workspace tool policy", () => {
     assert.equal(containsLikelyProviderSecret(input), true);
     assert.equal(redactLikelySecrets(input).includes("sk-or-v1-0123456789abcdefghijklmnop"), false);
     assert.equal(redactLikelySecrets(input).includes("ghp_0123456789abcdefghijklmnop"), false);
+    for (const key of [
+      "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+      "sk-proj-AbC123dEf456GhI789jKl012MnO345pQr678",
+      "sk-ant-api03-AbCdEf0123456789GhIjKl_mnOpQr",
+      "OPENROUTER_API_KEY=whatever",
+    ]) {
+      assert.equal(containsLikelyProviderSecret(`here: ${key}`), true, key);
+    }
+    for (const prose of [
+      "I want a task-management-dashboard-for-small-teams and a risk-assessment-framework-for-startups.",
+      "Can you ask-the-user-before-deploying-anything-to-production please",
+      "desk-or-chair-comparison-for-my-home-office",
+      "sk-learn-is-a-python-library-for-machine-learning",
+    ]) {
+      assert.equal(containsLikelyProviderSecret(prose), false, prose);
+      assert.equal(redactLikelySecrets(prose), prose);
+    }
   });
 });
 

@@ -79,16 +79,31 @@ function posixNormalize(value: string): string {
   return "/" + out.join("/");
 }
 
+/**
+ * `sk-` keys (OpenRouter sk-or-v1-…, OpenAI sk-proj-…, Anthropic sk-ant-api03-…) always contain a
+ * long random chunk. Requiring a word boundary and one 20+ character chunk with a digit keeps
+ * ordinary hyphenated text ("task-management-dashboard", "ask-the-user-first") from being
+ * mistaken for a credential, which previously rejected long messages.
+ */
+const SK_CANDIDATE_RE = /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g;
+
+function isLikelySkKey(candidate: string): boolean {
+  if (/^sk-or-v1-[A-Za-z0-9]{16,}/.test(candidate)) return true; // OpenRouter's prefix is unambiguous
+  return candidate.slice(3).split(/[-_]/).some((chunk) => chunk.length >= 20 && /\d/.test(chunk));
+}
+
 export function containsLikelyProviderSecret(value: string): boolean {
-  return /(?:sk-or-(?:v1-)?[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{24,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:CLOUDFLARE|OPENROUTER|REQUESTY)_API_(?:KEY|TOKEN)\s*=)/i.test(value);
+  for (const match of value.matchAll(SK_CANDIDATE_RE)) {
+    if (isLikelySkKey(match[0])) return true;
+  }
+  return /(?:\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}|(?:CLOUDFLARE|OPENROUTER|REQUESTY)_API_(?:KEY|TOKEN)\s*=)/.test(value);
 }
 
 export function redactLikelySecrets(value: string): string {
   return value
-    .replace(/sk-or-(?:v1-)?[A-Za-z0-9_-]{16,}/g, "[REDACTED_PROVIDER_SECRET]")
-    .replace(/sk-[A-Za-z0-9_-]{24,}/g, "[REDACTED_PROVIDER_SECRET]")
-    .replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "[REDACTED_PROVIDER_SECRET]")
-    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_PROVIDER_SECRET]");
+    .replace(SK_CANDIDATE_RE, (match) => (isLikelySkKey(match) ? "[REDACTED_PROVIDER_SECRET]" : match))
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, "[REDACTED_PROVIDER_SECRET]")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}/g, "[REDACTED_PROVIDER_SECRET]");
 }
 
 function assertInside(root: string, candidate: string): void {
