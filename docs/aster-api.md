@@ -19,14 +19,18 @@ Aster conversation cells require a Hotcell deployment reachable from the service
 | --- | --- |
 | `AUTOPILOT_HOTCELL_ENDPOINT` | Hotcell control API; HTTPS required unless loopback |
 | `AUTOPILOT_HOTCELL_API_KEY` | Hotcell API key (kept server-side only) |
-| `AUTOPILOT_HOTCELL_DRIVER` | `firecracker` or `applevz`; the container driver is refused |
+| `AUTOPILOT_HOTCELL_DRIVER` | `firecracker`, `applevz`, or `container` (Docker; for hosts without KVM, weaker kernel isolation) |
+| `AUTOPILOT_HOTCELL_NETWORKED` | `true` gives cells general outbound internet (npm, git, pip) besides the LLM gateway |
+| `AUTOPILOT_HOTCELL_ANY_MODEL` | `true` lets a cell's gateway token call any model, so conversations can switch models |
+| `AUTOPILOT_HOTCELL_SLEEP_AFTER_MS` | Idle time before Hotcell pauses a cell (default 0 = never). On the container driver a pause is a cold stop that frees CPU and memory; files persist and the next request wakes the cell |
+| `AUTOPILOT_HOTCELL_IMAGE` | Cell image; bake the Autopilot runtime into it to skip the per-cell `npm install` |
 | `AUTOPILOT_HOTCELL_MEMORY_MB` | Per-cell memory (default 4096) |
 | `AUTOPILOT_HOTCELL_CPUS` | Per-cell vCPUs (default 2) |
 | `AUTOPILOT_HOTCELL_PIDS` | Per-cell PID limit (default 256) |
 | `AUTOPILOT_HOTCELL_SPEND_CAP_USD` | Per-conversation egress spend cap (default 10) |
 | `AUTOPILOT_HOTCELL_TOKEN_TTL_MS` | Egress token TTL (default 24h) |
 
-The provider fails closed: it refuses to create a cell if the Hotcell API auth is disabled, the configured microVM driver is unavailable, or the OpenRouter egress gateway is missing. Creation is label-adoptive: cells carry a stable `autopilot.conversation_id` label, and a retry after an uncertain create adopts the labeled cell instead of provisioning a duplicate.
+The provider fails closed: it refuses to create a cell if the Hotcell API auth is disabled, the configured driver is unavailable, or the OpenRouter egress gateway is missing. Creation is label-adoptive: cells carry a stable `autopilot.conversation_id` label, and a retry after an uncertain create adopts the labeled cell instead of provisioning a duplicate.
 
 ## Configure server-owned workspaces and models
 
@@ -45,6 +49,8 @@ Create `/etc/autopilot/aster.json` (do not put credentials in it):
   ]
 }
 ```
+
+Set `"models": "openrouter"` instead of a list to offer every tool-capable model in OpenRouter's live catalog (cached on the server, refreshed every 6 hours).
 
 `id` is the only workspace selector accepted from clients. The API never accepts a client-supplied cwd or filesystem path. Roots must be existing, non-overlapping directories; each workspace root must be a Git repository so its tracked tree can be seeded into the conversation cell at creation.
 
@@ -116,7 +122,7 @@ All paths below require the scoped Bearer credential. Unknown IDs outside the to
 {"workspaces":[{"id":"default","displayName":"Default workspace"}]}
 ```
 
-`GET /api/v1/models` returns configured model IDs, never provider credentials.
+`GET /api/v1/models` returns `{models: [id…], catalog: [{id, name, contextWindow, inputPerMtok, outputPerMtok, created, reasoning, vision}…]}`, never provider credentials.
 
 ### Conversations and turns
 
@@ -154,11 +160,19 @@ New clients can opt into durable idempotency by including a stable `clientTurnId
 {"clientTurnId":"turn-550e8400-e29b-41d4-a716-446655440000","text":"Summarize the failing test and propose a fix."}
 ```
 
-`clientTurnId` is 1-128 ASCII letters, digits, `.`, `_`, `:`, or `-`, starting with a letter or digit, and is scoped to its conversation. Keep and resend the same ID for every retry of the same logical turn. The server compares the JSON-decoded `text` exactly for key reuse; it trims the text before appending it to the conversation and sending it to the model. Text is capped at 20,000 characters; request bodies are capped at 64 KiB. Workspace and model cannot be changed by a turn request.
+`clientTurnId` is 1-128 ASCII letters, digits, `.`, `_`, `:`, or `-`, starting with a letter or digit, and is scoped to its conversation. Keep and resend the same ID for every retry of the same logical turn. The server compares the JSON-decoded `text` exactly for key reuse; it trims the text before appending it to the conversation and sending it to the model. Text is capped at 20,000 characters; request bodies are capped at 64 KiB. The workspace cannot be changed by a turn request. A turn may include `"model"`: when it differs from the conversation's model, the server switches the in-cell session to it before starting the turn (`400 model_not_allowed` for models outside the catalog).
 
 The first accepted keyed request returns `202` with `{conversationId,clientTurnId,runId,status:"running"}` and stores that acceptance response, text, and run ID in SQLite in the same transaction that claims the conversation's active turn. Repeating the same ID and same text returns the original `202` response and run ID without appending another user message or starting another run, including after completion or restart. A restarted server marks uncertain work interrupted and does not replay it; a keyed retry still returns the original acceptance receipt, while conversation metadata/SSE reports current state. Reusing the ID with different text returns stable `409 idempotency_conflict`.
 
 Only one active turn per conversation is allowed. A different, previously unused keyed request submitted while another turn is active returns `409 conversation_busy` and does not consume its ID; it may be retried after the active turn ends. An exact retry of an already accepted keyed request replays its response rather than returning busy. If `clientTurnId` is present but malformed (including `null`), the server returns `400 invalid_client_turn_id`; it never silently falls back to legacy mode.
+
+### Autonomy, tool output, and checkpoints
+
+The in-cell agent runs in `auto` mode: every tool call (shell, write, edit, …) is auto-approved, so no `approval.required` events are raised for cell conversations. The phone sees what happened instead: `tool.activity` events carry `{tool, toolCallId, activity: "started", input}` (the shell command or file path) and `{tool, toolCallId, activity: "completed" | "failed", output}` (redacted, at most 16,000 characters with the middle elided).
+
+`/workspace` is a git repository. After every turn, including cancelled or failed ones, the server commits whatever changed and emits `checkpoint.created` `{id, message, createdAt}` before the terminal status event. `.aster/` (bridge state) is excluded.
+
+`GET /api/v1/conversations/{conversationId}/checkpoints` lists up to 100 checkpoints, newest first. `POST /api/v1/conversations/{conversationId}/checkpoints/{sha}/restore` (only between turns; `409 turn_active` otherwise) makes the workspace match that checkpoint, recorded as a new commit so the restore itself can be undone, emits `checkpoint.restored`, and tells the agent about it on its next prompt. Conversation history is not rewound.
 
 `POST /api/v1/conversations/{conversationId}/cancel` is idempotent. It aborts the in-cell turn (`abort` RPC over the bridge), updates durable run state, cancels pending approvals, and returns the current conversation.
 

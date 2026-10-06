@@ -12,6 +12,11 @@ const TURN_STATE = join(STATE_DIR, "turn-state.json");
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_EVENTS = 250;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/**
+ * The cell is a disposable, per-conversation sandbox with its own git history, so the
+ * agent runs autonomously: every tool call (bash, write, edit, …) is auto-approved.
+ */
+const CELL_MODE = "auto";
 
 type RpcCommand = { id: string; type: string; [key: string]: unknown };
 type RpcOutput = { id?: string; type: string; [key: string]: unknown };
@@ -32,8 +37,17 @@ interface BridgeState {
   cursor: number;
 }
 
+/** Hotcell's gateway base URL is the provider root; Autopilot's OpenRouter client expects `/v1`. */
+export function normalizeGatewayBaseUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim().replace(/\/+$/, "");
+  if (!trimmed) return value;
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
 export async function startAsterCellBridge(port = 31417): Promise<ReturnType<typeof createServer>> {
   process.env.HOME = HOME;
+  const gatewayBaseUrl = normalizeGatewayBaseUrl(process.env.OPENROUTER_BASE_URL);
+  if (gatewayBaseUrl) process.env.OPENROUTER_BASE_URL = gatewayBaseUrl;
   await mkdir(HOME, { recursive: true, mode: 0o700 });
   await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
   const state = await readState();
@@ -52,12 +66,23 @@ export async function startAsterCellBridge(port = 31417): Promise<ReturnType<typ
           if (!line) continue;
           let message: RpcOutput;
           try { message = JSON.parse(line) as RpcOutput; } catch { continue; }
-          if (message.id && pending.has(message.id)) {
-            const waiter = pending.get(message.id)!;
-            pending.delete(message.id);
-            clearTimeout(waiter.timer);
-            waiter.resolve(message);
+          if (message.id) {
+            const waiter = pending.get(message.id);
+            if (waiter) {
+              pending.delete(message.id);
+              clearTimeout(waiter.timer);
+              waiter.resolve(message);
+            }
+            // The prompt's RPC reply marks the end of the turn (a successful turn emits no
+            // session.end), and may arrive long after the RPC waiter timed out. Journal a
+            // terminal event so the server sees it. Aborted/failed turns already logged
+            // session.end and cleared activeRunId, so they are not ended twice.
             if (message.id === state.activeRunId) {
+              const event: SessionEvent = message.type === "error"
+                ? { type: "session.end", reason: "error", error: typeof message.error === "string" ? message.error : "prompt_failed" }
+                : { type: "session.end", reason: "complete" };
+              const record: CellEvent = { cursor: ++state.cursor, runId: state.activeRunId, event };
+              await appendFile(EVENT_LOG, JSON.stringify(record) + "\n", { mode: 0o600 });
               state.activeRunId = null;
               await persistState(state);
             }
@@ -138,7 +163,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
       const apiKey = process.env.OPENROUTER_API_KEY;
       if (!model || !apiKey || !process.env.OPENROUTER_BASE_URL) return send(res, 503, { error: "scoped_openrouter_gateway_unavailable" });
       command.cwd = "/workspace";
-      command.config = { model, mode: "edit", openrouterApiKey: apiKey };
+      command.config = { model, mode: CELL_MODE, openrouterApiKey: apiKey };
       state.sessionId = sessionId;
       state.model = model;
       await persistState(state);
@@ -150,6 +175,10 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
     if (state.seenRunIds?.includes(runId)) return send(res, 202, { accepted: true, runId, replay: true });
     if (state.activeRunId) return send(res, 409, { error: "session_busy" });
     if (!state.initialized || typeof command.message !== "string" || !command.message.trim()) return send(res, 409, { error: "session_not_ready" });
+    // The session ignores `mode` in its new_session config; the per-prompt option is what
+    // its permission handler reads, so every cell prompt runs autonomously.
+    const options = command.options && typeof command.options === "object" ? command.options as Record<string, unknown> : {};
+    command.options = { ...options, mode: CELL_MODE };
     state.activeRunId = runId;
     state.seenRunIds = [...(state.seenRunIds ?? []), runId];
     await persistState(state);
@@ -159,10 +188,21 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, state: B
     return send(res, 202, { accepted: true, runId });
   }
 
+  if (command.type === "set_model") {
+    if (state.activeRunId) return send(res, 409, { error: "session_busy" });
+    if (typeof command.modelId !== "string" || !command.modelId.trim() || command.modelId.length > 200) {
+      return send(res, 400, { error: "invalid_model" });
+    }
+  }
+
   try {
     const response = await sendRpc(input, pending, command);
     if (command.type === "new_session") {
       state.initialized = response.type === "ok";
+      await persistState(state);
+    }
+    if (command.type === "set_model" && response.type !== "error") {
+      state.model = command.modelId as string;
       await persistState(state);
     }
     return send(res, response.type === "error" ? 409 : 200, response);
@@ -222,7 +262,7 @@ async function restoreSession(input: PassThrough, pending: Map<string, PendingRp
     type: "new_session",
     cwd: "/workspace",
     sessionId: state.sessionId,
-    config: { model: state.model, mode: "edit", openrouterApiKey: apiKey },
+    config: { model: state.model, mode: CELL_MODE, openrouterApiKey: apiKey },
   }).catch(() => undefined);
   state.initialized = response?.type === "ok";
   await persistState(state);

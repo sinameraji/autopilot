@@ -32,6 +32,13 @@ export interface AsterConversation {
   updatedAt: number;
 }
 
+/** What a conversation's cell holds: a plain chat workspace, or a cloned GitHub repository. */
+export interface AsterConversationProject {
+  kind: "chat" | "code";
+  repository: string | null;
+  branch: string | null;
+}
+
 export interface AsterCellMapping {
   conversationId: string;
   credentialId: string;
@@ -247,6 +254,20 @@ export class AsterStore {
         UNIQUE(credential_id, create_key_hash)
       );
       CREATE INDEX IF NOT EXISTS idx_aster_cells_lifecycle ON aster_cell_mappings(status, updated_at);
+      CREATE TABLE IF NOT EXISTS aster_github_grants (
+        conversation_id TEXT PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        repository TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
+      CREATE TABLE IF NOT EXISTS aster_conversation_projects (
+        conversation_id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        repository TEXT,
+        branch TEXT,
+        created_at INTEGER NOT NULL
+      );
     `);
     try { chmodSync(dbPath, 0o600); } catch { /* existing/read-only database permissions are managed by the caller */ }
   }
@@ -477,6 +498,58 @@ export class AsterStore {
     return update.immediate();
   }
 
+  /** Records a conversation's project once; the first value wins so retries can't change it. */
+  setConversationProject(conversationId: string, project: AsterConversationProject): void {
+    this.db.prepare(`INSERT OR IGNORE INTO aster_conversation_projects (conversation_id, kind, repository, branch, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(conversationId, project.kind, project.repository, project.branch, Date.now());
+  }
+
+  getConversationProject(conversationId: string): AsterConversationProject | undefined {
+    const row = this.db.prepare("SELECT kind, repository, branch FROM aster_conversation_projects WHERE conversation_id = ?")
+      .get(conversationId) as { kind: string; repository: string | null; branch: string | null } | undefined;
+    if (!row) return undefined;
+    return { kind: row.kind === "code" ? "code" : "chat", repository: row.repository, branch: row.branch };
+  }
+
+  /**
+   * The repository-scoped GitHub token for a code conversation, created once. It is stored
+   * as-is (like the server's own GitHub token, it never leaves the server except into that
+   * conversation's cell) so provisioning retries hand the cell the same value.
+   */
+  getOrCreateGitHubGrant(conversationId: string, repository: string): string {
+    const existing = this.db.prepare("SELECT token FROM aster_github_grants WHERE conversation_id = ? AND revoked_at IS NULL")
+      .get(conversationId) as { token: string } | undefined;
+    if (existing) return existing.token;
+    const token = "aghp_" + randomBytes(32).toString("base64url");
+    this.db.prepare(`INSERT INTO aster_github_grants (conversation_id, token, repository, created_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET token = excluded.token, repository = excluded.repository, created_at = excluded.created_at, revoked_at = NULL`)
+      .run(conversationId, token, repository, Date.now());
+    return token;
+  }
+
+  resolveGitHubGrant(token: string): { conversationId: string; repository: string } | undefined {
+    const row = this.db.prepare("SELECT conversation_id, repository FROM aster_github_grants WHERE token = ? AND revoked_at IS NULL")
+      .get(token) as { conversation_id: string; repository: string } | undefined;
+    return row ? { conversationId: row.conversation_id, repository: row.repository } : undefined;
+  }
+
+  revokeGitHubGrant(conversationId: string): void {
+    this.db.prepare("UPDATE aster_github_grants SET revoked_at = ? WHERE conversation_id = ? AND revoked_at IS NULL").run(Date.now(), conversationId);
+  }
+
+  /** Switch an idle conversation's model; refused while a turn is active. */
+  setConversationModel(conversationId: string, model: string): boolean {
+    const update = this.db.transaction(() => {
+      const now = Date.now();
+      const result = this.db.prepare("UPDATE aster_conversations SET model = ?, updated_at = ? WHERE id = ? AND active_run_id IS NULL")
+        .run(model, now, conversationId);
+      if (result.changes !== 1) return false;
+      this.insertEvent(conversationId, null, "model.changed", { model }, now);
+      return true;
+    });
+    return update.immediate();
+  }
+
   appendEvent(conversationId: string, runId: string | null, type: string, data: Record<string, unknown>): AsterEvent {
     const append = this.db.transaction(() => this.insertEvent(conversationId, runId, type, data, Date.now()));
     return append.immediate();
@@ -592,7 +665,7 @@ export class AsterStore {
   }
 }
 
-function defaultAsterDbPath(): string {
+export function defaultAsterDbPath(): string {
   const root = process.env.XDG_STATE_HOME || join(homedir(), ".local", "state");
   return process.env.AUTOPILOT_ASTER_DB || join(root, "autopilot", "aster.db");
 }

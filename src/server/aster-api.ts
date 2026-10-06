@@ -11,8 +11,14 @@ import { RunStore } from "../runs/store.js";
 import { RunWorktreeManager } from "../runs/worktrees.js";
 import { loadSession, saveSession, sessionsDir, type SessionFile } from "../sessions.js";
 import { getAppVersion } from "../util/version.js";
-import { AsterStore, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
-import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig } from "./aster-workspaces.js";
+import { AsterStore, type AsterConversationProject, type AsterConversation, type AsterConversationStatus, type AsterPrincipal, type AsterScope } from "./aster-store.js";
+import { AsterConfigError, findAsterWorkspace, loadAsterServerConfig, type AsterServerConfig } from "./aster-workspaces.js";
+import { loadOpenRouterCatalog } from "../models/openrouter-catalog.js";
+import type { AsterArtifact, AsterCellProject } from "./aster-cell-runtime.js";
+import { AsterGitHub, AsterGitHubError, REPOSITORY_FULL_NAME_RE } from "./aster-github.js";
+import { AsterMemory } from "./aster-memory.js";
+import { AsterGitHubProxy } from "./aster-github-proxy.js";
+import { AsterPush } from "./aster-push.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -40,16 +46,44 @@ export interface AsterTurnStart {
   publishEvent: (type: string, data: Record<string, unknown>) => void;
   onCellCursor?: (cursor: number) => void;
   finish: (status: "completed" | "failed" | "cancelled", reason?: string) => void;
+  /** Long-term memory for this turn: a note to prepend and the full memory file for the cell. */
+  memory?: { note: string; snapshot: string };
+  /** Runs after a completed turn's output, before its terminal status (e.g. memory extraction). */
+  beforeFinish?: () => Promise<void>;
 }
 
 export interface AsterApiRuntime {
-  provisionConversation?: (input: { conversationId: string; sessionId: string; cellName: string; workspaceId: string; workspaceRoot: string; model: string; allowCreate: boolean; onCellCreated: (cellId: string) => void }) => Promise<{ cellId: string }>;
+  provisionConversation?: (input: { conversationId: string; sessionId: string; cellName: string; workspaceId: string; workspaceRoot: string; model: string; allowCreate: boolean; onCellCreated: (cellId: string) => void; project?: AsterCellProject }) => Promise<{ cellId: string }>;
   findConversationCell?: (conversationId: string) => Promise<{ cellId: string } | undefined>;
   destroyCell?: (cellId: string) => Promise<void>;
   pauseCell?: (cellId: string) => Promise<void>;
   resumeCell?: (cellId: string) => Promise<void>;
   startTurn: (turn: AsterTurnStart) => void;
+  /** Re-attach to a turn the cell kept running across a server restart. */
+  resumeTurn?: (turn: AsterTurnStart) => void;
   cancelRun: (runId: string) => void;
+  setModel?: (cellId: string, model: string) => Promise<void>;
+  listCheckpoints?: (cellId: string) => Promise<AsterCheckpointInfo[]>;
+  restoreCheckpoint?: (cellId: string, conversationId: string, checkpointId: string) => Promise<AsterCheckpointInfo>;
+  listArtifacts?: (cellId: string) => Promise<AsterArtifact[]>;
+  readArtifact?: (cellId: string, path: string) => Promise<{ data: Buffer; mimeType: string; name: string }>;
+}
+
+export interface AsterCheckpointInfo {
+  id: string;
+  message: string;
+  createdAt: string;
+}
+
+interface AsterModelInfo {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+  inputPerMtok?: number;
+  outputPerMtok?: number;
+  created?: number;
+  reasoning?: boolean;
+  vision?: boolean;
 }
 
 interface AsterWaiter {
@@ -70,9 +104,67 @@ export class AsterApi {
   private readonly runtime: AsterApiRuntime;
   private readonly config: KimiConfig;
 
-  constructor(config: KimiConfig, runtime: AsterApiRuntime) {
+  private readonly github: AsterGitHub;
+
+  private memory: AsterMemory | undefined;
+
+  constructor(config: KimiConfig, runtime: AsterApiRuntime, github: AsterGitHub = new AsterGitHub(), memory?: AsterMemory) {
     this.config = config;
     this.runtime = runtime;
+    this.github = github;
+    this.memory = memory;
+  }
+
+  private githubProxy: AsterGitHubProxy | undefined;
+  /** Where cells reach the repository-scoped GitHub proxy, when it is running. */
+  private githubProxyUrl: string | undefined;
+
+  /**
+   * Starts the repository-scoped GitHub proxy when configured
+   * (AUTOPILOT_ASTER_GITHUB_PROXY_LISTEN=host:port, AUTOPILOT_ASTER_GITHUB_PROXY_URL as cells see it).
+   */
+  async startGitHubProxy(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    const listen = env.AUTOPILOT_ASTER_GITHUB_PROXY_LISTEN;
+    const publicUrl = env.AUTOPILOT_ASTER_GITHUB_PROXY_URL;
+    const token = env.GITHUB_TOKEN;
+    if (!listen || !publicUrl || !token || this.githubProxy) return;
+    const separator = listen.lastIndexOf(":");
+    const proxy = new AsterGitHubProxy({ token, resolveGrant: (grant) => this.getStore().resolveGitHubGrant(grant) });
+    await proxy.listen(Number(listen.slice(separator + 1)), listen.slice(0, separator));
+    this.githubProxy = proxy;
+    this.githubProxyUrl = publicUrl.replace(/\/+$/, "");
+  }
+
+  private push: AsterPush | undefined;
+
+  private getPush(): AsterPush | undefined {
+    try {
+      return this.push ??= new AsterPush();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** "Your task finished" (or failed) on the user's devices; cancelled turns stay silent. */
+  private notifyTurnEnd(store: AsterStore, conversationId: string, runId: string, status: string, reason: string | undefined, userText: string, after: number): void {
+    if (status !== "completed" && status !== "failed") return;
+    const push = this.getPush();
+    if (!push?.configured) return;
+    const reply = status === "completed" ? collectAssistantText(store, conversationId, runId, after).trim() : "";
+    const title = userText.trim().split("\n")[0] || "Aster";
+    const body = status === "completed"
+      ? (reply ? `✅ ${reply}` : "✅ Done")
+      : `⚠️ Couldn’t finish${reason && reason !== "error" ? `: ${reason}` : ""}`;
+    void push.notify({ title, body, conversationId });
+  }
+
+  private getMemory(): AsterMemory | undefined {
+    if (process.env.AUTOPILOT_ASTER_MEMORY === "off") return undefined;
+    try {
+      return this.memory ??= new AsterMemory();
+    } catch {
+      return undefined;
+    }
   }
 
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -96,7 +188,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy"],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", "memory", "push", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
         });
       }
 
@@ -111,28 +203,90 @@ export class AsterApi {
 
       if (path === `${API_PREFIX}/models` && method === "GET") {
         if (!this.hasScope(principal, "models:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks model/read scope");
-        return json(res, 200, { models: config.models });
+        const models = await selectableModels(config);
+        if (models.length === 0) return sendError(res, 503, "model_catalog_unavailable", "The model catalog is unavailable; try again shortly");
+        return json(res, 200, { models: models.map((model) => model.id), catalog: models });
       }
 
       if (path === `${API_PREFIX}/conversations` && method === "POST") {
         if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
         const body = await readJsonBody(req);
-        if (Object.keys(body).some((key) => key !== "workspaceId" && key !== "model")) {
-          return sendError(res, 400, "unsupported_field", "Conversation creation accepts only workspaceId and model; paths are server-configured");
+        if (Object.keys(body).some((key) => !["workspaceId", "model", "kind", "repository"].includes(key))) {
+          return sendError(res, 400, "unsupported_field", "Conversation creation accepts workspaceId, model, kind, and repository; paths are server-configured");
+        }
+        if (body.kind !== undefined && body.kind !== "chat" && body.kind !== "code") {
+          return sendError(res, 400, "invalid_kind", "kind must be \"chat\" or \"code\"");
+        }
+        if (body.kind === "code" && (typeof body.repository !== "string" || !REPOSITORY_FULL_NAME_RE.test(body.repository))) {
+          return sendError(res, 400, "repository_required", "Code conversations need a repository as owner/name");
+        }
+        if (body.kind !== "code" && body.repository !== undefined) {
+          return sendError(res, 400, "unsupported_field", "repository is only accepted for code conversations");
         }
         if (typeof body.workspaceId !== "string" || !principal.workspaceIds.includes(body.workspaceId)) {
           return sendError(res, 403, "workspace_forbidden", "Workspace ID is not in this credential's scope");
         }
         const workspace = findAsterWorkspace(config, body.workspaceId);
         if (!workspace) return sendError(res, 404, "workspace_not_found", "Workspace is not configured");
-        if (typeof body.model !== "string" || !config.models.includes(body.model)) {
+        if (typeof body.model !== "string" || !(await isSelectableModel(config, body.model))) {
           return sendError(res, 400, "model_not_allowed", "Select a model from the configured model list");
         }
         const idempotencyKey = req.headers["idempotency-key"];
         if (typeof idempotencyKey !== "string" || !CREATE_IDEMPOTENCY_KEY_RE.test(idempotencyKey)) {
           return sendError(res, 400, "idempotency_key_required", "Conversation creation requires an Idempotency-Key header of 1-128 safe characters");
         }
-        return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey);
+        const kind = body.kind as "chat" | "code" | undefined;
+        return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey, kind, body.repository as string | undefined);
+      }
+
+      if (path === `${API_PREFIX}/devices` && method === "POST") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const body = await readJsonBody(req);
+        const environment = body.environment === "development" ? "development" : "production";
+        const push = this.getPush();
+        if (!push || typeof body.token !== "string" || !push.register(body.token, environment)) {
+          return sendError(res, 400, "invalid_device_token", "A hex APNs device token is required");
+        }
+        return json(res, 200, { registered: true, notifications: push.configured });
+      }
+      const deviceMatch = path.match(/^\/api\/v1\/devices\/([0-9a-fA-F]{64,200})$/);
+      if (deviceMatch && method === "DELETE") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        this.getPush()?.unregister(deviceMatch[1]!);
+        return json(res, 200, { unregistered: true });
+      }
+
+      if (path === `${API_PREFIX}/memory` && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const memory = this.getMemory();
+        return json(res, 200, { enabled: Boolean(memory?.enabled), items: memory ? memory.list() : [] });
+      }
+      const memoryMatch = path.match(/^\/api\/v1\/memory\/([^/]+)$/);
+      if (memoryMatch && method === "DELETE") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const memory = this.getMemory();
+        if (!memory || !memory.delete(memoryMatch[1]!)) return sendError(res, 404, "memory_not_found", "Memory item not found");
+        return json(res, 200, { deleted: memoryMatch[1] });
+      }
+
+      if (path === `${API_PREFIX}/github/repositories` && (method === "GET" || method === "POST")) {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        try {
+          if (method === "GET") {
+            return json(res, 200, { repositories: await this.github.listRepositories(url.searchParams.get("q") ?? "") });
+          }
+          const body = await readJsonBody(req);
+          if (typeof body.name !== "string") return sendError(res, 400, "invalid_repository_name", "name is required");
+          const repository = await this.github.createRepository({
+            name: body.name.trim(),
+            private: body.private !== false,
+            ...(typeof body.description === "string" ? { description: body.description } : {}),
+          });
+          return json(res, 201, { repository });
+        } catch (error) {
+          if (error instanceof AsterGitHubError) return sendError(res, error.status, error.code, error.message);
+          throw error;
+        }
       }
 
       const eventsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/events$/);
@@ -151,7 +305,7 @@ export class AsterApi {
         const conversation = await this.authorizedConversation(store, principal, turnMatch[1]!);
         if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
         const body = await readJsonBody(req);
-        if (Object.keys(body).some((key) => key !== "text" && key !== "clientTurnId")) return sendError(res, 400, "unsupported_field", "Turns accept text and an optional clientTurnId; workspace and model are fixed by the conversation");
+        if (Object.keys(body).some((key) => key !== "text" && key !== "clientTurnId" && key !== "model")) return sendError(res, 400, "unsupported_field", "Turns accept text, an optional clientTurnId, and an optional model; the workspace is fixed by the conversation");
         const hasClientTurnId = Object.hasOwn(body, "clientTurnId");
         const clientTurnId = hasClientTurnId && typeof body.clientTurnId === "string" ? body.clientTurnId : undefined;
         if (hasClientTurnId && (!clientTurnId || !CLIENT_TURN_ID_RE.test(clientTurnId))) return sendError(res, 400, "invalid_client_turn_id", "clientTurnId must be 1-128 ASCII letters, digits, '.', '_', ':', or '-' and start with a letter or digit");
@@ -159,7 +313,18 @@ export class AsterApi {
         const text = requestText.trim();
         if (!text || text.length > MAX_USER_TURN_CHARS) return sendError(res, 400, "invalid_turn", `Turn text must be 1-${MAX_USER_TURN_CHARS} characters`);
         if (containsLikelyProviderSecret(text)) return sendError(res, 400, "secret_input_rejected", "Provider credentials must not be sent in conversation text");
-        return await this.appendTurn(res, store, conversation, clientTurnId, requestText, text);
+        let target = conversation;
+        if (Object.hasOwn(body, "model")) {
+          if (typeof body.model !== "string" || !(await isSelectableModel(config, body.model))) {
+            return sendError(res, 400, "model_not_allowed", "Select a model from the model catalog");
+          }
+          if (body.model !== conversation.model) {
+            const switched = await this.switchModel(res, store, conversation, body.model);
+            if (!switched) return;
+            target = switched;
+          }
+        }
+        return await this.appendTurn(res, store, target, clientTurnId, requestText, text);
       }
 
       const cancelMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/cancel$/);
@@ -180,6 +345,64 @@ export class AsterApi {
           : this.resumeConversation(res, store, conversation);
       }
 
+      const artifactsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/artifacts(\/file)?$/);
+      if (artifactsMatch && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const conversation = await this.authorizedConversation(store, principal, artifactsMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.listArtifacts || !this.runtime.readArtifact) return sendError(res, 503, "artifacts_unavailable", "Artifacts are not configured");
+        if (!artifactsMatch[2]) return json(res, 200, { artifacts: await this.runtime.listArtifacts(cell) });
+        try {
+          const artifact = await this.runtime.readArtifact(cell, url.searchParams.get("path") ?? "");
+          res.writeHead(200, {
+            "content-type": artifact.mimeType,
+            "content-length": artifact.data.length,
+            "content-disposition": `attachment; filename*=UTF-8''${encodeURIComponent(artifact.name)}`,
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          });
+          res.end(artifact.data);
+          return;
+        } catch (error) {
+          const code = error instanceof Error ? error.message : "";
+          if (code === "invalid_artifact_path") return sendError(res, 400, code, "Artifact path is invalid");
+          if (code === "artifact_too_large") return sendError(res, 413, code, "Artifact is larger than 50 MB");
+          return sendError(res, 404, "artifact_not_found", "Artifact not found");
+        }
+      }
+
+      const checkpointsMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/checkpoints$/);
+      if (checkpointsMatch && method === "GET") {
+        if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
+        const conversation = await this.authorizedConversation(store, principal, checkpointsMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.listCheckpoints) return sendError(res, 503, "checkpoints_unavailable", "Checkpoints are not configured");
+        return json(res, 200, { checkpoints: await this.runtime.listCheckpoints(cell) });
+      }
+
+      const restoreMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)\/checkpoints\/([0-9a-f]{7,40})\/restore$/);
+      if (restoreMatch && method === "POST") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const conversation = await this.authorizedConversation(store, principal, restoreMatch[1]!);
+        if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
+        if (conversation.activeRunId) return sendError(res, 409, "turn_active", "Wait for the current turn to finish or cancel it before restoring");
+        const cell = this.readyCell(res, store, conversation.id);
+        if (!cell) return;
+        if (!this.runtime.restoreCheckpoint) return sendError(res, 503, "checkpoints_unavailable", "Checkpoints are not configured");
+        try {
+          const checkpoint = await this.runtime.restoreCheckpoint(cell, conversation.id, restoreMatch[2]!);
+          store.appendEvent(conversation.id, null, "checkpoint.restored", { restoredFrom: restoreMatch[2]!, ...checkpoint });
+          return json(res, 200, { checkpoint });
+        } catch (error) {
+          if (error instanceof Error && error.message === "checkpoint_not_found") return sendError(res, 404, "checkpoint_not_found", "Checkpoint not found");
+          return sendError(res, 500, "checkpoint_restore_failed", "The workspace could not be restored");
+        }
+      }
+
       const conversationMatch = path.match(/^\/api\/v1\/conversations\/([^/]+)$/);
       if (conversationMatch && method === "DELETE") {
         if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
@@ -191,7 +414,7 @@ export class AsterApi {
         if (!this.hasScope(principal, "conversations:read")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/read scope");
         const conversation = await this.authorizedConversation(store, principal, conversationMatch[1]!);
         if (!conversation) return sendError(res, 404, "conversation_not_found", "Conversation not found");
-        return json(res, 200, publicConversation(conversation));
+        return json(res, 200, publicConversation(conversation, store.getConversationProject(conversation.id)));
       }
 
       const approvalMatch = path.match(/^\/api\/v1\/approvals\/([^/]+)$/);
@@ -233,6 +456,12 @@ export class AsterApi {
     }
     this.store?.close();
     this.store = undefined;
+    this.memory?.close();
+    this.memory = undefined;
+    this.githubProxy?.close();
+    this.githubProxy = undefined;
+    this.push?.close();
+    this.push = undefined;
   }
 
   private getStore(): AsterStore {
@@ -288,6 +517,15 @@ export class AsterApi {
           } else if (run.status === "needs_input") {
             runs.transition(run.id, "cancelled", "approval_expired_on_restart");
             store.updateConversationStatus(conversation.id, run.id, "interrupted", { reason: "approval_expired_on_restart" });
+          } else {
+            // Still running in its cell: re-attach instead of leaving the conversation busy forever.
+            const mapping = store.getCellMapping(conversation.id);
+            if (mapping?.cellId && this.runtime.resumeTurn) {
+              this.runtime.resumeTurn(this.cellTurn(store, conversation, run.id, mapping.cellId, mapping.eventCursor, run.task ?? ""));
+            } else {
+              runs.transition(run.id, "failed", "server_restarted");
+              store.updateConversationStatus(conversation.id, run.id, "interrupted", { reason: "server_restart_recovery" });
+            }
           }
         }
       } finally {
@@ -297,6 +535,41 @@ export class AsterApi {
     return this.recovery;
   }
 
+  /** A turn handle for re-attaching to a cell turn after a restart (no prompt is sent). */
+  private cellTurn(store: AsterStore, conversation: AsterConversation, runId: string, cellId: string, cursor: number, userText: string): AsterTurnStart {
+    const publishEvent = (type: string, data: Record<string, unknown>) => {
+      store.appendEvent(conversation.id, runId, type, data);
+    };
+    return {
+      runId,
+      conversation,
+      cellId,
+      cellEventCursor: cursor,
+      userText,
+      sessionFile: {} as SessionFile,
+      messages: [],
+      executor: new ToolExecutor([]),
+      allowedTools: new Set(),
+      maxToolIterations: null,
+      maxRuntimeMs: null,
+      askPermission: async () => "deny",
+      publishEvent,
+      onCellCursor: (next) => store.advanceCellEventCursor(conversation.id, next),
+      finish: (status, reason) => {
+        const runs = new RunStore();
+        try {
+          const run = runs.getRun(runId);
+          if (run && ["queued", "running", "waiting", "needs_input"].includes(run.status)) runs.transition(runId, status, reason ?? status);
+        } catch { /* run bookkeeping is best-effort */ } finally {
+          runs.close();
+        }
+        const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
+        if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
+        if (updated) this.notifyTurnEnd(store, conversation.id, runId, status, reason, userText, 0);
+      },
+    };
+  }
+
   private async createConversation(
     res: ServerResponse,
     store: AsterStore,
@@ -304,6 +577,8 @@ export class AsterApi {
     workspace: { id: string; displayName: string; rootPath: string },
     model: string,
     idempotencyKey: string,
+    kind?: "chat" | "code",
+    repository?: string,
   ): Promise<void> {
     const candidateId = randomUUID();
     const candidateSessionId = randomUUID();
@@ -322,11 +597,50 @@ export class AsterApi {
     if (mapping.status === "destroyed") return sendError(res, 410, "conversation_destroyed", "Conversation was already destroyed");
     if (mapping.status === "ready") {
       const existing = store.getConversation(mapping.conversationId);
-      if (existing) return json(res, 200, publicConversation(existing));
+      if (existing) return json(res, 200, publicConversation(existing, store.getConversationProject(existing.id)));
     }
     if (!this.runtime.provisionConversation) {
       store.setCellStatus(mapping.conversationId, "failed");
       return sendError(res, 503, "hotcell_unavailable", "Hotcell conversation runtime is not configured");
+    }
+
+    // The project is fixed on first attempt; retries with the same Idempotency-Key reuse it.
+    let project: AsterCellProject | undefined;
+    if (kind) {
+      let stored = store.getConversationProject(mapping.conversationId);
+      if (!stored) {
+        if (kind === "code") {
+          let repo;
+          try {
+            repo = await this.github.getRepository(repository!);
+          } catch (error) {
+            if (error instanceof AsterGitHubError) return sendError(res, error.status, error.code, error.message);
+            throw error;
+          }
+          store.setConversationProject(mapping.conversationId, {
+            kind,
+            repository: repo.fullName,
+            branch: `aster/${mapping.conversationId.slice(0, 8)}`,
+          });
+          stored = { kind, repository: repo.fullName, branch: `aster/${mapping.conversationId.slice(0, 8)}` };
+          project = { kind, repository: repo.fullName, baseBranch: repo.defaultBranch, branch: stored.branch! };
+        } else {
+          store.setConversationProject(mapping.conversationId, { kind, repository: null, branch: null });
+          stored = { kind, repository: null, branch: null };
+        }
+      }
+      if (!project) {
+        project = stored.kind === "code"
+          ? { kind: "code", repository: stored.repository!, baseBranch: (await this.github.getRepository(stored.repository!).catch(() => undefined))?.defaultBranch ?? "main", branch: stored.branch! }
+          : { kind: "chat" };
+      }
+      if (project.kind === "code" && project.repository && this.githubProxyUrl) {
+        project.github = {
+          token: store.getOrCreateGitHubGrant(mapping.conversationId, project.repository),
+          gitUrl: `${this.githubProxyUrl}/git`,
+          apiUrl: `${this.githubProxyUrl}/api`,
+        };
+      }
     }
 
     try {
@@ -341,6 +655,7 @@ export class AsterApi {
         model,
         allowCreate,
         onCellCreated: (cellId) => store.setCellId(mapping.conversationId, cellId),
+        ...(project ? { project } : {}),
       });
       store.setCellId(mapping.conversationId, provisioned.cellId);
       const conversation = store.getConversation(mapping.conversationId) ?? store.createConversation({
@@ -364,7 +679,7 @@ export class AsterApi {
       await saveSession(sessionFile);
       store.setCellStatus(mapping.conversationId, "ready");
       store.appendEvent(mapping.conversationId, null, "conversation.created", { conversationId: mapping.conversationId, workspaceId: workspace.id, model });
-      json(res, reservation.kind === "created" ? 201 : 200, publicConversation(conversation));
+      json(res, reservation.kind === "created" ? 201 : 200, publicConversation(conversation, store.getConversationProject(conversation.id)));
     } catch {
       const current = store.getCellMapping(mapping.conversationId);
       if (current?.cellId && this.runtime.destroyCell) {
@@ -492,6 +807,7 @@ export class AsterApi {
       const publishEvent = (type: string, data: Record<string, unknown>) => {
         store.appendEvent(conversation.id, runId, type, data);
       };
+      const turnStartSequence = store.getConversation(conversation.id)?.lastEventSequence ?? 0;
       const active: AsterTurnStart = {
         runId,
         conversation,
@@ -510,8 +826,20 @@ export class AsterApi {
         finish: (status, reason) => {
           const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
           if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
+          if (updated) this.notifyTurnEnd(store, conversation.id, runId, status, reason, text, turnStartSequence);
         },
       };
+      const memory = this.getMemory();
+      if (memory) {
+        active.memory = { note: memory.brief(conversation.id, text), snapshot: memory.snapshot() };
+        const firstSequence = store.getConversation(conversation.id)?.lastEventSequence ?? 0;
+        active.beforeFinish = async () => {
+          const reply = collectAssistantText(store, conversation.id, runId, firstSequence);
+          const project = store.getConversationProject(conversation.id);
+          const changes = await memory.remember({ conversationId: conversation.id, project, userText: text, assistantText: reply });
+          if (changes.length) publishEvent("memory.updated", { items: changes });
+        };
+      }
       this.runtime.startTurn(active);
       json(res, 202, acceptedResponse);
     } catch {
@@ -674,6 +1002,8 @@ export class AsterApi {
     if (!this.runtime.destroyCell) return sendError(res, 503, "hotcell_destroy_unavailable", "Hotcell cleanup is not configured");
 
     store.setCellStatus(conversation.id, "destroying");
+    // The cell's repository access ends with the conversation.
+    store.revokeGitHubGrant(conversation.id);
     if (conversation.activeRunId) {
       for (const approval of store.cancelPendingApprovals(conversation.id)) {
         const waiter = this.waiters.get(approval.id);
@@ -693,6 +1023,56 @@ export class AsterApi {
       store.setCellStatus(conversation.id, "cleanup_pending");
       sendError(res, 503, "cleanup_pending", "Cell cleanup is pending; retry DELETE to revoke credentials and remove the cell");
     }
+  }
+
+  /** The conversation's cell id when it can take control requests; otherwise sends the error. */
+  private readyCell(res: ServerResponse, store: AsterStore, conversationId: string): string | undefined {
+    const mapping = store.getCellMapping(conversationId);
+    if (mapping?.status === "paused") {
+      sendError(res, 409, "conversation_paused", "Conversation is paused; resume it first");
+      return undefined;
+    }
+    if (!mapping?.cellId || mapping.status !== "ready") {
+      sendError(res, 409, "conversation_cell_unavailable", "Conversation cell is not available");
+      return undefined;
+    }
+    return mapping.cellId;
+  }
+
+  /** Switch the cell session first, then the record, so a failed switch leaves both on the old model. */
+  private async switchModel(
+    res: ServerResponse,
+    store: AsterStore,
+    conversation: AsterConversation,
+    model: string,
+  ): Promise<AsterConversation | undefined> {
+    if (conversation.activeRunId) {
+      sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
+      return undefined;
+    }
+    const cell = this.readyCell(res, store, conversation.id);
+    if (!cell) return undefined;
+    if (!this.runtime.setModel) {
+      sendError(res, 503, "model_switch_unavailable", "Model switching is not configured");
+      return undefined;
+    }
+    try {
+      await this.runtime.setModel(cell, model);
+    } catch {
+      sendError(res, 503, "model_switch_failed", "The conversation's model could not be switched");
+      return undefined;
+    }
+    if (!store.setConversationModel(conversation.id, model)) {
+      sendError(res, 409, "conversation_busy", "A turn is already active for this conversation");
+      return undefined;
+    }
+    try {
+      const sessionPath = resolve(sessionsDir(), conversation.sessionId + ".json");
+      const sessionFile = await loadSession(sessionPath);
+      sessionFile.model = model;
+      await saveSession(sessionFile);
+    } catch { /* the host session copy is informational; the cell owns the live session */ }
+    return store.getConversation(conversation.id);
   }
 
   private async cancelConversation(res: ServerResponse, store: AsterStore, conversation: AsterConversation): Promise<void> {
@@ -812,8 +1192,25 @@ function parseCursor(header: string | string[] | undefined, query: string | null
   return Number.isSafeInteger(cursor) ? cursor : undefined;
 }
 
-function publicConversation(conversation: AsterConversation): Record<string, unknown> {
+/** The assistant's streamed reply for one run, rebuilt from its journaled deltas. */
+function collectAssistantText(store: AsterStore, conversationId: string, runId: string, after: number): string {
+  let text = "";
+  let cursor = after;
+  for (;;) {
+    const events = store.eventsAfter(conversationId, cursor, 500);
+    if (events.length === 0) break;
+    for (const event of events) {
+      if (event.runId === runId && event.type === "assistant.delta" && typeof event.data.text === "string") text += event.data.text;
+    }
+    cursor = events.at(-1)!.sequence;
+    if (text.length > 20_000) break;
+  }
+  return text;
+}
+
+function publicConversation(conversation: AsterConversation, project?: AsterConversationProject): Record<string, unknown> {
   return {
+    ...(project ? { kind: project.kind, repository: project.repository, branch: project.branch } : {}),
     conversationId: conversation.id,
     workspaceId: conversation.workspaceId,
     model: conversation.model,
@@ -837,6 +1234,33 @@ function publicApproval(approval: import("./aster-store.js").AsterApproval): Rec
     expiresAt: new Date(approval.expiresAt).toISOString(),
     decision: approval.decision,
   };
+}
+
+/**
+ * Models a conversation may use. With the OpenRouter catalog, only tool-calling models
+ * are offered: the cell agent needs tools to do anything.
+ */
+async function selectableModels(config: AsterServerConfig): Promise<AsterModelInfo[]> {
+  if (config.modelCatalog === "fixed") return config.models.map((id) => ({ id }));
+  const catalog = await loadOpenRouterCatalog();
+  return catalog
+    .filter((model) => model.supports.tools)
+    .map((model) => ({
+      id: model.id,
+      ...(model.name ? { name: model.name } : {}),
+      contextWindow: model.contextWindow,
+      inputPerMtok: model.pricing.inputPerMtok,
+      outputPerMtok: model.pricing.outputPerMtok,
+      ...(model.created !== undefined ? { created: model.created } : {}),
+      reasoning: model.supports.reasoning,
+      vision: model.supports.vision === true,
+    }));
+}
+
+async function isSelectableModel(config: AsterServerConfig, model: string): Promise<boolean> {
+  if (!model.trim() || model.length > 200) return false;
+  if (config.modelCatalog === "fixed") return config.models.includes(model);
+  return (await selectableModels(config)).some((entry) => entry.id === model);
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {

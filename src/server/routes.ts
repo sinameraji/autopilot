@@ -35,7 +35,10 @@ import { redactLikelySecrets } from "./aster-tools.js";
 
 function createHotcellAsterRuntime(): AsterApiRuntime | undefined {
   try {
-    return new AsterHotcellRuntime(HotcellProvider.fromEnvironment());
+    const idlePauseMs = Number(process.env.AUTOPILOT_ASTER_IDLE_PAUSE_MS ?? 15 * 60 * 1000);
+    return new AsterHotcellRuntime(HotcellProvider.fromEnvironment(), {
+      idlePauseMs: Number.isFinite(idlePauseMs) && idlePauseMs >= 0 ? idlePauseMs : 15 * 60 * 1000,
+    });
   } catch (error) {
     if (error instanceof HotcellProviderError && error.code === "hotcell_not_configured") return undefined;
     throw error;
@@ -229,6 +232,12 @@ export function setupRoutes(config: KimiConfig, options: { asterRuntime?: AsterA
     startTurn: (turn) => turn.finish("failed", "hotcell_unavailable"),
     cancelRun: () => {},
   });
+  if (!options.asterRuntime) {
+    // Repository-scoped GitHub access for code cells (no-op unless configured).
+    void asterApi.startGitHubProxy().catch((error: unknown) => {
+      process.stderr.write(`aster: GitHub proxy failed to start: ${error instanceof Error ? error.message : String(error)}\n`);
+    });
+  }
 
   const wakeScheduler = new RunWakeScheduler({
     onWake: async (event: RunWakeEvent) => {

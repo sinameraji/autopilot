@@ -75,15 +75,46 @@ test("fails closed when Hotcell API auth or the microVM driver is unavailable", 
   assert.equal(noDriver.creates, 0);
 });
 
-test("refuses public plain-HTTP controls and the container driver", () => {
+test("refuses public plain-HTTP controls and unknown drivers", () => {
   assert.throws(
     () => new HotcellProvider({ ...config, endpoint: "http://hotcell.example:4750" }, () => new FakeHotcellClient()),
     (error: unknown) => error instanceof HotcellProviderError && error.code === "insecure_hotcell_endpoint",
   );
   assert.throws(
-    () => new HotcellProvider({ ...config, driver: "container" as "applevz" }, () => new FakeHotcellClient()),
+    () => new HotcellProvider({ ...config, driver: "docker" as "applevz" }, () => new FakeHotcellClient()),
     (error: unknown) => error instanceof HotcellProviderError && error.code === "unsafe_hotcell_driver",
   );
+});
+
+test("container cells can opt into networking, any-model egress, and idle sleep", async () => {
+  const fake = new FakeHotcellClient();
+  fake.drivers = ["container"];
+  const provider = new HotcellProvider(
+    { ...config, driver: "container", networked: true, anyModel: true, sleepAfterMs: 900_000 },
+    () => fake,
+  );
+  await provider.createConversationCell({ conversationId: CONVERSATION_ID, workspaceId: "work", model: "openai/gpt-4.1" });
+
+  assert.equal(fake.options?.driver, "container");
+  assert.equal(fake.options?.networked, true);
+  assert.equal(fake.options?.sleepAfter, 900_000);
+  assert.deepEqual(fake.options?.egress, { providers: ["openrouter"], spendCapUsd: 10, ttlMs: 86_400_000 });
+});
+
+test("fromEnvironment reads the container, networking, model, and sleep settings", () => {
+  const provider = HotcellProvider.fromEnvironment({
+    AUTOPILOT_HOTCELL_ENDPOINT: "http://127.0.0.1:4750",
+    AUTOPILOT_HOTCELL_API_KEY: "k",
+    AUTOPILOT_HOTCELL_DRIVER: "container",
+    AUTOPILOT_HOTCELL_NETWORKED: "true",
+    AUTOPILOT_HOTCELL_ANY_MODEL: "true",
+    AUTOPILOT_HOTCELL_SLEEP_AFTER_MS: "900000",
+  });
+  const resolved = (provider as unknown as { config: HotcellProviderConfig }).config;
+  assert.equal(resolved.driver, "container");
+  assert.equal(resolved.networked, true);
+  assert.equal(resolved.anyModel, true);
+  assert.equal(resolved.sleepAfterMs, 900_000);
 });
 
 test("destroy revokes every scoped token before deleting the volume and is idempotent", async () => {
