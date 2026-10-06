@@ -6,7 +6,7 @@ import type { WorkerFinding, WorkerResultMessage } from "../agent/messages.js";
 import { validateModelId } from "../agent/client.js";
 import { getAppVersion, PACKAGE_NAME, CLI_NAME } from "../util/version.js";
 import { getModelOrInfer } from "../models/registry.js";
-import { chunkPayload, getRepositorySnapshot } from "./hotcell-snapshot.js";
+import { chunkPayload, getRepositorySnapshot, getWorkingTreeArchive } from "./hotcell-snapshot.js";
 import { CACHED_WORKER_DIR, ensureWorkerBackup } from "./hotcell-worker-cache.js";
 
 const execFileAsync = promisify(execFile);
@@ -33,6 +33,8 @@ const READ_REPO_ROOT = ['REPO_ROOT="$(cat /tmp/autopilot-repo-root)"', 'test -n 
 /** Repo is parked here while a cached runtime is restored into /workspace. */
 const REPO_ASIDE = "/tmp/autopilot-repo-aside";
 const SNAPSHOT_PREFIX = "/workspace/.autopilot-snapshot-";
+/** Where a streamed working-tree archive is unpacked inside the sandbox. */
+const ARCHIVE_ROOT = "/workspace/repo";
 const MAX_PARALLEL_WORKERS = 3;
 /** Cumulative input-token budget bounds for a research worker. The Hotcell
  *  egress spend cap is the hard money stop; this keeps the worker's own
@@ -64,6 +66,9 @@ export interface HotcellWorkerOptions {
   maxInputTokens?: number;
   /** Use the locally cached runtime backup (default true; KIMIFLARE_WORKER_CACHE=0 disables). */
   useRuntimeCache?: boolean;
+  /** Stream the working tree in rather than cloning origin (default true;
+   *  KIMIFLARE_WORKER_ARCHIVE=0 forces cloning). */
+  useArchive?: boolean;
   maxParallel?: number;
   cwd?: string;
   hotcellCommand?: string;
@@ -111,7 +116,12 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
   const timeoutMs = options.timeoutMs ?? DEFAULT_CELL_TIMEOUT_MS;
 
   try {
-    const repo = await getRepositorySnapshot(cwd);
+    // Default: stream your working tree in (no clone, no credentials, no
+    // push — works for private repos). Trees too large to copy fall back to
+    // cloning origin and applying a patch of local changes.
+    const useArchive = options.useArchive ?? process.env.KIMIFLARE_WORKER_ARCHIVE !== "0";
+    const tree = useArchive ? await getWorkingTreeArchive(cwd) : { archive: null, files: 0, bytes: 0 };
+    const repo = tree.archive ? null : await getRepositorySnapshot(cwd);
     const useCache = options.useRuntimeCache ?? process.env.KIMIFLARE_WORKER_CACHE !== "0";
     // Build or look up the cached runtime while the sandbox is created.
     const backupPromise = useCache
@@ -119,8 +129,9 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       : Promise.resolve(null);
     const cellName = "autopilot-" + workerId;
     const created = await execute(command, [
-      "create", "-n", "1", "--name", cellName, "--repo", repo.url,
-      "--ref", repo.ref, "--egress", "--egress-spend-cap", String(options.budgetUsd),
+      "create", "-n", "1", "--name", cellName,
+      ...(repo ? ["--repo", repo.url, "--ref", repo.ref] : []),
+      "--egress", "--egress-spend-cap", String(options.budgetUsd),
       "--memory", "1024", "--cpus", "2",
     ], { cwd, signal: options.signal, timeoutMs: 300_000 });
     cellId = parseCellId(created.stdout);
@@ -165,11 +176,13 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
     };
     const run = (args: string[], timeout = setupTimeoutMs) => execute(command, args, { cwd, signal: options.signal, timeoutMs: timeout });
 
-    // 1. Locate the clone; with a cached runtime, park it and restore the
-    //    runtime into /workspace (a restore replaces /workspace wholesale).
+    // 1. Clone mode: locate the clone and, with a cached runtime, park it
+    //    (a restore replaces /workspace wholesale). Then restore the runtime.
     const backupId = await backupPromise;
-    const locate = await run(["exec", cellId, [...LOCATE_REPO_ROOT, ...(backupId ? [`mv "$(cat /tmp/autopilot-repo-root)" ${REPO_ASIDE}`] : [])].join(" && "), "--cwd", "/workspace"]);
-    if (locate.code !== 0 || locate.timedOut || locate.aborted) return (result = setupFailed("locating the cloned repository", locate));
+    if (repo) {
+      const locate = await run(["exec", cellId, [...LOCATE_REPO_ROOT, ...(backupId ? [`mv "$(cat /tmp/autopilot-repo-root)" ${REPO_ASIDE}`] : [])].join(" && "), "--cwd", "/workspace"]);
+      if (locate.code !== 0 || locate.timedOut || locate.aborted) return (result = setupFailed("locating the cloned repository", locate));
+    }
     let usedCache = false;
     if (backupId) {
       const restored = await run(["restore", cellId, backupId], 120_000);
@@ -177,38 +190,51 @@ export async function runHotcellWorker(options: HotcellWorkerOptions): Promise<W
       if (!usedCache && (restored.timedOut || restored.aborted)) return (result = setupFailed("restoring the cached subagent runtime", restored));
     }
 
-    // 2. Carry your local changes in as a patch (written after the restore).
-    const chunks = repo.patch ? chunkPayload(repo.patch) : [];
+    // 2. Stream in the working-tree archive, or the local-changes patch
+    //    (written after the restore so it isn't wiped).
+    const payload = tree.archive ?? repo?.patch ?? null;
+    const chunks = payload ? chunkPayload(payload) : [];
     for (const [i, chunk] of chunks.entries()) {
       const wrote = await run(["files", "write", cellId, `${SNAPSHOT_PREFIX}${String(i).padStart(4, "0")}`, "--content", chunk], 60_000);
-      if (wrote.code !== 0 || wrote.timedOut || wrote.aborted) return (result = setupFailed("copying your local changes", wrote));
+      if (wrote.code !== 0 || wrote.timedOut || wrote.aborted) return (result = setupFailed("copying your working tree", wrote));
     }
 
-    // 3. Pin the commit, apply local changes, and make sure the runtime exists.
-    //    Runs in its own exec (not Hotcell's best-effort --setup hook) so
-    //    failures surface, with its own timeout separate from research.
-    const setupCommand = [
-      ...(backupId ? [`mv ${REPO_ASIDE} "$(cat /tmp/autopilot-repo-root)"`] : []),
-      ...READ_REPO_ROOT,
-      `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
-      `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
-      ...(chunks.length
-        ? [
-            `cat ${SNAPSHOT_PREFIX}* | base64 -d > /tmp/autopilot-snapshot.patch`,
-            `rm -f ${SNAPSHOT_PREFIX}*`,
-            'git -C "$REPO_ROOT" apply --binary --whitespace=nowarn /tmp/autopilot-snapshot.patch',
-          ]
-        : []),
-      usedCache
-        ? `test -x ${WORKER_BIN}`
-        : `npm install --prefix ${CACHED_WORKER_DIR} --no-audit --no-fund --loglevel=error ${shellQuote(workerPackage)} 1>&2`,
-    ].join(" && ");
+    // 3. Unpack (archive) or pin + patch (clone), and make sure the runtime
+    //    exists. Its own exec and timeout, separate from research.
+    const runtimeStep = usedCache
+      ? `test -x ${WORKER_BIN}`
+      : `npm install --prefix ${CACHED_WORKER_DIR} --no-audit --no-fund --loglevel=error ${shellQuote(workerPackage)} 1>&2`;
+    const setupCommand = (repo
+      ? [
+          ...(backupId ? [`mv ${REPO_ASIDE} "$(cat /tmp/autopilot-repo-root)"`] : []),
+          ...READ_REPO_ROOT,
+          `git -C "$REPO_ROOT" fetch --quiet origin ${shellQuote(repo.commit)}`,
+          `git -C "$REPO_ROOT" checkout --quiet --detach ${shellQuote(repo.commit)}`,
+          ...(chunks.length
+            ? [
+                `cat ${SNAPSHOT_PREFIX}* | base64 -d > /tmp/autopilot-snapshot.patch`,
+                `rm -f ${SNAPSHOT_PREFIX}*`,
+                'git -C "$REPO_ROOT" apply --binary --whitespace=nowarn /tmp/autopilot-snapshot.patch',
+              ]
+            : []),
+          runtimeStep,
+        ]
+      : [
+          `mkdir -p ${ARCHIVE_ROOT}`,
+          `cat ${SNAPSHOT_PREFIX}* | base64 -d | tar -xzf - -C ${ARCHIVE_ROOT}`,
+          `rm -f ${SNAPSHOT_PREFIX}*`,
+          `printf "%s" ${ARCHIVE_ROOT} > /tmp/autopilot-repo-root`,
+          runtimeStep,
+        ]).join(" && ");
     const setup = await run(["exec", cellId, setupCommand, "--cwd", "/workspace"]);
     if (setup.code !== 0 || setup.timedOut || setup.aborted) {
       return (result = setupFailed(usedCache ? "preparing the repository" : `installing ${workerPackage}`, setup));
     }
-    const snapshotNote = repo.note
-      ?? (repo.changedFiles > 0 ? `Included your ${repo.changedFiles} local change${repo.changedFiles === 1 ? "" : "s"} on top of origin/${repo.ref}.` : undefined);
+    const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+    const snapshotNote = repo
+      ? (useArchive ? `Your working tree (${mb(tree.bytes)} compressed) was too large to copy, so the subagent cloned origin/${repo.ref}` : `The subagent cloned origin/${repo.ref}`) +
+        (repo.note ? `. ${repo.note}` : repo.changedFiles > 0 ? ` and applied your ${repo.changedFiles} local change${repo.changedFiles === 1 ? "" : "s"}.` : ".")
+      : `The subagent saw your current working tree (${tree.files} file${tree.files === 1 ? "" : "s"}, uncommitted changes included).`;
 
     const prompt = [
       "You are an isolated, read-only research worker. You cannot edit files, run shell commands, push, publish, or call write-capable integrations.",
