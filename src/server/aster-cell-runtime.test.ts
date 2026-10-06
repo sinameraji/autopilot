@@ -23,6 +23,7 @@ interface FakeCellState {
   started: number;
   modelSwitches?: string[];
   commands?: string[];
+  activeRunId?: string | null;
 }
 
 function fakeSandbox(state: FakeCellState) {
@@ -40,6 +41,9 @@ function fakeSandbox(state: FakeCellState) {
       const respond = (value: unknown) => ({ exitCode: 0, stdout: JSON.stringify(value) + "\n", stderr: "", success: true });
       if (request.method === "GET" && request.path === "/health") {
         return respond(state.processes.some((proc) => proc.status === "running") ? { ok: true } : { error: "not_ready" });
+      }
+      if (request.method === "GET" && request.path === "/status") {
+        return respond({ initialized: true, sessionId: "s", activeRunId: state.activeRunId ?? null, cursor: state.events.at(-1)?.cursor ?? 0 });
       }
       if (request.method === "GET" && request.path.startsWith("/events?after=")) {
         const after = Number(request.path.slice("/events?after=".length));
@@ -450,6 +454,41 @@ describe("Aster Hotcell runtime", () => {
     });
     assert.equal(creates, 2);
     assert.equal(paused.at(-1), "idle-two-hours");
+  });
+
+  it("re-attaches to a turn after a server restart without re-sending the prompt", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD", pollIntervalMs: 5 });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {}, project: { kind: "chat" },
+    });
+    const state = [...cells.values()][0]!;
+    // The cell kept working while the server was down; its journal has the rest of the turn.
+    state.events.push(
+      { cursor: 1, runId: "r", event: { type: "message.delta", text: "already said" } },
+      { cursor: 2, runId: "r", event: { type: "message.delta", text: " and finished" } },
+      { cursor: 3, runId: "r", event: { type: "session.end", reason: "complete" } },
+    );
+    const turn = fakeTurn({ cellId, cellEventCursor: 1 });
+    runtime.resumeTurn(turn);
+    await waitFor(() => turn.finished.length > 0);
+    assert.deepEqual(turn.finished, ["completed"]);
+    assert.deepEqual(state.prompts, [], "no prompt is re-sent");
+    assert.deepEqual(turn.events.filter((e) => e.type === "assistant.delta").map((e) => e.data?.text), [" and finished"], "resumes after the saved cursor");
+  });
+
+  it("ends a turn the cell no longer runs instead of leaving the chat busy", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD", pollIntervalMs: 1 });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {}, project: { kind: "chat" },
+    });
+    const turn = fakeTurn({ cellId, cellEventCursor: 0 });
+    runtime.resumeTurn(turn);
+    await waitFor(() => turn.finished.length > 0, 60_000);
+    assert.deepEqual(turn.finished, ["failed"]);
   });
 
   it("switches the cell session's model through the bridge", async () => {

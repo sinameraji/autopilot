@@ -57,6 +57,8 @@ export interface AsterApiRuntime {
   pauseCell?: (cellId: string) => Promise<void>;
   resumeCell?: (cellId: string) => Promise<void>;
   startTurn: (turn: AsterTurnStart) => void;
+  /** Re-attach to a turn the cell kept running across a server restart. */
+  resumeTurn?: (turn: AsterTurnStart) => void;
   cancelRun: (runId: string) => void;
   setModel?: (cellId: string, model: string) => Promise<void>;
   listCheckpoints?: (cellId: string) => Promise<AsterCheckpointInfo[]>;
@@ -449,6 +451,15 @@ export class AsterApi {
           } else if (run.status === "needs_input") {
             runs.transition(run.id, "cancelled", "approval_expired_on_restart");
             store.updateConversationStatus(conversation.id, run.id, "interrupted", { reason: "approval_expired_on_restart" });
+          } else {
+            // Still running in its cell: re-attach instead of leaving the conversation busy forever.
+            const mapping = store.getCellMapping(conversation.id);
+            if (mapping?.cellId && this.runtime.resumeTurn) {
+              this.runtime.resumeTurn(this.cellTurn(store, conversation, run.id, mapping.cellId, mapping.eventCursor, run.task ?? ""));
+            } else {
+              runs.transition(run.id, "failed", "server_restarted");
+              store.updateConversationStatus(conversation.id, run.id, "interrupted", { reason: "server_restart_recovery" });
+            }
           }
         }
       } finally {
@@ -456,6 +467,40 @@ export class AsterApi {
       }
     })();
     return this.recovery;
+  }
+
+  /** A turn handle for re-attaching to a cell turn after a restart (no prompt is sent). */
+  private cellTurn(store: AsterStore, conversation: AsterConversation, runId: string, cellId: string, cursor: number, userText: string): AsterTurnStart {
+    const publishEvent = (type: string, data: Record<string, unknown>) => {
+      store.appendEvent(conversation.id, runId, type, data);
+    };
+    return {
+      runId,
+      conversation,
+      cellId,
+      cellEventCursor: cursor,
+      userText,
+      sessionFile: {} as SessionFile,
+      messages: [],
+      executor: new ToolExecutor([]),
+      allowedTools: new Set(),
+      maxToolIterations: null,
+      maxRuntimeMs: null,
+      askPermission: async () => "deny",
+      publishEvent,
+      onCellCursor: (next) => store.advanceCellEventCursor(conversation.id, next),
+      finish: (status, reason) => {
+        const runs = new RunStore();
+        try {
+          const run = runs.getRun(runId);
+          if (run && ["queued", "running", "waiting", "needs_input"].includes(run.status)) runs.transition(runId, status, reason ?? status);
+        } catch { /* run bookkeeping is best-effort */ } finally {
+          runs.close();
+        }
+        const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
+        if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
+      },
+    };
   }
 
   private async createConversation(

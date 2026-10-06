@@ -16,6 +16,7 @@ const INSTALLED_RUNTIME_PACKAGE = "/opt/autopilot/node_modules/autopilot-ai/pack
 const NOTES_FILE = `${CELL_STATE_DIR}/pending-notes`;
 const MEMORY_FILE = `${CELL_STATE_DIR}/memory.md`;
 const MEMORY_EXTRACTION_TIMEOUT_MS = 15_000;
+const LIVENESS_CHECK_MS = 20_000;
 const ARTIFACTS_DIR = `${CELL_WORKSPACE}/artifacts`;
 const MAX_ARTIFACTS = 500;
 const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
@@ -257,6 +258,16 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     });
   }
 
+  /**
+   * Re-attach to a turn that was running when the server restarted. The cell kept working
+   * and journaled its events, so this only resumes reading them from the saved cursor.
+   */
+  resumeTurn(turn: AsterTurnStart): void {
+    void this.runTurn(turn, { resume: true }).catch(() => {
+      turn.finish("failed", "cell_runtime_error");
+    });
+  }
+
   cancelRun(runId: string): void {
     const active = this.activeRuns.get(runId);
     if (!active) return;
@@ -264,7 +275,7 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     void this.controlById(active.cellId, "POST", "/rpc", { id: randomUUID(), type: "abort" }).catch(() => {});
   }
 
-  private async runTurn(turn: AsterTurnStart): Promise<void> {
+  private async runTurn(turn: AsterTurnStart, options: { resume?: boolean } = {}): Promise<void> {
     const { cellId, runId } = turn;
     let cursor = turn.cellEventCursor;
     let stopped = false;
@@ -282,6 +293,7 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
 
     let artifactsBefore: AsterArtifact[] = [];
     try {
+      if (options.resume) throw new Error("resume");
       // An idle cell may have been paused (cold-stopped on the container driver):
       // make sure the runtime and bridge are back before prompting.
       await this.ensureReady(cellId);
@@ -295,11 +307,19 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
       artifactsBefore = await this.listArtifacts(cellId).catch(() => []);
       await this.controlById(cellId, "POST", "/rpc", { id: runId, type: "prompt", message });
       if (note) await this.clearNotes(cell);
-    } catch {
-      finish("failed", "cell_prompt_rejected");
-      return;
+    } catch (error) {
+      if (!(error instanceof Error && error.message === "resume")) {
+        finish("failed", "cell_prompt_rejected");
+        return;
+      }
+      artifactsBefore = await this.listArtifacts(cellId).catch(() => []);
     }
 
+    // Liveness: if the cell reports no active run and has produced nothing for a while,
+    // the turn was lost (e.g. the cell was stopped mid-turn); end it rather than leave the
+    // conversation busy forever.
+    let quietPolls = 0;
+    const quietLimit = Math.max(5, Math.ceil(LIVENESS_CHECK_MS / this.pollIntervalMs));
     while (!stopped) {
       await sleep(this.pollIntervalMs);
       if (stopped) break;
@@ -312,6 +332,18 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
       } catch {
         continue; // transient cell-control failure; keep polling until stopped or finished
       }
+      if (events.length === 0) {
+        if (++quietPolls >= quietLimit) {
+          quietPolls = 0;
+          const status = await this.controlById(cellId, "GET", "/status").catch(() => undefined) as { activeRunId?: string | null } | undefined;
+          if (status && !status.activeRunId) {
+            outcome = { status: "failed", reason: "cell_turn_lost" };
+            break;
+          }
+        }
+        continue;
+      }
+      quietPolls = 0;
       for (const entry of events) {
         cursor = Math.max(cursor, entry.cursor);
         turn.onCellCursor?.(cursor);
