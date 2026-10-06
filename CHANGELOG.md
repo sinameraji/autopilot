@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.2](https://github.com/sinameraji/autopilot/compare/v1.19.1...v1.19.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **aster:** chunk large Hotcell control payloads ([6125fe3](https://github.com/sinameraji/autopilot/commit/6125fe3691c2ffaf29d46a41620eb50838ae22ce))
+* **aster:** chunk large Hotcell control payloads ([0cdb9f3](https://github.com/sinameraji/autopilot/commit/0cdb9f307c6ca3aac2ffced34e641acb55298207))
+
 ## [1.19.1](https://github.com/sinameraji/autopilot/compare/v1.19.0...v1.19.1) (2026-10-06)
 
 
