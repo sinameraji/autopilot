@@ -10,6 +10,10 @@ const execFileAsync = promisify(execFile);
  *  the subagent sees the pushed base only, and the coordinator is told so. */
 export const MAX_SNAPSHOT_PATCH_BYTES = 4 * 1024 * 1024;
 
+/** Largest compressed working-tree archive streamed into a sandbox. Larger
+ *  trees fall back to cloning origin plus a patch of local changes. */
+export const MAX_ARCHIVE_BYTES = 24 * 1024 * 1024;
+
 /** Never copied into a sandbox, even when untracked and not gitignored. */
 const SECRET_EXCLUDES = [
   ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
@@ -123,8 +127,50 @@ export async function getRepositorySnapshot(cwd: string): Promise<RepositorySnap
   }
 }
 
-/** Split a base64 payload into argv-safe chunks for `hotcell files write`. */
-export function chunkPayload(base64: string, chunkSize = 192 * 1024): string[] {
+export interface WorkingTreeArchive {
+  /** gzip'd tar of the working tree (base64), or null when over MAX_ARCHIVE_BYTES. */
+  archive: string | null;
+  files: number;
+  bytes: number;
+}
+
+/**
+ * Pack exactly what the subagent should see — tracked files with your edits
+ * plus untracked, non-ignored files, minus secrets (even tracked ones) — into
+ * a tar.gz, built from a throwaway index so your staging area is untouched.
+ * Streaming this into the sandbox needs no clone, no credentials, and no push,
+ * so it works for private repositories and repos without a remote.
+ */
+export async function getWorkingTreeArchive(cwd: string, limitBytes = MAX_ARCHIVE_BYTES): Promise<WorkingTreeArchive> {
+  const root = (await git(["rev-parse", "--show-toplevel"], cwd).catch(() => "")).trim();
+  if (!root) throw new Error("Subagents need to run inside a Git repository.");
+  const scratch = await mkdtemp(join(tmpdir(), "autopilot-archive-"));
+  try {
+    const env = { GIT_INDEX_FILE: join(scratch, "index") };
+    const hasHead = await git(["rev-parse", "--verify", "-q", "HEAD"], root).then(() => true, () => false);
+    await git(hasHead ? ["read-tree", "HEAD"] : ["read-tree", "--empty"], root, env);
+    await git(["add", "-A", "--", ".", ...SECRET_EXCLUDES], root, env);
+    // Drop secrets that are tracked, too: the archive is a fresh copy.
+    await git(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ...SECRET_EXCLUDES.map((p) => p.replace(":(exclude,glob)", ":(glob)"))], root, env);
+    const tree = (await git(["write-tree"], root, env)).trim();
+    const files = (await git(["ls-tree", "-r", "--name-only", tree], root)).split("\n").filter(Boolean).length;
+    const tarball = await gitBuffer(["archive", "--format=tar.gz", tree], root);
+    return {
+      archive: tarball.byteLength > limitBytes ? null : tarball.toString("base64"),
+      files,
+      bytes: tarball.byteLength,
+    };
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/** Split a base64 payload into chunks for `hotcell files write`, which hands
+ *  the content to the sandbox as one shell argument after its own encoding:
+ *  Linux caps one argument at 128 KiB (MAX_ARG_STRLEN), and measured writes
+ *  fail from 96 KiB of content. 64 KiB leaves a wide margin. */
+export const PAYLOAD_CHUNK_CHARS = 64 * 1024;
+export function chunkPayload(base64: string, chunkSize = PAYLOAD_CHUNK_CHARS): string[] {
   const chunks: string[] = [];
   for (let i = 0; i < base64.length; i += chunkSize) chunks.push(base64.slice(i, i + chunkSize));
   return chunks;

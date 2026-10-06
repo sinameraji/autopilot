@@ -24,10 +24,13 @@ let savedCacheEnv: string | undefined;
 before(() => {
   savedCacheEnv = process.env.KIMIFLARE_WORKER_CACHE;
   process.env.KIMIFLARE_WORKER_CACHE = "0";
+  // These tests cover the clone path; archive mode has its own tests below.
+  process.env.KIMIFLARE_WORKER_ARCHIVE = "0";
 });
 after(() => {
   if (savedCacheEnv === undefined) delete process.env.KIMIFLARE_WORKER_CACHE;
   else process.env.KIMIFLARE_WORKER_CACHE = savedCacheEnv;
+  delete process.env.KIMIFLARE_WORKER_ARCHIVE;
 });
 const cellId = "12345678-1234-1234-1234-123456789abc";
 
@@ -517,7 +520,7 @@ describe("Hotcell worker helpers", () => {
         task: "Research", model: "openai/gpt-6-luna", budgetUsd: 0.25, cwd, processRunner: runner, useRuntimeCache: true,
       });
       assert.equal(result.status, "completed");
-      assert.match(result.snapshotNote ?? "", /Included your 1 local change on top of origin\/main/);
+      assert.match(result.snapshotNote ?? "", /cloned origin\/main and applied your 1 local change/);
 
       const workerCalls = calls.filter((a) => a.includes(cellId) || a[0] === "files");
       const kinds = workerCalls.map((a) => (a[0] === "exec" ? (a[2]!.includes("--format json") ? "research" : a[2]!.includes("autopilot-repo-aside") && a[2]!.includes("find /workspace") ? "locate" : "setup") : a[0]));
@@ -534,5 +537,33 @@ describe("Hotcell worker helpers", () => {
       if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
       else process.env.XDG_CONFIG_HOME = savedXdg;
     }
+  });
+
+  it("streams the working tree in by default: no clone, so private repos work", async () => {
+    const cwd = await makeRepo();
+    execFileSync("git", ["remote", "set-url", "origin", "https://github.com/example/private.git"], { cwd });
+    await writeFile(join(cwd, "README.md"), "edited locally\n");
+    const calls: string[][] = [];
+    const runner: HotcellProcessRunner = async (_exe, args) => {
+      calls.push(args);
+      if (args[0] === "create") return { code: 0, stdout: cellId, stderr: "", aborted: false };
+      if (args[0] === "exec" && args[2]?.includes("--format json")) return { code: 0, stdout: JSON.stringify({ text: "found it" }), stderr: "", aborted: false };
+      if (args[0] === "stats") return { code: 0, stdout: "Cost: 0.01", stderr: "", aborted: false };
+      return { code: 0, stdout: "", stderr: "", aborted: false };
+    };
+    const result = await runHotcellWorker({
+      task: "Research", model: "openai/gpt-6-luna", budgetUsd: 0.25, cwd, processRunner: runner, useArchive: true, useRuntimeCache: false,
+    });
+    assert.equal(result.status, "completed");
+    assert.match(result.snapshotNote ?? "", /saw your current working tree \(1 file, uncommitted changes included\)/);
+    const create = calls.find((a) => a[0] === "create")!;
+    assert.ok(!create.includes("--repo"), "no clone: works without GitHub credentials");
+    assert.deepEqual(calls.map((a) => a[0]), ["create", "files", "exec", "exec", "stats", "rm"]);
+    const setup = calls.filter((a) => a[0] === "exec")[0]![2]!;
+    assert.match(setup, /cat \/workspace\/.autopilot-snapshot-\* \| base64 -d \| tar -xzf - -C \/workspace\/repo/);
+    assert.match(setup, /printf "%s" \/workspace\/repo > \/tmp\/autopilot-repo-root/);
+    assert.ok(!setup.includes("git -C"), "no git fetch or checkout");
+    const research = calls.filter((a) => a[0] === "exec")[1]![2]!;
+    assert.match(research, /REPO_ROOT="\$\(cat \/tmp\/autopilot-repo-root\)"/);
   });
 });
