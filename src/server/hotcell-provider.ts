@@ -95,6 +95,9 @@ export class HotcellProvider {
     model: string;
     /** "code" cells also get GitHub (API and git) through the credential gateway. */
     kind?: "chat" | "code";
+    /** Code cells using Aster's repository-scoped GitHub proxy skip Hotcell's GitHub gateway. */
+    githubViaProxy?: boolean;
+    env?: Record<string, string>;
   }): Promise<Sandbox> {
     if (!isUuid(input.conversationId) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(input.workspaceId) || !input.model.trim()) {
       throw new HotcellProviderError("Invalid Hotcell conversation provisioning input", "invalid_provisioning_input");
@@ -111,13 +114,14 @@ export class HotcellProvider {
     if (!info.egressProviders.includes("openrouter")) {
       throw new HotcellProviderError("Hotcell OpenRouter credential gateway is unavailable", "hotcell_egress_unavailable");
     }
-    if (input.kind === "code" && !info.egressProviders.includes("github")) {
+    if (input.kind === "code" && !input.githubViaProxy && !info.egressProviders.includes("github")) {
       throw new HotcellProviderError("Hotcell GitHub credential gateway is unavailable", "hotcell_github_unavailable");
     }
 
     const options: CreateOptions = {
       driver: this.config.driver,
       ...(this.config.image ? { image: this.config.image } : {}),
+      ...(input.env ? { env: input.env } : {}),
       networked: this.config.networked === true,
       persist: true,
       sleepAfter: this.config.sleepAfterMs ?? 0,
@@ -126,7 +130,7 @@ export class HotcellProvider {
       pidsLimit: this.config.pidsLimit,
       egressSpendCapUsd: this.config.spendCapUsd,
       egress: {
-        providers: input.kind === "code" ? ["openrouter", "github", "github-git"] : ["openrouter"],
+        providers: input.kind === "code" && !input.githubViaProxy ? ["openrouter", "github", "github-git"] : ["openrouter"],
         ...(this.config.anyModel ? {} : { models: [input.model] }),
         spendCapUsd: this.config.spendCapUsd,
         ttlMs: this.config.tokenTtlMs,

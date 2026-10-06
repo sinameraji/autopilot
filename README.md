@@ -319,7 +319,11 @@ autopilot
 
 `/subagents auto` is the default: on substantial tasks the agent is asked to look for independent parts and delegate them, and it decides whether delegation is worth it. `suggest` only hints at delegation for likely parallel work, and `off` disables harness guidance (you can still ask for subagents explicitly). Explicit requests to use subagents or to work without them always win. Set the policy with `/subagents`, `KIMIFLARE_SUBAGENT_POLICY`, or `subagentPolicy` in config.
 
-The harness never starts a subagent by itself: the agent calls the `subagent` tool, which always needs normal tool permission (one prompt covers a parallel batch) and obeys provider, read-only, spend, concurrency, and timeout limits. In Code Mode the `subagent` tool stays a direct tool next to `execute_code`. Jev is consulted only in `suggest` mode for substantial but ambiguous requests, receives at most 1,200 characters of redacted task text, and has a 4-second timeout.
+The harness never starts a subagent by itself: the agent calls the `subagent` tool, which always needs normal tool permission (one prompt covers a parallel batch) and obeys provider, read-only, spend, concurrency, and timeout limits. In Code Mode the `subagent` tool stays a direct tool next to `execute_code`. Jev (a fast yes/no decision model on OpenRouter) sharpens this: in `auto` mode it checks whether a substantial request has independent parts (strong delegation guidance at ≥80%, otherwise the softer nudge), and in `suggest` mode it decides whether to suggest at all. It receives at most 1,200 characters of redacted request text, runs alongside other pre-turn work, and any failure falls back to the default guidance.
+
+### Finishing the job
+
+When a substantial turn ends without the agent asking you anything, a Jev yes/no check asks whether it actually finished — or clearly explained a blocker — rather than stopping after a plan or "next I'll…". If it clearly didn't, the agent is told to continue (once per turn), so you don't have to type "go on". Typically under a second; OpenRouter only. Turn it off with `"completionCheck": false` in config or `KIMIFLARE_COMPLETION_CHECK=0`.
 
 ## Running shell commands yourself
 

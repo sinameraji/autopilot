@@ -69,6 +69,8 @@ export interface AsterCellProject {
   baseBranch?: string;
   /** Working branch created for this conversation. */
   branch?: string;
+  /** Aster's repository-scoped GitHub proxy (preferred over Hotcell's GitHub gateway). */
+  github?: { token: string; gitUrl: string; apiUrl: string };
 }
 
 export interface AsterArtifact {
@@ -158,6 +160,14 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
         workspaceId: input.workspaceId,
         model: input.model,
         ...(input.project ? { kind: input.project.kind } : {}),
+        ...(input.project?.github ? {
+          githubViaProxy: true,
+          env: {
+            ASTER_GITHUB_TOKEN: input.project.github.token,
+            ASTER_GITHUB_GIT_URL: input.project.github.gitUrl,
+            ASTER_GITHUB_API_URL: input.project.github.apiUrl,
+          },
+        } : {}),
       });
       try {
         cell = await create();
@@ -489,9 +499,11 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     await cell.mkdir(CELL_STATE_DIR, { parents: true });
     const clone = await cell.exec(
       `set -e; cd ${CELL_WORKSPACE}; ` +
-      `remote="\${GITHUB_BASE_URL%/github}/github-git/${repository}.git"; ` +
+      // Prefer Aster's repository-scoped proxy; fall back to Hotcell's GitHub gateway.
+      `if [ -n "$ASTER_GITHUB_GIT_URL" ]; then remote="$ASTER_GITHUB_GIT_URL/${repository}.git"; ` +
+      `else remote="\${GITHUB_BASE_URL%/github}/github-git/${repository}.git"; fi; ` +
       `git init -q; git remote add origin "$remote" 2>/dev/null || git remote set-url origin "$remote"; ` +
-      `git config credential.helper '!f() { echo username=x-access-token; echo "password=$GITHUB_API_KEY"; }; f'; ` +
+      `git config credential.helper '!f() { echo username=x-access-token; echo "password=\${ASTER_GITHUB_TOKEN:-$GITHUB_API_KEY}"; }; f'; ` +
       `git config user.name "Aster Autopilot"; git config user.email "autopilot@aster.invalid"; ` +
       `if git ls-remote --exit-code --heads origin '${baseBranch}' >/dev/null 2>&1; then ` +
       `git fetch -q origin '${baseBranch}'; git checkout -q -b '${branch}' FETCH_HEAD; ` +
@@ -625,7 +637,8 @@ function projectNote(project: AsterCellProject): string {
   return (
     `[Aster code chat. GitHub repository ${repository} is cloned at /workspace on branch ${branch} (from ${baseBranch}). ` +
     "Commit your work and push with `git push -u origin HEAD`; credentials are preconfigured, so never print or write tokens. " +
-    `To open a pull request: curl -s -X POST "$GITHUB_BASE_URL/repos/${repository}/pulls" -H "Authorization: Bearer $GITHUB_API_KEY" ` +
+    "Only this repository is reachable from here. " +
+    `To open a pull request: curl -s -X POST "\${ASTER_GITHUB_API_URL:-$GITHUB_BASE_URL}/repos/${repository}/pulls" -H "Authorization: Bearer \${ASTER_GITHUB_TOKEN:-$GITHUB_API_KEY}" ` +
     `-H "Accept: application/vnd.github+json" -d '{"title":"…","head":"${branch}","base":"${baseBranch}","body":"…"}'. ` +
     `${artifacts} The artifacts folder is not committed to the repository.]`
   );

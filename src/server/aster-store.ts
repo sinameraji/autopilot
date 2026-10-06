@@ -254,6 +254,13 @@ export class AsterStore {
         UNIQUE(credential_id, create_key_hash)
       );
       CREATE INDEX IF NOT EXISTS idx_aster_cells_lifecycle ON aster_cell_mappings(status, updated_at);
+      CREATE TABLE IF NOT EXISTS aster_github_grants (
+        conversation_id TEXT PRIMARY KEY,
+        token TEXT NOT NULL UNIQUE,
+        repository TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        revoked_at INTEGER
+      );
       CREATE TABLE IF NOT EXISTS aster_conversation_projects (
         conversation_id TEXT PRIMARY KEY,
         kind TEXT NOT NULL,
@@ -502,6 +509,32 @@ export class AsterStore {
       .get(conversationId) as { kind: string; repository: string | null; branch: string | null } | undefined;
     if (!row) return undefined;
     return { kind: row.kind === "code" ? "code" : "chat", repository: row.repository, branch: row.branch };
+  }
+
+  /**
+   * The repository-scoped GitHub token for a code conversation, created once. It is stored
+   * as-is (like the server's own GitHub token, it never leaves the server except into that
+   * conversation's cell) so provisioning retries hand the cell the same value.
+   */
+  getOrCreateGitHubGrant(conversationId: string, repository: string): string {
+    const existing = this.db.prepare("SELECT token FROM aster_github_grants WHERE conversation_id = ? AND revoked_at IS NULL")
+      .get(conversationId) as { token: string } | undefined;
+    if (existing) return existing.token;
+    const token = "aghp_" + randomBytes(32).toString("base64url");
+    this.db.prepare(`INSERT INTO aster_github_grants (conversation_id, token, repository, created_at) VALUES (?, ?, ?, ?)
+      ON CONFLICT(conversation_id) DO UPDATE SET token = excluded.token, repository = excluded.repository, created_at = excluded.created_at, revoked_at = NULL`)
+      .run(conversationId, token, repository, Date.now());
+    return token;
+  }
+
+  resolveGitHubGrant(token: string): { conversationId: string; repository: string } | undefined {
+    const row = this.db.prepare("SELECT conversation_id, repository FROM aster_github_grants WHERE token = ? AND revoked_at IS NULL")
+      .get(token) as { conversation_id: string; repository: string } | undefined;
+    return row ? { conversationId: row.conversation_id, repository: row.repository } : undefined;
+  }
+
+  revokeGitHubGrant(conversationId: string): void {
+    this.db.prepare("UPDATE aster_github_grants SET revoked_at = ? WHERE conversation_id = ? AND revoked_at IS NULL").run(Date.now(), conversationId);
   }
 
   /** Switch an idle conversation's model; refused while a turn is active. */

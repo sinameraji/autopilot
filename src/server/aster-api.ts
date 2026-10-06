@@ -17,6 +17,7 @@ import { loadOpenRouterCatalog } from "../models/openrouter-catalog.js";
 import type { AsterArtifact, AsterCellProject } from "./aster-cell-runtime.js";
 import { AsterGitHub, AsterGitHubError, REPOSITORY_FULL_NAME_RE } from "./aster-github.js";
 import { AsterMemory } from "./aster-memory.js";
+import { AsterGitHubProxy } from "./aster-github-proxy.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -111,6 +112,26 @@ export class AsterApi {
     this.runtime = runtime;
     this.github = github;
     this.memory = memory;
+  }
+
+  private githubProxy: AsterGitHubProxy | undefined;
+  /** Where cells reach the repository-scoped GitHub proxy, when it is running. */
+  private githubProxyUrl: string | undefined;
+
+  /**
+   * Starts the repository-scoped GitHub proxy when configured
+   * (AUTOPILOT_ASTER_GITHUB_PROXY_LISTEN=host:port, AUTOPILOT_ASTER_GITHUB_PROXY_URL as cells see it).
+   */
+  async startGitHubProxy(env: NodeJS.ProcessEnv = process.env): Promise<void> {
+    const listen = env.AUTOPILOT_ASTER_GITHUB_PROXY_LISTEN;
+    const publicUrl = env.AUTOPILOT_ASTER_GITHUB_PROXY_URL;
+    const token = env.GITHUB_TOKEN;
+    if (!listen || !publicUrl || !token || this.githubProxy) return;
+    const separator = listen.lastIndexOf(":");
+    const proxy = new AsterGitHubProxy({ token, resolveGrant: (grant) => this.getStore().resolveGitHubGrant(grant) });
+    await proxy.listen(Number(listen.slice(separator + 1)), listen.slice(0, separator));
+    this.githubProxy = proxy;
+    this.githubProxyUrl = publicUrl.replace(/\/+$/, "");
   }
 
   private getMemory(): AsterMemory | undefined {
@@ -396,6 +417,8 @@ export class AsterApi {
     this.store = undefined;
     this.memory?.close();
     this.memory = undefined;
+    this.githubProxy?.close();
+    this.githubProxy = undefined;
   }
 
   private getStore(): AsterStore {
@@ -566,6 +589,13 @@ export class AsterApi {
         project = stored.kind === "code"
           ? { kind: "code", repository: stored.repository!, baseBranch: (await this.github.getRepository(stored.repository!).catch(() => undefined))?.defaultBranch ?? "main", branch: stored.branch! }
           : { kind: "chat" };
+      }
+      if (project.kind === "code" && project.repository && this.githubProxyUrl) {
+        project.github = {
+          token: store.getOrCreateGitHubGrant(mapping.conversationId, project.repository),
+          gitUrl: `${this.githubProxyUrl}/git`,
+          apiUrl: `${this.githubProxyUrl}/api`,
+        };
       }
     }
 
@@ -926,6 +956,8 @@ export class AsterApi {
     if (!this.runtime.destroyCell) return sendError(res, 503, "hotcell_destroy_unavailable", "Hotcell cleanup is not configured");
 
     store.setCellStatus(conversation.id, "destroying");
+    // The cell's repository access ends with the conversation.
+    store.revokeGitHubGrant(conversation.id);
     if (conversation.activeRunId) {
       for (const approval of store.cancelPendingApprovals(conversation.id)) {
         const waiter = this.waiters.get(approval.id);

@@ -1,23 +1,28 @@
-# Subagent policy evaluation fixtures
+# Subagent policy and Jev checks
 
-This is a regression matrix for the harness policy, not a claim that Jev has been empirically calibrated. The default remains `suggest`; `auto` is opt-in until real-world false-positive, false-negative, latency, and cost data are collected.
+Regression matrix for the harness's delegation policy (`src/intent/subagent-policy.ts`) and the end-of-turn completion check (`src/agent/completion-check.ts`). Default policy is `auto`.
 
-| Fixture | Expected effort/shape | Jev? | Worker tool available? | Expected behavior |
-|---|---|---:|---:|---|
-| “What does this function do?” | Light, one question | No | No | Answer locally |
-| “Fix the typo in `src/one-file.ts`” | Light, one-file change | No | No | Work locally |
-| “Migrate the repository sequentially, one module at a time” | Heavy, explicitly dependent | No | No | Preserve the stated order |
-| “Research these independent questions in parallel” | Independent work is explicit | No | Yes, permission-gated | Coordinator may spawn bounded missions and synthesize |
-| “Audit the codebase for vulnerabilities” | Heavy, parallelizability ambiguous | Yes, if OpenRouter is available | Only after a positive suggestion/auto decision | `suggest` at probability ≥0.65; `auto` dispatch guidance at ≥0.80; otherwise stay local |
-| “Use subagents to research the migration risks” | Explicit user delegation | No | Yes, permission-gated | Respect explicit request regardless of automatic policy |
-| “Do not delegate; work sequentially” | Explicit user preference | No | No | Work locally; negative instruction wins over any positive phrase |
-| Jev timeout, malformed choice, or unavailable provider | Ambiguous candidate, advice unavailable | Attempted at most once, ≤4 seconds | No | Fail closed to local sequential work |
+## Delegation guidance
 
-The unit suite covers this matrix, the `0.65`/`0.80` thresholds, bounded/redacted task text, cancellation, unavailable Jev, custom endpoints, and the executor-side rejection of unadvertised tools. A worker is never launched by the policy function: `spawn_worker` is exposed only for an explicit request, a suggestion candidate, or a high-confidence opt-in `auto` decision, and every invocation still goes through the normal permission flow and configured provider/spend/concurrency/timeout restrictions.
+| Request | Jev? | `subagent` tool offered? | Guidance |
+|---|---:|---:|---|
+| "What does this function do?" (light) | No | No | none — work locally |
+| "Migrate the repository sequentially, one module at a time" | No | No | none — sequential wording wins |
+| "Research these independent questions in parallel" | No | Yes | auto: delegate |
+| "Use subagents to research the migration risks" | No | Yes | explicit delegate, whatever the policy |
+| "Do not delegate; work sequentially" | No | No | explicit sequential; negative wins |
+| Substantial request, policy `auto` | Yes, yes/no "two or more independent parts?", ≤3 s, in parallel with pre-turn work | Yes | strong "delegate these parts" at p ≥ 0.80, else the softer "assess and delegate if independent" |
+| Substantial, research-flavoured request, policy `suggest` | Yes, choose delegate/sequential, ≤4 s | Only if p ≥ 0.65 | suggest |
+| Jev timeout, error, malformed, custom endpoint, no OpenRouter key | Attempted at most once | As above | falls back to the default guidance; never blocks the turn |
 
-## Evaluation status
+Live spot checks (2026-10-04): "audit how auth, billing, and notifications each handle retries" → 0.93 (strong); "rename parseConfig and update its call sites" → 0.63 (soft). The 0.80 bar is deliberately high.
 
-- Regression fixtures: covered by `src/intent/subagent-policy.test.ts` and `src/agent/loop.test.ts`.
-- Live Jev quality/precision/recall: not yet measured; mocked typed responses validate handling, not decision quality.
-- Worker cost/latency: bounded by existing worker configuration and the per-cell spend cap; production distributions have not yet been measured.
-- Rollout: default `suggest`; automatic dispatch remains explicit opt-in with `/subagents auto` or `KIMIFLARE_SUBAGENT_POLICY=auto`.
+## Completion check
+
+Runs when a turn ends with no tool calls, the intent tier is not light, and the final message is not a question. Question: did the turn end legitimately — completed, or a clearly explained blocker — rather than after only planning or announcing next steps? Below 0.20 the agent is told to continue, at most once per turn.
+
+Live spot checks: plan-only stop 0.09 (nudged), finished feature 0.86, clearly explained blocker 0.94.
+
+## Status
+
+Unit tests cover the matrix, thresholds, redaction, timeouts, fallbacks, and once-per-turn nudging. Real-world precision and recall come from `/subagents stats` (delegation) and `turn:completion_nudge` log events (completion), not from these fixtures.
