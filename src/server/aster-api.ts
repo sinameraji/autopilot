@@ -18,6 +18,7 @@ import type { AsterArtifact, AsterCellProject } from "./aster-cell-runtime.js";
 import { AsterGitHub, AsterGitHubError, REPOSITORY_FULL_NAME_RE } from "./aster-github.js";
 import { AsterMemory } from "./aster-memory.js";
 import { AsterGitHubProxy } from "./aster-github-proxy.js";
+import { AsterPush } from "./aster-push.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
@@ -134,6 +135,29 @@ export class AsterApi {
     this.githubProxyUrl = publicUrl.replace(/\/+$/, "");
   }
 
+  private push: AsterPush | undefined;
+
+  private getPush(): AsterPush | undefined {
+    try {
+      return this.push ??= new AsterPush();
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** "Your task finished" (or failed) on the user's devices; cancelled turns stay silent. */
+  private notifyTurnEnd(store: AsterStore, conversationId: string, runId: string, status: string, reason: string | undefined, userText: string, after: number): void {
+    if (status !== "completed" && status !== "failed") return;
+    const push = this.getPush();
+    if (!push?.configured) return;
+    const reply = status === "completed" ? collectAssistantText(store, conversationId, runId, after).trim() : "";
+    const title = userText.trim().split("\n")[0] || "Aster";
+    const body = status === "completed"
+      ? (reply ? `✅ ${reply}` : "✅ Done")
+      : `⚠️ Couldn’t finish${reason && reason !== "error" ? `: ${reason}` : ""}`;
+    void push.notify({ title, body, conversationId });
+  }
+
   private getMemory(): AsterMemory | undefined {
     if (process.env.AUTOPILOT_ASTER_MEMORY === "off") return undefined;
     try {
@@ -164,7 +188,7 @@ export class AsterApi {
           service: "autopilot",
           apiVersion: "v1",
           serviceVersion: getAppVersion(),
-          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", "memory", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
+          capabilities: ["workspaces", "conversations", "turns", "event-replay", "cancellation", "human-approvals", "hotcell-per-conversation", "pause-resume", "destroy", "autonomous-cells", "tool-output", "checkpoints", "model-switch", "artifacts", "memory", "push", ...(this.github.configured ? ["github"] : []), ...(config.modelCatalog === "openrouter" ? ["model-catalog"] : [])],
         });
       }
 
@@ -213,6 +237,23 @@ export class AsterApi {
         }
         const kind = body.kind as "chat" | "code" | undefined;
         return await this.createConversation(res, store, principal, workspace, body.model, idempotencyKey, kind, body.repository as string | undefined);
+      }
+
+      if (path === `${API_PREFIX}/devices` && method === "POST") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        const body = await readJsonBody(req);
+        const environment = body.environment === "development" ? "development" : "production";
+        const push = this.getPush();
+        if (!push || typeof body.token !== "string" || !push.register(body.token, environment)) {
+          return sendError(res, 400, "invalid_device_token", "A hex APNs device token is required");
+        }
+        return json(res, 200, { registered: true, notifications: push.configured });
+      }
+      const deviceMatch = path.match(/^\/api\/v1\/devices\/([0-9a-fA-F]{64,200})$/);
+      if (deviceMatch && method === "DELETE") {
+        if (!this.hasScope(principal, "conversations:write")) return sendError(res, 403, "insufficient_scope", "Credential lacks conversation/write scope");
+        this.getPush()?.unregister(deviceMatch[1]!);
+        return json(res, 200, { unregistered: true });
       }
 
       if (path === `${API_PREFIX}/memory` && method === "GET") {
@@ -419,6 +460,8 @@ export class AsterApi {
     this.memory = undefined;
     this.githubProxy?.close();
     this.githubProxy = undefined;
+    this.push?.close();
+    this.push = undefined;
   }
 
   private getStore(): AsterStore {
@@ -522,6 +565,7 @@ export class AsterApi {
         }
         const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
         if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
+        if (updated) this.notifyTurnEnd(store, conversation.id, runId, status, reason, userText, 0);
       },
     };
   }
@@ -763,6 +807,7 @@ export class AsterApi {
       const publishEvent = (type: string, data: Record<string, unknown>) => {
         store.appendEvent(conversation.id, runId, type, data);
       };
+      const turnStartSequence = store.getConversation(conversation.id)?.lastEventSequence ?? 0;
       const active: AsterTurnStart = {
         runId,
         conversation,
@@ -781,6 +826,7 @@ export class AsterApi {
         finish: (status, reason) => {
           const updated = store.updateConversationStatus(conversation.id, runId, status, reason ? { reason } : {});
           if (updated) store.appendEvent(conversation.id, runId, status, reason ? { reason } : {});
+          if (updated) this.notifyTurnEnd(store, conversation.id, runId, status, reason, text, turnStartSequence);
         },
       };
       const memory = this.getMemory();
