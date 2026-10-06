@@ -146,7 +146,7 @@ export const subagentTool: ToolSpec<SubagentArgs> = {
     record(handle.cancelledByUser ? "cancelled" : result.status, {
       costUsd: result.costUsd,
       error: handle.cancelledByUser ? "cancelled by user" : result.error,
-      localChanges: Number(/Included your (\d+)/.exec(result.snapshotNote ?? "")?.[1] ?? 0),
+      localChanges: Number(/applied your (\d+)/.exec(result.snapshotNote ?? "")?.[1] ?? 0),
     });
     if (handle.cancelledByUser && !ctx.signal?.aborted) {
       return textOutput(userCancelledMessage(handle.index, args.mission));

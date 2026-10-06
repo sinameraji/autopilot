@@ -5,7 +5,7 @@ import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { chunkPayload, getRepositorySnapshot, MAX_SNAPSHOT_PATCH_BYTES } from "./hotcell-snapshot.js";
+import { chunkPayload, getRepositorySnapshot, getWorkingTreeArchive, MAX_SNAPSHOT_PATCH_BYTES } from "./hotcell-snapshot.js";
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -97,5 +97,62 @@ describe("getRepositorySnapshot", () => {
   it("splits payloads into argv-safe chunks", () => {
     assert.deepEqual(chunkPayload("abcdefg", 3), ["abc", "def", "g"]);
     assert.deepEqual(chunkPayload("", 3), []);
+    assert.ok(chunkPayload("x".repeat(1_000_000)).every((c) => c.length <= 64 * 1024), "each chunk stays under Hotcell's measured ~96 KiB write limit");
+  });
+});
+
+describe("getWorkingTreeArchive", () => {
+  async function extract(base64: string): Promise<string> {
+    const out = await mkdtemp(join(tmpdir(), "autopilot-archive-out-"));
+    dirs.push(out);
+    const tarPath = join(out, "..", `${out.split("/").pop()}.tgz`);
+    dirs.push(tarPath);
+    await writeFile(tarPath, Buffer.from(base64, "base64"));
+    execFileSync("tar", ["-xzf", tarPath, "-C", out]);
+    return out;
+  }
+
+  it("packs your working tree for private repos: edits and untracked files, never secrets or ignored files", async () => {
+    const cwd = await makeRepo();
+    git(cwd, "remote", "set-url", "origin", "https://github.com/example/private.git");
+    git(cwd, "update-ref", "-d", "refs/remotes/origin/main"); // nothing pushed at all
+    await writeFile(join(cwd, ".env"), "TRACKED_SECRET=1\n");
+    git(cwd, "add", "-f", ".env");
+    git(cwd, "commit", "-qm", "oops, tracked a secret");
+    await writeFile(join(cwd, "a.txt"), "edited\n");
+    await writeFile(join(cwd, "new.txt"), "untracked\n");
+    await writeFile(join(cwd, "server.pem"), "key\n");
+    await writeFile(join(cwd, "ignored.log"), "ignored\n");
+    const indexBefore = git(cwd, "diff", "--cached", "--name-only");
+
+    const packed = await getWorkingTreeArchive(cwd);
+    assert.ok(packed.archive);
+    assert.equal(git(cwd, "diff", "--cached", "--name-only"), indexBefore, "the user's index is untouched");
+    const out = await extract(packed.archive!);
+    assert.equal(await readFile(join(out, "a.txt"), "utf8"), "edited\n");
+    assert.equal(await readFile(join(out, "new.txt"), "utf8"), "untracked\n");
+    assert.equal(await readFile(join(out, ".gitignore"), "utf8"), "ignored.log\n");
+    for (const secret of [".env", "server.pem", "ignored.log"]) {
+      await assert.rejects(readFile(join(out, secret)), `${secret} must not be packed`);
+    }
+    assert.equal(packed.files, 3);
+  });
+
+  it("works in a repository with no commits, and reports oversize trees", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "autopilot-archive-empty-"));
+    dirs.push(cwd);
+    git(cwd, "init", "-q");
+    await writeFile(join(cwd, "draft.md"), "hello\n");
+    const packed = await getWorkingTreeArchive(cwd);
+    assert.equal(packed.files, 1);
+    const tooBig = await getWorkingTreeArchive(cwd, 10);
+    assert.equal(tooBig.archive, null);
+    assert.ok(tooBig.bytes > 10);
+  });
+
+  it("requires a Git repository", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "autopilot-archive-nogit-"));
+    dirs.push(cwd);
+    await assert.rejects(() => getWorkingTreeArchive(cwd), /inside a Git repository/);
   });
 });
