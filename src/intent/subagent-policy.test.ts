@@ -202,4 +202,18 @@ describe("resolveSubagentGuidance", () => {
     assert.equal(result.kind, "none");
     assert.equal(calls, 0);
   });
+
+  it("sharpens the auto directive with a Jev yes/no check, never blocking on it", async () => {
+    const base = { prompt: "Review the startup flow, configuration, and test coverage, then propose a plan.", tier: "heavy" as const, policy: "auto" as const, apiKey };
+    const yes = (noul: number) => async () => ({ type: "noul" as const, noul });
+    const strong = await resolveSubagentGuidance({ ...base, ask: yes(0.93) });
+    assert.equal(strong.kind, "auto-delegate");
+    assert.match((await strong.refinedDirective) ?? "", /launch one subagent per part/);
+    const unsure = await resolveSubagentGuidance({ ...base, ask: yes(0.63) });
+    assert.equal(await unsure.refinedDirective, unsure.directive, "below 0.8 keeps the softer directive");
+    const failing = await resolveSubagentGuidance({ ...base, ask: async () => { throw new Error("down"); } });
+    assert.equal(await failing.refinedDirective, failing.directive);
+    const noKey = await resolveSubagentGuidance({ ...base, apiKey: undefined });
+    assert.equal(noKey.refinedDirective, undefined);
+  });
 });

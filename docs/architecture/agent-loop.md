@@ -132,7 +132,7 @@ code with no callers (#730).
 
 | Condition | Outcome |
 | --- | --- |
-| Assistant message with no tool calls | normal return (Stop hook fires) |
+| Assistant message with no tool calls | pending steers continue the turn; a substantial turn that stopped after only planning gets one "continue" nudge (Jev completion check); otherwise normal return (Stop hook fires) |
 | Every call in an iteration blocked | 1st time: recovery instruction; 2nd: tool-free summary, then `AgentLoopError` (exit 43 in print mode) |
 | `maxTotalToolIterations` reached | tool-free summary, clean return |
 | Cumulative prompt tokens ≥ `maxInputTokens` | `BudgetExhaustedError` (exit 42) |

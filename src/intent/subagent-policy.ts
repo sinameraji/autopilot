@@ -8,6 +8,10 @@ export interface SubagentGuidance {
   reason: string;
   probability?: number;
   directive?: string;
+  /** auto mode: the directive sharpened by a Jev yes/no check. Never rejects;
+   *  resolves to `directive` when Jev is unsure or unavailable. Hosts pass it
+   *  to the loop, which awaits it alongside other pre-turn work. */
+  refinedDirective?: Promise<string | undefined>;
 }
 
 export function allowsSubagentDispatch(kind: SubagentGuidanceKind): boolean {
@@ -76,7 +80,9 @@ export async function resolveSubagentGuidance(options: ResolveSubagentGuidanceOp
   // dependencies, makes the parallelizability decision. Do not require users to
   // name subagents or match a narrow list of research keywords to enable it.
   if (options.policy === "auto") {
-    return result("auto-delegate", "substantial task; coordinator assesses independence");
+    const base = result("auto-delegate", "substantial task; coordinator assesses independence");
+    if (!options.apiKey || options.customEndpoint) return base;
+    return { ...base, refinedDirective: refineAutoDirective(prompt, options.apiKey, base.directive, options) };
   }
   if (!AMBIGUOUS_CANDIDATE.test(prompt)) return result("none", "no parallel-work signal");
   if (!options.apiKey || options.customEndpoint) return result("none", "Jev is unavailable for this provider configuration");
@@ -109,7 +115,38 @@ export async function resolveSubagentGuidance(options: ResolveSubagentGuidanceOp
   }
 }
 
-function redactPrompt(prompt: string): string {
+/** Jev probability above which the auto directive tells the agent to delegate
+ *  rather than merely consider it. Kept high: live checks put a clearly
+ *  sequential rename task at 0.63. */
+export const AUTO_DELEGATE_STRONG_THRESHOLD = 0.8;
+export const AUTO_JEV_TIMEOUT_MS = 3_000;
+
+const STRONG_AUTO_DIRECTIVE =
+  "This task has parts that can be investigated independently. Before doing the work yourself, identify those parts and launch one subagent per part with the subagent tool, all in the same response, so they run in parallel; then do the dependent and editing work yourself using their findings. Only skip delegation if, on inspection, the parts turn out to depend on each other.";
+
+/** Ask Jev a yes/no question about independence; resolve to the strong
+ *  directive when it is confident, else the base directive. Never rejects. */
+async function refineAutoDirective(
+  prompt: string,
+  apiKey: string,
+  baseDirective: string | undefined,
+  options: Pick<ResolveSubagentGuidanceOptions, "signal" | "ask">,
+): Promise<string | undefined> {
+  const timeout = AbortSignal.timeout(AUTO_JEV_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
+  try {
+    const answer = await (options.ask ?? askJev)(apiKey, {
+      kind: "yes",
+      prompt: `Does this coding task contain two or more parts that can be investigated independently and in parallel? Task: ${redactPrompt(prompt).slice(0, MAX_JEV_PROMPT_CHARS)}`,
+    }, { signal });
+    const p = answer.type === "noul" ? answer.noul : undefined;
+    return typeof p === "number" && p >= AUTO_DELEGATE_STRONG_THRESHOLD ? STRONG_AUTO_DIRECTIVE : baseDirective;
+  } catch {
+    return baseDirective;
+  }
+}
+
+export function redactPrompt(prompt: string): string {
   return prompt
     .replace(/\b(?:sk-or-v1-|sk-ant-|gh[pousr]_|github_pat_)[A-Za-z0-9_-]{8,}\b/gi, "[REDACTED]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
