@@ -33,6 +33,9 @@ export function humanizeToolTitle(
   }
 
   switch (toolName) {
+    case "execute_code":
+      return "Running code batch";
+
     case "read":
       return pick(tier, {
         light: `Taking a quick look at ${extractPath(originalTitle)}`,
