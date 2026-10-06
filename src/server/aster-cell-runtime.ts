@@ -46,6 +46,16 @@ export interface AsterHotcellRuntimeOptions {
   archiveWorkspace?: (workspaceRoot: string) => Promise<string>;
   pollIntervalMs?: number;
   healthTimeoutMs?: number;
+  /**
+   * Pause cells idle (no turn, no API activity) this long, releasing CPU and memory.
+   * Hotcell's own idle reaper skips cells with a live background process unless it can
+   * snapshot memory, and every Aster cell runs the bridge, so on the container driver
+   * nothing was ever paused. Cold-pausing is safe here: the bridge is restarted and its
+   * session restored on the next request. 0 disables.
+   */
+  idlePauseMs?: number;
+  /** How often to look for idle cells. */
+  idleSweepIntervalMs?: number;
 }
 
 export interface AsterCellProject {
@@ -95,6 +105,34 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     this.archiveWorkspace = options.archiveWorkspace ?? defaultArchiveWorkspace;
     this.pollIntervalMs = options.pollIntervalMs ?? EVENT_POLL_MS;
     this.healthTimeoutMs = options.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
+    this.idlePauseMs = options.idlePauseMs ?? 0;
+    if (this.idlePauseMs > 0) {
+      const timer = setInterval(() => { void this.pauseIdleCells(this.idlePauseMs).catch(() => {}); }, options.idleSweepIntervalMs ?? 60_000);
+      timer.unref();
+    }
+  }
+
+  private readonly idlePauseMs: number;
+
+  /**
+   * Pause running cells that have no active turn and no API activity within `idleMs`,
+   * least recently used first, stopping after `limit` pauses. Returns the paused ids.
+   */
+  async pauseIdleCells(idleMs: number, limit = Infinity): Promise<string[]> {
+    const busy = new Set([...this.activeRuns.values()].map((run) => run.cellId));
+    const now = Date.now();
+    const candidates = (await this.provider.listConversationCells())
+      .filter((cell) => cell.status === "running" && !busy.has(cell.id) && now - Date.parse(cell.lastActivityAt) >= idleMs)
+      .sort((a, b) => Date.parse(a.lastActivityAt) - Date.parse(b.lastActivityAt));
+    const paused: string[] = [];
+    for (const cell of candidates) {
+      if (paused.length >= limit) break;
+      try {
+        await this.provider.pauseConversationCell(cell.id);
+        paused.push(cell.id);
+      } catch { /* a cell that can't pause now is retried on the next sweep */ }
+    }
+    return paused;
   }
 
   async provisionConversation(input: {
@@ -112,12 +150,20 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     let cell = await this.provider.findConversationCell(input.conversationId);
     if (!cell) {
       if (!input.allowCreate) throw new Error("hotcell_create_uncertain");
-      cell = await this.provider.createConversationCell({
+      const create = () => this.provider.createConversationCell({
         conversationId: input.conversationId,
         workspaceId: input.workspaceId,
         model: input.model,
         ...(input.project ? { kind: input.project.kind } : {}),
       });
+      try {
+        cell = await create();
+      } catch (error) {
+        // Likely out of capacity: make room by pausing the least recently used idle cell
+        // (its files persist; it wakes on its next message), then try once more.
+        if ((await this.pauseIdleCells(60_000, 1).catch(() => [])).length === 0) throw error;
+        cell = await create();
+      }
     }
     input.onCellCreated(cell.getInfo().id);
 

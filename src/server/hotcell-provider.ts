@@ -163,6 +163,18 @@ export class HotcellProvider {
     await cell.destroy();
   }
 
+  /** Aster conversation cells with their lifecycle status and last API activity. */
+  async listConversationCells(): Promise<Array<{ id: string; conversationId: string; status: string; lastActivityAt: string }>> {
+    return (await this.client.list())
+      .filter((item) => item.labels?.[HOTCELL_CONVERSATION_LABEL])
+      .map((item) => ({
+        id: item.id,
+        conversationId: item.labels[HOTCELL_CONVERSATION_LABEL]!,
+        status: item.status,
+        lastActivityAt: item.lastActivityAt,
+      }));
+  }
+
   /** True suspend: on microVM drivers the daemon snapshots memory, so the Autopilot session resumes alive. */
   async pauseConversationCell(cellId: string): Promise<void> {
     if (!cellId.trim()) throw new HotcellProviderError("Missing Hotcell id", "hotcell_id_missing");

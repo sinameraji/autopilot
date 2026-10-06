@@ -413,6 +413,45 @@ describe("Aster Hotcell runtime", () => {
     }
   });
 
+  it("pauses idle cells least recently used first, never mid-turn, and makes room when creation fails", async () => {
+    const now = Date.now();
+    const cells = [
+      { id: "old", conversationId: "a", status: "running", lastActivityAt: new Date(now - 3_600_000).toISOString() },
+      { id: "older", conversationId: "b", status: "running", lastActivityAt: new Date(now - 7_200_000).toISOString() },
+      { id: "fresh", conversationId: "c", status: "running", lastActivityAt: new Date(now - 1_000).toISOString() },
+      { id: "asleep", conversationId: "d", status: "paused", lastActivityAt: new Date(now - 9_000_000).toISOString() },
+    ];
+    const paused: string[] = [];
+    let creates = 0;
+    const provider = {
+      listConversationCells: async () => cells.filter((cell) => !paused.includes(cell.id)),
+      pauseConversationCell: async (id: string) => { paused.push(id); },
+      findConversationCell: async () => undefined,
+      createConversationCell: async () => {
+        creates++;
+        if (creates === 1) throw new Error("capacity");
+        const state = emptyCellState("new-cell");
+        state.processes = [];
+        return fakeSandbox(state);
+      },
+      getCell: async () => { throw new Error("unused"); },
+    } as unknown as HotcellProvider;
+    const runtime = new AsterHotcellRuntime(provider, { archiveWorkspace: async () => "QUJD" });
+
+    assert.deepEqual(await runtime.pauseIdleCells(15 * 60_000, 1), ["older"]);
+    assert.deepEqual(await runtime.pauseIdleCells(15 * 60_000), ["old"]);
+    assert.deepEqual(await runtime.pauseIdleCells(15 * 60_000), [], "fresh and already-paused cells stay as they are");
+
+    // Out of capacity on create: pause the least recently used idle cell, then retry once.
+    cells.push({ id: "idle-two-hours", conversationId: "e", status: "running", lastActivityAt: new Date(now - 7_200_000).toISOString() });
+    await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {}, project: { kind: "chat" },
+    });
+    assert.equal(creates, 2);
+    assert.equal(paused.at(-1), "idle-two-hours");
+  });
+
   it("switches the cell session's model through the bridge", async () => {
     const cells = new Map<string, FakeCellState>();
     const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD" });

@@ -35,7 +35,10 @@ import { redactLikelySecrets } from "./aster-tools.js";
 
 function createHotcellAsterRuntime(): AsterApiRuntime | undefined {
   try {
-    return new AsterHotcellRuntime(HotcellProvider.fromEnvironment());
+    const idlePauseMs = Number(process.env.AUTOPILOT_ASTER_IDLE_PAUSE_MS ?? 15 * 60 * 1000);
+    return new AsterHotcellRuntime(HotcellProvider.fromEnvironment(), {
+      idlePauseMs: Number.isFinite(idlePauseMs) && idlePauseMs >= 0 ? idlePauseMs : 15 * 60 * 1000,
+    });
   } catch (error) {
     if (error instanceof HotcellProviderError && error.code === "hotcell_not_configured") return undefined;
     throw error;
