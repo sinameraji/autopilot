@@ -525,8 +525,12 @@ async function defaultArchiveWorkspace(workspaceRoot: string): Promise<string> {
 function projectNote(project: AsterCellProject): string {
   const artifacts =
     "Save anything meant for the user to look at (documents, slides, PDFs, spreadsheets, web pages, images, reports) " +
-    "in /workspace/artifacts/. Files there appear in the user's Aster app, where they can preview, download, and share them. " +
-    "Prefer self-contained formats: PDF, PPTX/DOCX/XLSX, HTML with inline CSS/JS, PNG/SVG.";
+    "in /workspace/artifacts/. Files there appear in the user's Aster app (an iPhone), where they can preview, download, and share them. " +
+    "Unless the user asks for an editable format, deliver visual documents (slides, reports, one-pagers) as PDF: write HTML/CSS " +
+    "(one page per slide, e.g. @page { size: 1280px 720px; margin: 0 }) and print it with " +
+    "`chromium --headless --no-sandbox --disable-gpu --no-pdf-header-footer --print-to-pdf=/workspace/artifacts/NAME.pdf FILE.html`. " +
+    "For editable files use python-pptx, python-docx, or openpyxl; matplotlib is available for charts. " +
+    "Keep drafts and source files outside artifacts/ so only finished deliverables appear there.";
   if (project.kind === "chat") {
     return `[Aster chat. /workspace is this conversation's private Linux sandbox with internet access. ${artifacts}]`;
   }
