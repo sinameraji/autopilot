@@ -23,6 +23,7 @@ import { getModelOrInfer } from "../models/registry.js";
 import { createPermissionGate } from "./permission-gate.js";
 import { compactToFit, ContextBudgetError, effectiveInputBudget, type CompactionTarget } from "./context-budget.js";
 import { withTurnDirective } from "./turn-directive.js";
+import { CONTINUE_NUDGE, INCOMPLETE_THRESHOLD, shouldCheckCompletion, toolsUsedSince, type CompletionCheck } from "./completion-check.js";
 import type { Mode } from "../mode.js";
 
 export interface AgentCallbacks {
@@ -110,8 +111,13 @@ export interface AgentTurnOpts extends LlmAuth {
   maxInputTokens?: number;
   /** Intent classification result for this turn, for telemetry. */
   intentClassification?: { intent: string; tier: "light" | "medium" | "heavy"; rawScore: number; confidence: number };
-  /** Per-turn harness recommendation about subagent dispatch. */
-  delegationDirective?: string;
+  /** Per-turn harness recommendation about subagent dispatch. May be a
+   *  promise (auto mode's Jev refinement), awaited alongside pre-turn work. */
+  delegationDirective?: string | Promise<string | undefined>;
+  /** End-of-turn "did the agent finish?" check (see completion-check.ts).
+   *  When it reports a clearly unfinished turn, the agent is told to
+   *  continue, at most once per turn. */
+  completionCheck?: CompletionCheck;
   /** Skills injected into the system prompt for this turn. */
   selectedSkills?: { name: string; body: string }[];
   /**
@@ -176,7 +182,9 @@ export type GuardrailEvent =
   /** `maxToolIterations` was reached with `toolLimitBehavior: "stop"`. */
   | { kind: "limit_stopped"; message: string; totalIterations: number }
   /** `maxTotalToolIterations` was reached; the turn ends with a summary. */
-  | { kind: "limit_ceiling"; message: string; totalIterations: number };
+  | { kind: "limit_ceiling"; message: string; totalIterations: number }
+  /** The turn was about to end unfinished; the agent was told to continue. */
+  | { kind: "completion_nudge"; message: string; probability: number };
 
 /** Automatic loop recoveries granted per turn before the turn is wrapped up. */
 export const MAX_LOOP_RECOVERIES = 1;
@@ -388,13 +396,15 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
         )
       : Promise.resolve(undefined);
 
-  const [recallSettled, skillsSettled] = await Promise.allSettled([
+  const [recallSettled, skillsSettled, directiveSettled] = await Promise.allSettled([
     raceWithSignal(recallPromise, opts.signal),
     raceWithSignal(skillsPromise, opts.signal),
+    raceWithSignal(Promise.resolve(opts.delegationDirective), opts.signal),
   ]);
+  const delegationDirective = directiveSettled.status === "fulfilled" ? directiveSettled.value : undefined;
 
-  // Propagate abort; swallow other failures (both paths are non-fatal).
-  for (const settled of [recallSettled, skillsSettled]) {
+  // Propagate abort; swallow other failures (all paths are non-fatal).
+  for (const settled of [recallSettled, skillsSettled, directiveSettled]) {
     if (
       settled.status === "rejected" &&
       settled.reason instanceof DOMException &&
@@ -534,6 +544,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
   let budgetExhausted = false;
   let loopExhausted = false;
   let loopRecoveries = 0;
+  let completionNudges = 0;
   // Set when a guardrail decides the turn must end: the next request is a
   // final, tool-free summary and the turn finishes after it.
   let finalizeReason: "loop" | "limit_ceiling" | null = null;
@@ -658,7 +669,7 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       // Per-turn delegation guidance is request-only: it reaches the model on
       // every iteration of this turn, regardless of skill routing, and is never
       // persisted into history or the system prompt.
-      return withTurnDirective(out, opts.delegationDirective, turnUserMessage);
+      return withTurnDirective(out, delegationDirective, turnUserMessage);
     };
 
     let apiMessages = buildApiMessages();
@@ -837,6 +848,30 @@ export async function runAgentTurn(opts: AgentTurnOpts): Promise<void> {
       // Input that arrived while the model was writing its answer must be
       // answered in this turn, not silently carried into the next one.
       if (appendPendingInput() > 0) continue;
+      // Stopped after only planning or announcing next steps? Ask the agent
+      // to continue instead of leaving the user to type "go on". Once per turn.
+      if (opts.completionCheck && completionNudges < 1) {
+        const input = {
+          userRequest: lastUserPrompt,
+          finalText: typeof assistantMsg.content === "string" ? assistantMsg.content : "",
+          toolsUsed: toolsUsedSince(opts.messages, turnUserMessage),
+        };
+        if (shouldCheckCompletion(input, opts.intentClassification?.tier)) {
+          const p = await opts.completionCheck(input, opts.signal).catch(() => null);
+          if (opts.signal.aborted) throw new DOMException("aborted", "AbortError");
+          if (p !== null && p < INCOMPLETE_THRESHOLD) {
+            completionNudges++;
+            logger.info("turn:completion_nudge", { sessionId: opts.sessionId, probability: p });
+            opts.messages.push({ role: "system", content: CONTINUE_NUDGE });
+            opts.callbacks.onGuardrail?.({
+              kind: "completion_nudge",
+              message: "The agent stopped before finishing — asked it to continue.",
+              probability: p,
+            });
+            continue;
+          }
+        }
+      }
       logger.info("turn:complete", { sessionId: opts.sessionId, durationMs: Math.round(performance.now() - turnStart) });
       await fireStopHook();
       return;

@@ -46,6 +46,7 @@ import { planTriageAction, steerMessage, triageIncoming, type TriageResult } fro
 import { answerAside } from "./agent/aside.js";
 import { workerRegistry } from "./tools/worker-registry.js";
 import { recordSubagentEvent } from "./tools/subagent-stats.js";
+import { completionCheckFromConfig } from "./agent/completion-check.js";
 import { TaskList } from "./ui/task-list.js";
 import type { Task, PlanOption } from "./tools/registry.js";
 import { existsSync } from "node:fs";
@@ -1989,7 +1990,8 @@ function App({
             getStore: () => artifactStoreRef.current,
           },
           intentClassification: classification,
-          delegationDirective: delegationGuidance.directive,
+          delegationDirective: delegationGuidance.refinedDirective ?? delegationGuidance.directive,
+          completionCheck: completionCheckFromConfig(cfg),
           sessionStartRecall: sessionStartRecallRef.current ?? undefined,
           skillsDb: getMemoryDb() ?? undefined,
           skillRoutingConfig: {

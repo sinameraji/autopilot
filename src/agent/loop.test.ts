@@ -767,4 +767,88 @@ describe("runAgentTurn", () => {
     assert.equal(seen.length, 1, "executed rather than rejected as unavailable");
     assert.equal(messages.find((m) => m.role === "assistant")?.tool_calls?.[0]?.function.name, "subagent");
   });
+
+  describe("end-of-turn completion check", () => {
+    function scripted(responses: Array<Array<Record<string, unknown>>>) {
+      const bodies: Array<{ messages: ChatMessage[] }> = [];
+      globalThis.fetch = async (_url, init) => {
+        bodies.push(JSON.parse(String(init?.body)));
+        const events = responses[Math.min(bodies.length - 1, responses.length - 1)]!;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (const event of events) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      };
+      return bodies;
+    }
+    const say = (content: string) => [{ choices: [{ delta: { content } }] }, { choices: [{ finish_reason: "stop" }] }];
+    const run = (messages: ChatMessage[], completionCheck: (i: unknown) => Promise<number | null>, tier: "light" | "medium" = "medium", guardrails: string[] = []) =>
+      runAgentTurn({
+        openrouterApiKey: "sk-or-test",
+        model: "test/model",
+        messages,
+        tools: [],
+        executor: { list: () => [], run: async () => ({ ok: true, content: "" }) } as unknown as ToolExecutor,
+        cwd: "/tmp",
+        signal: new AbortController().signal,
+        intentClassification: { intent: "x", tier, rawScore: 0.5, confidence: 0.8 },
+        completionCheck: async (input) => completionCheck(input),
+        callbacks: { askPermission: async () => "allow", onGuardrail: (ev) => guardrails.push(ev.kind) },
+      });
+
+    it("asks the agent to continue once when it stopped after only planning", async () => {
+      const bodies = scripted([say("I've reviewed the repo. Next I'll implement it."), say("Still planning."), say("unused")]);
+      const messages: ChatMessage[] = [{ role: "system", content: "s" }, { role: "user", content: "Implement the feature" }];
+      const guardrails: string[] = [];
+      let checks = 0;
+      await run(messages, async () => { checks++; return 0.03; }, "medium", guardrails);
+      assert.equal(bodies.length, 2, "one continuation, then the turn ends");
+      assert.equal(checks, 1, "checked once; never loops");
+      assert.ok(bodies[1]!.messages.some((m) => m.role === "system" && String(m.content).includes("You ended your turn before completing")));
+      assert.deepEqual(guardrails, ["completion_nudge"]);
+    });
+
+    it("ends normally when the check says the work is done, unavailable, or the turn is light", async () => {
+      for (const [p, tier, expectedChecks] of [[0.96, "medium", 1], [null, "medium", 1], [0.01, "light", 0]] as const) {
+        const bodies = scripted([say("Done: fixed the typo in README.md.")]);
+        let checks = 0;
+        await run([{ role: "system", content: "s" }, { role: "user", content: "fix it" }], async () => { checks++; return p; }, tier);
+        assert.equal(bodies.length, 1);
+        assert.equal(checks, expectedChecks);
+      }
+    });
+  });
+
+  it("awaits a promised delegation directive and sends it", async () => {
+    const bodies: Array<{ messages: ChatMessage[] }> = [];
+    globalThis.fetch = async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of [{ choices: [{ delta: { content: "ok" } }] }, { choices: [{ finish_reason: "stop" }] }]) controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+    await runAgentTurn({
+      openrouterApiKey: "sk-or-test",
+      model: "test/model",
+      messages: [{ role: "system", content: "s" }, { role: "user", content: "audit three subsystems" }],
+      tools: [],
+      executor: { list: () => [], run: async () => ({ ok: true, content: "" }) } as unknown as ToolExecutor,
+      cwd: "/tmp",
+      signal: new AbortController().signal,
+      delegationDirective: new Promise((r) => setTimeout(() => r("Launch one subagent per part."), 20)),
+      callbacks: { askPermission: async () => "allow" },
+    });
+    assert.ok(bodies[0]!.messages.some((m) => m.role === "system" && String(m.content).includes("Launch one subagent per part.")));
+  });
 });

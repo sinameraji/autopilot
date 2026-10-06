@@ -123,6 +123,8 @@ export interface KimiConfig {
   memoryExtractionModel?: string;
   /** Enable Code Mode: present tools as a TypeScript API and execute generated code in a sandbox. */
   codeMode?: boolean;
+  /** End-of-turn "did the agent finish?" check via Jev (OpenRouter only). Default true. */
+  completionCheck?: boolean;
   /** Enable LSP integration. Default: false. */
   lspEnabled?: boolean;
   /** LSP server configurations. */
@@ -358,6 +360,7 @@ export async function loadConfig(): Promise<KimiConfig | null> {
     memoryExtractionModel:
       m(process.env.KIMIFLARE_MEMORY_EXTRACTION_MODEL ?? persisted.memoryExtractionModel) ?? requestyPlumbing,
     codeMode: readBooleanEnv("KIMIFLARE_CODE_MODE") ?? persisted.codeMode ?? true,
+    completionCheck: readBooleanEnv("KIMIFLARE_COMPLETION_CHECK") ?? persisted.completionCheck ?? true,
     lspEnabled: persisted.lspEnabled,
     lspServers: persisted.lspServers,
     costAttribution: readBooleanEnv("KIMI_COST_ATTRIBUTION") ?? persisted.costAttribution ?? true,

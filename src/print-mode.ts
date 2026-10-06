@@ -18,6 +18,7 @@ import { KimiApiError, humanizeApiError } from "./util/errors.js";
 import { saveSession, loadSession, listSessions, sessionsDir, type SessionFile } from "./sessions.js";
 import { sessionFileCompactionTarget } from "./agent/context-budget.js";
 import { recordSubagentEvent } from "./tools/subagent-stats.js";
+import { completionCheckFromConfig } from "./agent/completion-check.js";
 import { encodeImageFile, isImagePath } from "./util/image.js";
 import type { UpdateCheckResult } from "./util/update-check.js";
 import { glob } from "./util/glob.js";
@@ -29,7 +30,7 @@ import type { KimiConfig, PermissionRules, ReasoningEffort } from "./config.js";
 export type PrintFormat = "text" | "json" | "stream-json";
 
 export interface PrintModeOpts
-  extends Pick<KimiConfig, "openrouterApiKey" | "requestyApiKey" | "baseUrl" | "apiKey" | "openrouterProvider" | "subagentPolicy"> {
+  extends Pick<KimiConfig, "openrouterApiKey" | "requestyApiKey" | "baseUrl" | "apiKey" | "openrouterProvider" | "subagentPolicy" | "completionCheck"> {
   model: string;
   reasoningEffort?: ReasoningEffort;
   prompt: string;
@@ -413,7 +414,9 @@ export async function runPrintMode(opts: PrintModeOpts): Promise<void> {
       ...auth,
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
-      delegationDirective: delegationGuidance.directive,
+      delegationDirective: delegationGuidance.refinedDirective ?? delegationGuidance.directive,
+      // Research subagents answer one mission; only coordinators are checked.
+      completionCheck: opts.workerProfile === "research" ? undefined : completionCheckFromConfig(opts),
       sessionId: sessionFile.id,
       messages,
       tools: workerTools,
