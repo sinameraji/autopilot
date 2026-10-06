@@ -628,12 +628,12 @@ const handleJev: Handler = async (ctx, rest) => {
   setEvents((events) => [
     ...events,
     { kind: "user", key: mkKey(), text: `/jev ${rest.join(" ")}` },
-    { kind: "info", key: eventKey, text: "Jev is evaluating…" },
+    { kind: "info", key: eventKey, text: "Jev is evaluating…", pending: true },
   ]);
   try {
     const context = noContext ? [] : await buildJevContext(question.prompt, ctx.messagesRef.current, process.cwd());
     const receipt = formatJevContextReceipt(context, showContext);
-    setResult(eventKey, { kind: "info", key: eventKey, text: `Jev is evaluating · ${receipt}` });
+    setResult(eventKey, { kind: "info", key: eventKey, text: `Jev is evaluating · ${receipt}`, pending: true });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const answer = await askJev(apiKey, question, { context });
     const presentation = presentJevAnswer(question, answer);

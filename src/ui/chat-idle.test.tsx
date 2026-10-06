@@ -57,6 +57,17 @@ describe("ChatView settling", () => {
     const live: ChatEvent[] = [...done, { kind: "assistant", key: "s", id: 99, text: "…", reasoning: "", streaming: true }];
     assert.equal(firstUnsettledIndex(live), done.length);
   });
+
+  it("keeps pending info events live until they can be replaced with a result", () => {
+    const done = history(1);
+    const pending: ChatEvent = { kind: "info", key: "jev", text: "Jev is evaluating…", pending: true };
+    assert.equal(isSettled(pending), false);
+    assert.equal(firstUnsettledIndex([...done, pending]), done.length);
+
+    const result: ChatEvent = { kind: "jev", key: "jev", result: "Yes", tone: "yes", receipt: "question only" };
+    assert.equal(isSettled(result), true);
+    assert.equal(firstUnsettledIndex([...done, result]), done.length + 1);
+  });
 });
 
 describe("ChatView idle cost", () => {

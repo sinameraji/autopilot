@@ -19,7 +19,7 @@ export type ChatEvent =
       streaming: boolean;
     }
   | ({ kind: "tool"; key: string } & ToolEventState)
-  | { kind: "info"; key: string; text: string }
+  | { kind: "info"; key: string; text: string; pending?: boolean }
   | { kind: "error"; key: string; text: string }
   | { kind: "jev"; key: string; result: string; probability?: string; tone: "yes" | "no" | "neutral"; receipt: string }
   | { kind: "memory"; key: string; text: string }
@@ -60,6 +60,7 @@ export function isSettled(e: ChatEvent): boolean {
   if (e.kind === "assistant") return !e.streaming;
   if (e.kind === "tool") return e.status !== "running" && e.status !== "queued";
   if (e.kind === "user") return !e.queued;
+  if (e.kind === "info") return !e.pending;
   return true;
 }
 
