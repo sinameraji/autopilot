@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.19.1](https://github.com/sinameraji/autopilot/compare/v1.19.0...v1.19.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **aster:** accept long messages (up to 500k characters) ([83005c7](https://github.com/sinameraji/autopilot/commit/83005c7c703ca377cdcdeda56f53162f4cffcdeb))
+* keep Jev output visible in the TUI ([d112432](https://github.com/sinameraji/autopilot/commit/d112432e2e68cd05c46548203503aa550002ac8f))
+* keep Jev output visible in the TUI ([8f99329](https://github.com/sinameraji/autopilot/commit/8f993299d8371e3924e87fcd15b23087d4012d93))
+* **ui:** reduce agent activity noise ([1a94b53](https://github.com/sinameraji/autopilot/commit/1a94b5363ef347e3104e62bbf7d153bcf19946e8))
+* **ui:** reduce agent activity noise ([0bb8281](https://github.com/sinameraji/autopilot/commit/0bb8281aa48c9259eb6839b80ee71d4451ffa615))
+
 ## [1.19.0](https://github.com/sinameraji/autopilot/compare/v1.18.0...v1.19.0) (2026-10-06)
 
 
