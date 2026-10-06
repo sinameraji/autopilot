@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.0](https://github.com/sinameraji/autopilot/compare/v1.18.0...v1.19.0) (2026-10-06)
+
+
+### Features
+
+* **agent:** use Jev for the end-of-turn finish check and auto delegation ([811bc2d](https://github.com/sinameraji/autopilot/commit/811bc2d6a85e3c4f768003ef1875946eb0baa6e2))
+* **agent:** use Jev for the end-of-turn finish check and auto delegation ([270c160](https://github.com/sinameraji/autopilot/commit/270c16006572097f19ed5e967b840293c36edfc6))
+
+
+### Bug Fixes
+
+* **subagents:** stream the working tree in so private repos work ([59b773c](https://github.com/sinameraji/autopilot/commit/59b773c6abf5e8fdb11d817d7781caa989bc67f6))
+* **subagents:** stream the working tree in so private repos work ([8a0d836](https://github.com/sinameraji/autopilot/commit/8a0d836a1661958abf0936f9a90d4d802fbfe2e7))
+
 ## [1.18.0](https://github.com/sinameraji/autopilot/compare/v1.17.0...v1.18.0) (2026-10-04)
 
 
