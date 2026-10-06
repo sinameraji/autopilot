@@ -9,7 +9,8 @@ const HOME = process.env.HOME || "/workspace/.aster/home";
 const STATE_DIR = "/workspace/.aster";
 const EVENT_LOG = join(STATE_DIR, "events.ndjson");
 const TURN_STATE = join(STATE_DIR, "turn-state.json");
-const MAX_REQUEST_BYTES = 32 * 1024;
+// Prompts (with memory and notes prepended) pass through here; keep well above the API's turn limit.
+const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 const MAX_EVENTS = 250;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /**

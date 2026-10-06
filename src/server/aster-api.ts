@@ -22,8 +22,9 @@ import { AsterPush } from "./aster-push.js";
 import { containsLikelyProviderSecret, createAsterTools, redactLikelySecrets, assertAsterCellPath } from "./aster-tools.js";
 
 const API_PREFIX = "/api/v1";
-const MAX_BODY_BYTES = 64 * 1024;
-const MAX_USER_TURN_CHARS = 20_000;
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+// Long pasted documents are fine; the model's context window is the practical limit.
+const MAX_USER_TURN_CHARS = 500_000;
 const CLIENT_TURN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const CREATE_IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_APPROVAL_ARG_BYTES = 24 * 1024;

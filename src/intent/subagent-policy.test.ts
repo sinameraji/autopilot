@@ -51,6 +51,18 @@ describe("resolveSubagentGuidance", () => {
     assert.equal(calls, 0);
   });
 
+  it("honors explicit numeric spin-up requests even on light turns and with auto policy", async () => {
+    for (const prompt of [
+      "Spin 3 subagents that say hello world.",
+      "Spin up 3 subagents that say hello world.",
+      "Run 3 workers that say hello world.",
+    ]) {
+      const result = await resolveSubagentGuidance({ prompt, tier: "light", policy: "auto" });
+      assert.equal(result.kind, "explicit-delegate", prompt);
+      assert.equal(allowsSubagentDispatch(result.kind), true);
+    }
+  });
+
   it("honors an explicit request for workers even when automatic policy is off", async () => {
     let calls = 0;
     const result = await resolveSubagentGuidance({
@@ -70,6 +82,7 @@ describe("resolveSubagentGuidance", () => {
       "Do not delegate this task; handle the steps in order.",
       "Never use workers for this change.",
       "Do not delegate this; finish it without agents.",
+      "Don't spin up 3 subagents; do the work here.",
     ]) {
       const result = await resolveSubagentGuidance({
         prompt,

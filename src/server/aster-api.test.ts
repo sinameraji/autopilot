@@ -429,7 +429,7 @@ describe("Aster control-plane API", () => {
       });
       assert.equal(invalid.status, 400);
       const tooLarge = await request(harness, "POST", "/api/v1/conversations", {
-        workspaceId: "default", model: "test/model", extra: "x".repeat(70_000),
+        workspaceId: "default", model: "test/model", extra: "x".repeat(4 * 1024 * 1024 + 1),
       });
       assert.equal(tooLarge.status, 413);
 
@@ -562,6 +562,19 @@ describe("Aster chat/code projects, GitHub, and artifacts", () => {
       const legacy = await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model" });
       assert.equal(legacy.status, 201);
       assert.equal(harness.provisionedProjects.at(-1), undefined);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it("accepts long pasted documents as a turn", async () => {
+    const harness = await createHarness("hang");
+    try {
+      const created = await (await request(harness, "POST", "/api/v1/conversations", { workspaceId: "default", model: "test/model", kind: "chat" })).json() as { conversationId: string };
+      const document = "Section about the product strategy and roadmap. ".repeat(2_100); // ~100k characters
+      const turn = await request(harness, "POST", `/api/v1/conversations/${created.conversationId}/turns`, { clientTurnId: "long-1", text: `Summarize this:\n${document}` });
+      assert.equal(turn.status, 202);
+      assert.equal(harness.turns.at(-1)!.userText.length > 100_000, true);
     } finally {
       await harness.close();
     }

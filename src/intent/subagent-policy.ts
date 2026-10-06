@@ -28,8 +28,8 @@ export interface ResolveSubagentGuidanceOptions {
   ask?: (apiKey: string, question: JevQuestion, options?: AskJevOptions) => Promise<JevAnswer>;
 }
 
-const EXPLICIT_NO = /\b(?:do\s+not|don't|dont|never|avoid|without|no)\s+(?:(?:(?:want\s+to\s+)?(?:use|using|spawn|call|ask|start|launch|skip))\s+)?(?:(?:any|the|a)\s+)?(?:sub[- ]?agents?|agents?|workers?)\b|\b(?:do\s+not|don't|dont|never|avoid|without|no)\s+delegat(?:e|ion|ing)\b|\bwork\s+sequentially\b/i;
-const EXPLICIT_YES = /\b(?:use|spawn|call|start|launch|ask|send|delegate\s+to)\s+(?:(?:some|several|multiple|parallel)\s+)?(?:sub[- ]?agents?|agents?|workers?)\b|\b(?:parallelize|split)\b.{0,50}\b(?:agents?|workers?|subtasks?)\b/i;
+const EXPLICIT_NO = /\b(?:do\s+not|don't|dont|never|avoid|without|no)\s+(?:(?:(?:want\s+to\s+)?(?:use|using|spawn|call|ask|start|launch|skip|run|spin(?:\s+up)?))\s+)?(?:(?:any|the|a|some|several|multiple|parallel|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:sub[- ]?agents?|agents?|workers?)\b|\b(?:do\s+not|don't|dont|never|avoid|without|no)\s+delegat(?:e|ion|ing)\b|\bwork\s+sequentially\b/i;
+const EXPLICIT_YES = /\b(?:use|spawn|call|start|launch|ask|send|run|spin(?:\s+up)?|delegate\s+to)\s+(?:(?:some|several|multiple|parallel|\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+)?(?:sub[- ]?agents?|agents?|workers?)\b|\b(?:parallelize|split)\b.{0,50}\b(?:agents?|workers?|subtasks?)\b/i;
 const SEQUENTIAL_DEPENDENCY = /\b(?:one\s+at\s+a\s+time|sequentially|in\s+sequence|in\s+dependency\s+order|tightly\s+coupled|same\s+(?:file|function|module)|first\b.{0,80}\bbefore\b|before\b.{0,80}\bthen\b|step[- ]by[- ]step)\b/i;
 const CLEAR_PARALLEL = /\b(?:independent\s+(?:research|tasks?|questions?|work)|in\s+parallel|parallel\s+agents?|separately\s+investigate)\b/i;
 const AMBIGUOUS_CANDIDATE = /\b(?:research|investigat\w*|audit|compare|contrast|review|comprehensive|across\s+(?:the\s+)?(?:codebase|repo|repository)|entire\s+(?:codebase|repo|repository)|multiple\s+(?:systems|modules|approaches|sources))\b/i;
