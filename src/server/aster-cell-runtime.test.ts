@@ -23,6 +23,7 @@ interface FakeCellState {
   started: number;
   modelSwitches?: string[];
   commands?: string[];
+  writeSizes?: number[];
   activeRunId?: string | null;
 }
 
@@ -31,6 +32,19 @@ function fakeSandbox(state: FakeCellState) {
     (state.commands ??= []).push(command);
     if (command.startsWith("test -f ")) {
       return { exitCode: state.files.has(command.slice("test -f ".length)) ? 0 : 1, stdout: "", stderr: "", success: true };
+    }
+    if (command.startsWith("cat ") && command.includes(" | base64 -d > ")) {
+      const [partList, destination] = command.slice("cat ".length).split(" | base64 -d > ");
+      const partPaths = partList!.split("'").map((path) => path.trim()).filter(Boolean);
+      const target = destination!.split("'")[1]!;
+      const encoded = partPaths.map((path) => state.files.get(path) ?? "").join("");
+      state.files.set(target, Buffer.from(encoded, "base64").toString("utf8"));
+      return { exitCode: 0, stdout: "", stderr: "", success: true };
+    }
+    if (command.startsWith("rm -rf ")) {
+      const directory = command.slice("rm -rf ".length).split("'")[1]!;
+      for (const path of state.files.keys()) if (path.startsWith(`${directory}/`)) state.files.delete(path);
+      return { exitCode: 0, stdout: "", stderr: "", success: true };
     }
     if (command.startsWith(CONTROL_PREFIX)) {
       const requestId = command.trim().split(" ").pop()!;
@@ -85,7 +99,13 @@ function fakeSandbox(state: FakeCellState) {
   return {
     getInfo: () => ({ id: state.id }),
     exec,
-    writeFile: async (path: string, content: string) => { state.files.set(path, content); },
+    writeFile: async (path: string, content: string) => {
+      const size = Buffer.byteLength(content, "utf8");
+      (state.writeSizes ??= []).push(size);
+      // Mirror the Hotcell container driver: oversized payloads become a too-long shell argument.
+      if (size > 96 * 1024) throw new Error("E2BIG: argument list too long");
+      state.files.set(path, content);
+    },
     readFile: async (path: string) => {
       const value = state.files.get(path);
       if (value === undefined) throw new Error("not found");
@@ -254,6 +274,26 @@ describe("Aster Hotcell runtime", () => {
     assert.ok(turn.events.some((event) => event.type === "assistant.delta"));
     assert.deepEqual(turn.finished, ["completed"]);
     assert.deepEqual(turn.cursors, [1, 2]);
+  });
+
+  it("sends 150k prompts through bounded Hotcell control-file writes", async () => {
+    const cells = new Map<string, FakeCellState>();
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), { archiveWorkspace: async () => "QUJD", pollIntervalMs: 5 });
+    const { cellId } = await runtime.provisionConversation({
+      conversationId: crypto.randomUUID(), sessionId: "s-1", cellName: "aster-1", workspaceId: "default", workspaceRoot: "/tmp/repo",
+      model: "test/model", allowCreate: true, onCellCreated: () => {},
+    });
+    const userText = "Quarterly \u2014 r\u00e9sultats \u4e2d\u6587 \u{1F4C4}\n".repeat(6_000);
+    const turn = fakeTurn({ cellId, userText });
+    runtime.startTurn(turn);
+    await waitFor(() => turn.finished.length > 0);
+
+    const state = [...cells.values()][0]!;
+    assert.equal(state.prompts.at(-1)?.message, userText);
+    assert.deepEqual(turn.finished, ["completed"]);
+    assert.ok(state.writeSizes?.length);
+    assert.ok(Math.max(...state.writeSizes!) <= 32 * 1024);
+    assert.ok(![...state.files.keys()].some((path) => path.includes(".parts/")));
   });
 
   it("cancels an active turn with an in-cell abort and completes pause/resume/destroy through the provider", async () => {

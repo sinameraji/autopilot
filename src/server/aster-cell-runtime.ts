@@ -310,7 +310,7 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
       const cell = await this.provider.getCell(cellId);
       if (turn.memory) {
         await cell.mkdir(CELL_STATE_DIR, { parents: true });
-        await cell.writeFile(MEMORY_FILE, turn.memory.snapshot, { mode: "0600" });
+        await writeCellFileChunked(cell, MEMORY_FILE, turn.memory.snapshot);
       }
       const note = [await this.readNotes(cell), turn.memory?.note ?? ""].filter(Boolean).join("\n\n");
       const message = note ? `${note}\n\n${turn.userText}` : turn.userText;
@@ -599,7 +599,7 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
   private async control(cell: Sandbox, method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
     const requestId = randomUUID();
     await cell.mkdir(CELL_CONTROL_DIR, { parents: true });
-    await cell.writeFile(`${CELL_CONTROL_DIR}/${requestId}.json`, JSON.stringify({ method, path, body }), { mode: "0600" });
+    await writeCellFileChunked(cell, `${CELL_CONTROL_DIR}/${requestId}.json`, JSON.stringify({ method, path, body }));
     const result = await cell.exec(`${CONTROL_RUNNER} ${requestId}`);
     if (result.exitCode !== 0) throw new Error("cell_control_failed");
     const parsed = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}") as { error?: string };
@@ -610,6 +610,34 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
   private async controlById(cellId: string, method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
     const cell = await this.provider.getCell(cellId);
     return this.control(cell, method, path, body);
+  }
+}
+
+// Keep control payload writes small: the Hotcell container driver base64-encodes file contents in a shell argument.
+const CELL_FILE_WRITE_CHUNK_CHARS = 32 * 1024;
+
+async function writeCellFileChunked(cell: Sandbox, path: string, content: string): Promise<void> {
+  if (Buffer.byteLength(content, "utf8") <= CELL_FILE_WRITE_CHUNK_CHARS) {
+    await cell.writeFile(path, content, { mode: "0600" });
+    return;
+  }
+
+  const partsDir = `${path}.parts`;
+  const encoded = Buffer.from(content, "utf8").toString("base64");
+  const partPaths: string[] = [];
+  await cell.mkdir(partsDir, { parents: true });
+  try {
+    for (let offset = 0, index = 0; offset < encoded.length; offset += CELL_FILE_WRITE_CHUNK_CHARS, index++) {
+      const partPath = `${partsDir}/${String(index).padStart(6, "0")}.b64`;
+      await cell.writeFile(partPath, encoded.slice(offset, offset + CELL_FILE_WRITE_CHUNK_CHARS), { mode: "0600" });
+      partPaths.push(partPath);
+    }
+    const result = await cell.exec(
+      `cat ${partPaths.map(shellQuote).join(" ")} | base64 -d > ${shellQuote(path)} && chmod 600 ${shellQuote(path)}`,
+    );
+    if (result.exitCode !== 0) throw new Error("cell_control_failed");
+  } finally {
+    await cell.exec(`rm -rf ${shellQuote(partsDir)}`).catch(() => {});
   }
 }
 
