@@ -9,6 +9,8 @@ import type { HotcellProvider } from "./hotcell-provider.js";
 import type { AsterTurnStart } from "./aster-api.js";
 
 const CONTROL_PREFIX = "node --input-type=module";
+const INSTALLED_RUNTIME_PACKAGE = "/opt/autopilot/node_modules/autopilot-ai/package.json";
+const CELL_RUNTIME_SDK_ENTRY = "/opt/autopilot/node_modules/autopilot-ai/dist/sdk/index.js";
 
 interface FakeCellState {
   id: string;
@@ -116,6 +118,10 @@ function fakeSandbox(state: FakeCellState) {
     startProcess: async (command: string) => {
       state.processes.push({ command, status: "running" });
       return { procId: `proc-${state.processes.length}`, pid: 1, command, status: "running" as const, exitCode: null, startedAt: "", logPath: "" };
+    },
+    killProcess: async (procId: string) => {
+      const index = Number(procId.slice("proc-".length));
+      if (state.processes[index]) state.processes[index]!.status = "exited";
     },
     destroy: async () => { state.destroyed = true; },
     pause: async () => { state.paused++; },
@@ -255,6 +261,40 @@ describe("Aster Hotcell runtime", () => {
     assert.deepEqual(state.sessions, ["s-1", "s-1"]); // new_session is idempotent in the bridge
     assert.equal(state.processes.length, 1);
     assert.ok(!state.prompts.some((prompt) => prompt.message.length > 0)); // provisioning never sends prompts
+  });
+
+  it("refreshes an older cell runtime locally and restarts its bridge without npm", async () => {
+    const conversationId = crypto.randomUUID();
+    const state = emptyCellState("old-cell");
+    state.files.set(INSTALLED_RUNTIME_PACKAGE, JSON.stringify({ name: "autopilot-ai", version: "1.19.0-aster.11" }));
+    state.files.set(CELL_RUNTIME_SDK_ENTRY, "old bundled SDK");
+    const cells = new Map([[conversationId, state]]);
+    const sdkBundle = "updated runtime — 📦\n".repeat(8_000);
+    const expectedVersion = "1.19.2-aster.13";
+    const runtime = new AsterHotcellRuntime(fakeProvider(cells), {
+      autopilotPackageSpec: `autopilot-ai@${expectedVersion}`,
+      cellRuntimeSdkBundle: sdkBundle,
+      archiveWorkspace: async () => "QUJD",
+    });
+
+    const result = await runtime.provisionConversation({
+      conversationId,
+      sessionId: "existing-session",
+      cellName: "old-cell",
+      workspaceId: "default",
+      workspaceRoot: "/tmp/repo",
+      model: "test/model",
+      allowCreate: false,
+      onCellCreated: () => {},
+    });
+
+    assert.equal(result.cellId, state.id);
+    assert.equal(JSON.parse(state.files.get(INSTALLED_RUNTIME_PACKAGE)!).version, expectedVersion);
+    assert.equal(state.files.get(CELL_RUNTIME_SDK_ENTRY), sdkBundle);
+    assert.equal(state.processes[0]?.status, "exited");
+    assert.equal(state.processes.filter((process) => process.status === "running" && process.command.includes("startAsterCellBridge")).length, 1);
+    assert.ok(!state.commands?.some((command) => command.includes("npm install")));
+    assert.ok(state.writeSizes?.every((size) => size <= 32 * 1024));
   });
 
   it("maps cell events to Aster events, advances the cursor, and finishes completed turns", async () => {
