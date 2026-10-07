@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.19.3](https://github.com/sinameraji/autopilot/compare/v1.19.2...v1.19.3) (2026-10-07)
+
+
+### Bug Fixes
+
+* **aster:** migrate existing Hotcell runtime bundles ([710e5d5](https://github.com/sinameraji/autopilot/commit/710e5d514b7f0aa462c4d4e1784ab73e055b95de))
+
 ## [1.19.2](https://github.com/sinameraji/autopilot/compare/v1.19.1...v1.19.2) (2026-10-06)
 
 
