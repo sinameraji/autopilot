@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { Sandbox } from "@hotcell/sdk";
@@ -12,7 +13,9 @@ const execFileAsync = promisify(execFile);
 const CELL_WORKSPACE = "/workspace";
 const CELL_STATE_DIR = "/workspace/.aster";
 const CHECKPOINT_MESSAGE_FILE = `${CELL_STATE_DIR}/checkpoint-message`;
-const INSTALLED_RUNTIME_PACKAGE = "/opt/autopilot/node_modules/autopilot-ai/package.json";
+const CELL_RUNTIME_DIR = "/opt/autopilot/node_modules/autopilot-ai";
+const INSTALLED_RUNTIME_PACKAGE = `${CELL_RUNTIME_DIR}/package.json`;
+const CELL_RUNTIME_SDK_ENTRY = `${CELL_RUNTIME_DIR}/dist/sdk/index.js`;
 const NOTES_FILE = `${CELL_STATE_DIR}/pending-notes`;
 const MEMORY_FILE = `${CELL_STATE_DIR}/memory.md`;
 const MEMORY_EXTRACTION_TIMEOUT_MS = 15_000;
@@ -45,6 +48,8 @@ const EVENT_POLL_MS = 400;
 export interface AsterHotcellRuntimeOptions {
   /** npm spec installed inside the cell; defaults to the currently running server version. */
   autopilotPackageSpec?: string;
+  /** Injected for tests: current server's bundled cell SDK. */
+  cellRuntimeSdkBundle?: string;
   /** Injected for tests: archive a workspace Git tree as base64 tar. */
   archiveWorkspace?: (workspaceRoot: string) => Promise<string>;
   pollIntervalMs?: number;
@@ -97,6 +102,7 @@ export interface AsterCheckpoint {
  */
 export class AsterHotcellRuntime implements AsterApiRuntime {
   private readonly packageSpec: string;
+  private readonly cellRuntimeSdkBundle: string | undefined;
   private readonly archiveWorkspace: (workspaceRoot: string) => Promise<string>;
   private readonly pollIntervalMs: number;
   private readonly healthTimeoutMs: number;
@@ -107,6 +113,7 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
     options: AsterHotcellRuntimeOptions = {},
   ) {
     this.packageSpec = options.autopilotPackageSpec ?? `autopilot-ai@${getAppVersion()}`;
+    this.cellRuntimeSdkBundle = options.cellRuntimeSdkBundle;
     this.archiveWorkspace = options.archiveWorkspace ?? defaultArchiveWorkspace;
     this.pollIntervalMs = options.pollIntervalMs ?? EVENT_POLL_MS;
     this.healthTimeoutMs = options.healthTimeoutMs ?? HEALTH_TIMEOUT_MS;
@@ -568,10 +575,48 @@ export class AsterHotcellRuntime implements AsterApiRuntime {
 
   private async installRuntime(cell: Sandbox): Promise<void> {
     const expectedVersion = /@(\d[^@/]*)$/.exec(this.packageSpec)?.[1];
+    let installed: { version?: string; [key: string]: unknown } | undefined;
     try {
-      const installed = JSON.parse(await cell.readFile(INSTALLED_RUNTIME_PACKAGE)) as { version?: string };
-      if (!expectedVersion || installed.version === expectedVersion) return;
+      installed = JSON.parse(await cell.readFile(INSTALLED_RUNTIME_PACKAGE)) as typeof installed;
+      if (!expectedVersion || installed?.version === expectedVersion) return;
     } catch { /* not installed in this root filesystem */ }
+
+    if (installed && expectedVersion) {
+      // Existing cells keep their writable root filesystem across server/image releases.
+      // Refresh the self-contained bridge bundle from this server instead of asking npm
+      // for a private prerelease that may not exist in the registry.
+      const sdkBundle = this.cellRuntimeSdkBundle ?? await readBundledCellSdkBundle();
+      await cell.mkdir(`${CELL_RUNTIME_DIR}/dist/sdk`, { parents: true });
+      await writeCellFileChunked(cell, CELL_RUNTIME_SDK_ENTRY, sdkBundle);
+
+      // The bridge has already loaded the old bundle into memory. Stop just that idle
+      // process; its durable session state remains on disk and ensureBridge restarts it.
+      const bridge = (await cell.listProcesses()).find(
+        (process) => process.status === "running" && process.command.includes(BRIDGE_MARKER),
+      );
+      if (bridge) {
+        await cell.killProcess(bridge.procId);
+        const deadline = Date.now() + 5_000;
+        for (;;) {
+          const stillRunning = (await cell.listProcesses()).some(
+            (process) => process.procId === bridge.procId && process.status === "running",
+          );
+          if (!stillRunning) break;
+          if (Date.now() >= deadline) throw new Error("cell_runtime_restart_failed");
+          await sleep(50);
+        }
+      }
+
+      // Update the version marker only after the bundle is written and the old bridge
+      // is stopped. If any operation fails, the next request retries the migration.
+      await cell.writeFile(
+        INSTALLED_RUNTIME_PACKAGE,
+        JSON.stringify({ ...installed, version: expectedVersion }),
+        { mode: "0600" },
+      );
+      return;
+    }
+
     const install = await cell.exec(`mkdir -p /opt/autopilot && npm install --prefix /opt/autopilot --no-audit --no-fund ${this.packageSpec}`);
     if (install.exitCode !== 0) throw new Error("cell_runtime_install_failed");
   }
@@ -639,6 +684,17 @@ async function writeCellFileChunked(cell: Sandbox, path: string, content: string
   } finally {
     await cell.exec(`rm -rf ${shellQuote(partsDir)}`).catch(() => {});
   }
+}
+
+async function readBundledCellSdkBundle(): Promise<string> {
+  // In the packed server, index.js and sdk/index.js are siblings under dist/.
+  // The parent candidate also supports running the source module directly.
+  for (const url of [new URL("./sdk/index.js", import.meta.url), new URL("../sdk/index.js", import.meta.url)]) {
+    try {
+      return await readFile(url, "utf8");
+    } catch { /* try the other package layout */ }
+  }
+  throw new Error("cell_runtime_bundle_unavailable");
 }
 
 async function defaultArchiveWorkspace(workspaceRoot: string): Promise<string> {
