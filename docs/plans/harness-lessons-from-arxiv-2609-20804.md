@@ -47,9 +47,28 @@ Findings that transfer:
 | Completion check | `completion-check.ts` asks an external judge ("jev") whether the turn really finished, nudges once. | No paper analogue. Keep; log its decisions (see companion plan). |
 | Matched evaluation | None. No benchmark runner, no trajectory labelling. | This is the biggest gap: every change below is currently unmeasurable. |
 
+### 2.1 Where Autopilot is likely already ahead of the paper's harness
+
+The paper's harness is a minimal research scaffold run non-interactively on locally served models. Several Autopilot design choices address the same problems in ways that are plausibly cheaper, faster, or better in real use. None of these are measured yet either, which is the point of Phase 0. The guiding rule for this plan is **do not make Autopilot worse**: nothing below ships until a matched comparison shows it is not worse on success, cost, and turns.
+
+| Autopilot today | Paper's harness | Why Autopilot's choice is plausibly better |
+| --- | --- | --- |
+| Static/session prompt prefix split (`system-prompt.ts`), `cacheStable` request mode (`loop.ts:430`), old images dropped from requests. | No cache modelling; cost = raw tokens on SGLang. | On OpenRouter frontier models cached prefix tokens dominate cost. The paper's cost arguments against a large tool set and against planning overstate what a cached prefix actually costs. |
+| Rule-based compiled-state compaction by default (`compactMessagesViaArtifacts`): no model call, no latency, structured extraction of files, tasks, failures. | M3 summarization is an extra call to the same model every time it fires. | The paper's own cost win for T4 came from firing summarization less often. Autopilot avoids the call entirely by default. |
+| Structural reduction at write time (`src/tools/reducer.ts`): error-block extraction, consecutive-line dedupe, matches-per-file caps, file outlines; raw archived for `expand_artifact`. | Tail truncation at 24k chars; a noisy log costs 24k tokens on every request until it is stale. | Smaller fresh observations on every request, and the kept part is the informative part. |
+| Stuck detection blocks on the third identical call, one recovery, then stop (`loop.ts:528`). | Reminder at 5, terminate at 8 identical failing calls. | Two to five fewer wasted calls per spin. |
+| Code Mode (`execute_code`) bundles read/grep/glob/bash into one sandboxed program; only `console.log` output enters history. | Bash-only interface for strong models. | Same bundling benefit the paper credits for bash-only's win, without losing structured edit tools, state tracking, or permission previews. |
+| Completion check (`completion-check.ts`): one small external yes/no call at turn end, skipped on light-tier turns. | Planning re-injected every turn, partly to stop weak models ending without an edit. | Targets the paper's main weak-model failure mode (runs ending without an edit) with far less per-turn overhead. |
+| Per-turn intent tiers gate the completion check, subagent delegation, and Code Mode. | One static configuration per run. | This is the paper's own conclusion ("choose components per model, task, budget") applied per turn rather than per benchmark. |
+| Memory, skills, AGENTS.md, LSP, checkpoints, permission prompts with diff previews. | Out of scope. | Most of the paper's failed runs died in Localize; project context and cross-session memory attack exactly that, but single-shot benchmarks cannot reward them. |
+
+Consequences for the phases below: the reducer-cap change in Phase 1 is an experiment with a rollback, not a planned loosening; Phase 3 is demoted to eval-only until measured; and the paper's LLM summarization stays off by default.
+
 ---
 
 ## 3. Proposed changes
+
+Rule for every phase: Autopilot is already good to use, and the paper's results are conditional on model and task. No change below ships as a default without a Phase 0 matched comparison showing it is not worse on success, cost, and turns for the models users actually run. Changes that only add missing substrate (Phase 4) are the exception, since they add information without removing any.
 
 Ordered by expected value per unit of work. Each phase names the files it touches and how we will know it worked.
 
@@ -70,7 +89,7 @@ Goal: fewer `ContextBudgetError`s on small-window models, lower cost on large-wi
 
 1. **Budget-relative thresholds.** Replace the fixed `80_000` token / `12` turn triggers in `shouldCompact` and `PROACTIVE_COMPACTION_CAP_TOKENS` with soft `0.6 × effectiveInputBudget` and hard `0.85 × effectiveInputBudget`. Keep an absolute cap only as a cost control, configurable, default off for ≥128k windows.
 2. **Elision pass before summarization.** New `elideStaleObservations(messages, budget)` in `src/agent/` that, when estimated tokens ≥ soft threshold, walks the *middle region* (everything after the system prompt / first user message and before the verbatim recent window of ≥ 2 turns or 0.3 × budget) and replaces bulky `tool` message bodies with a stub: `[tool output elided: N lines / M chars; re-run the tool if needed]`. Keep the `artifactId` in the stub so `expand_artifact` keeps working for now. Only when tokens are still ≥ hard threshold run the existing summarizer on the oldest middle turns.
-3. **Loosen write-time reduction for fresh observations.** Raise `DEFAULT_REDUCER_CONFIG` caps toward the paper's 24k for `read`/`bash`/`grep` (experiment: 12k first), since stale copies will now be elided anyway. The reducer's structural work (outline, error-block extraction, dedupe) stays. Watch for regressions on small-window models; make caps a function of context window.
+3. **Experiment only: larger caps for fresh observations.** Once stale observations are elided, the reducer's caps for `read`/`bash`/`grep` could in principle rise (the paper used 24k chars). Treat this strictly as a Phase 0 experiment with a rollback: the current structural reduction is plausibly already cheaper per request than the paper's tail truncation (see §2.1), and larger fresh observations cost tokens on every request until elided. Run arms at today's caps, 2×, and 3×; keep the cheapest arm that is not worse on success. The reducer's structural work (outline, error-block extraction, dedupe) stays in every arm. Any cap change must be a function of the model's context window, never a global raise.
 4. **Fire `PreCompact` before elision too** so the hook contract in `src/hooks/types.ts` stays honest.
 5. **Measure recall.** Count `expand_artifact` calls and heuristic `recallArtifacts` hits per run in traces. If after Phase 0 runs they are as rare as the paper's `recall_event` (median 0), remove the heuristic recall injection and keep `expand_artifact` only as an opt-in tool, reclaiming prompt tokens and code.
 
@@ -87,7 +106,10 @@ Success metric (Phase 0 harness): overflow failures → 0 on a 32k arm; cost per
 
 Files: `src/agent/system-prompt.ts`, `src/agent/loop.ts` (request assembly), `src/tools/tasks.ts`, `src/intent/`. Metric: for a strong model, median turns and cost per task drop with no success loss; for a weak model, fraction of runs ending with zero edits drops.
 
-### Phase 3 — Model-dependent tool profiles
+### Phase 3 — Model-dependent tool profiles (eval-only until measured)
+
+Demoted after §2.1. With a cached prompt prefix, the token cost of 28 tool schemas is small, so the paper's cost argument mostly does not transfer. The remaining hypothesis is that a smaller tool set reduces model confusion and round-trips for strong models, and Code Mode may already capture most of that. Build profiles behind an eval-only flag; promote to a user-facing default only if Phase 0 shows a win.
+
 
 1. Introduce named tool profiles in `src/tools/executor.ts` beside `getWorkerTools`: `full` (today's `ALL_TOOLS`), `lean` (bash, read, edit, write, tasks_set, memory_*, subagent, github_create_pr), and `bash-first` (bash, edit, write, tasks_set) for eval only.
 2. Select by model capability: a per-model `toolProfile` hint in `src/models/` (seeded for the frontier models; default `full`) and a user override in config.
@@ -139,5 +161,5 @@ This is the same tooling the companion plan needs to filter and weight traces fo
 | 1 Staged context mgmt | 2–3 days | 0 |
 | 4.1 Post-edit diagnostics, 4.2 read-before-write | 1–2 days | none |
 | 2 Planning | 1–2 days | 0 |
-| 3 Tool profiles | 2 days | 0, 4 |
+| 3 Tool profiles (eval-only) | 2 days | 0, 4; promote only on measured win |
 | 5 Trajectory analytics | 2–3 days | 0 |
